@@ -1,0 +1,9 @@
+# Example: create a custom model from an existing Ollama base (no adapter).
+# Copy this file, edit name/base/system, then: uv run ollama-tools build <file>
+# Copy and edit name/base/system, then build.
+
+name: my-assistant
+base: llama3.2
+system: You are a concise, helpful assistant.
+temperature: 0.7
+num_ctx: 4096

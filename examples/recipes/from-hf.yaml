@@ -1,0 +1,10 @@
+# Example: create an Ollama model from a Hugging Face repo (no local GGUF).
+# Copy and set hf_repo + name, then: uv run ollama-tools build <file>
+# Copy and set hf_repo + name, then build.
+
+name: my-model
+hf_repo: TheBloke/Llama-2-7B-GGUF
+# optional: gguf_file: model-Q4_K_M.gguf
+# optional: revision: main
+temperature: 0.6
+num_ctx: 8192
