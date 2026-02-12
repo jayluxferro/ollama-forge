@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+# Use faster downloads when hf_transfer is installed (pip install hf-transfer)
+def _enable_fast_downloads() -> None:
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") is None:
+        try:
+            import hf_transfer  # noqa: F401
+            os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        except ImportError:
+            pass
 
 
 def list_gguf_files(repo_id: str, revision: str | None = None) -> list[str]:
@@ -48,6 +58,7 @@ def download_gguf(
     local_dir: str | Path | None = None,
 ) -> str:
     """Download a GGUF file from HF. Returns path to the local file."""
+    _enable_fast_downloads()
     from huggingface_hub import hf_hub_download
 
     path = hf_hub_download(
@@ -68,6 +79,7 @@ def download_adapter(
     local_dir: str | Path,
 ) -> Path:
     """Download a full adapter repo (e.g. PEFT) to local_dir. Returns local_dir as Path."""
+    _enable_fast_downloads()
     from huggingface_hub import snapshot_download
 
     snapshot_download(

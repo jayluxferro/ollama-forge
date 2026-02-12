@@ -4,7 +4,12 @@ version = "1.0.0"
 description = "Create, retrain, ablate, and convert models for local Ollama"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["huggingface_hub>=0.20.0", "pyyaml>=6.0", "python-dotenv>=1.0.0"]
+dependencies = [
+    "huggingface_hub>=0.20.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "hf-transfer>=0.1.0",  # fast Hugging Face downloads (auto-enabled)
+]
 
 [project.optional-dependencies]
 abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25"]

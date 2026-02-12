@@ -51,3 +51,19 @@ ollama run my-model
 - `--system "..."`, `--temperature`, `--num_ctx`, `--top_p`, `--repeat_penalty` — Modelfile parameters.
 
 See [Quantization](Quantization) for quant types and trade-offs.
+
+---
+
+## Clean up Hugging Face cache
+
+Models downloaded by `fetch` and `fetch-adapter` are stored in the Hugging Face Hub cache (e.g. `~/.cache/huggingface/hub`). To list and remove them:
+
+```bash
+# List cached repos and sizes
+uv run ollama-tools hf-cache ls
+
+# Remove one or more repos (frees disk space)
+uv run ollama-tools hf-cache rm TheBloke/Llama-2-7B-GGUF
+uv run ollama-tools hf-cache rm repo1 repo2 --yes   # skip confirmation
+uv run ollama-tools hf-cache rm repo1 --dry-run     # preview only
+```

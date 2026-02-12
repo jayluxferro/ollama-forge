@@ -1335,6 +1335,81 @@ def _cmd_adapters_recommend(
     return _cmd_fetch_adapter(parser, fake)
 
 
+def _cmd_hf_cache_ls(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """List Hugging Face Hub cache (repos and sizes)."""
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError:
+        print_actionable_error(
+            "huggingface_hub is required for hf-cache",
+            next_steps=["Run: uv sync"],
+        )
+        return 1
+    try:
+        cache_info = scan_cache_dir()
+    except Exception as e:
+        print(f"Error scanning cache: {e}", file=sys.stderr)
+        return 1
+    verbosity = 1 if getattr(args, "revisions", False) else 0
+    print(cache_info.export_as_table(verbosity=verbosity))
+    return 0
+
+
+def _cmd_hf_cache_rm(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Remove one or more repos from the Hugging Face Hub cache."""
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError:
+        print_actionable_error(
+            "huggingface_hub is required for hf-cache",
+            next_steps=["Run: uv sync"],
+        )
+        return 1
+    repo_ids = getattr(args, "repo_id", None)
+    if isinstance(repo_ids, str):
+        repo_ids = [repo_ids]
+    repo_ids = repo_ids or []
+    if not repo_ids:
+        print("Error: provide at least one repo_id (e.g. TheBloke/Llama-2-7B-GGUF)", file=sys.stderr)
+        return 1
+    dry_run = getattr(args, "dry_run", False)
+    yes = getattr(args, "yes", False)
+    try:
+        cache_info = scan_cache_dir()
+    except Exception as e:
+        print(f"Error scanning cache: {e}", file=sys.stderr)
+        return 1
+    revisions_to_delete: list[str] = []
+    for repo in cache_info.repos:
+        # repo.repo_id is e.g. "TheBloke/Llama-2-7B-GGUF" or "bert-base-cased"
+        if repo.repo_id in repo_ids:
+            for rev in repo.revisions:
+                revisions_to_delete.append(rev.commit_hash)
+    if not revisions_to_delete:
+        print("No matching repos found in cache.", file=sys.stderr)
+        return 1
+    strategy = cache_info.delete_revisions(*revisions_to_delete)
+    print(f"About to free {strategy.expected_freed_size_str}.", file=sys.stderr)
+    if dry_run:
+        print("Dry run: no files deleted.", file=sys.stderr)
+        return 0
+    if not yes:
+        try:
+            answer = input("Proceed? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer != "y":
+            print("Cancelled.", file=sys.stderr)
+            return 0
+    strategy.execute()
+    print(f"Freed {strategy.expected_freed_size_str}.", file=sys.stderr)
+    return 0
+
+
 def _cmd_downsize_pipeline(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
@@ -2234,6 +2309,32 @@ def main() -> int:
     )
     p_adapters_recommend.set_defaults(handler=_cmd_adapters_recommend)
 
+    # hf-cache (list / remove Hugging Face Hub cache)
+    p_hf_cache = subparsers.add_parser(
+        "hf-cache",
+        help="List or remove Hugging Face Hub local cache (models downloaded by fetch/fetch-adapter)",
+    )
+    hf_cache_sub = p_hf_cache.add_subparsers(dest="hf_cache_command")
+    p_hf_cache_ls = hf_cache_sub.add_parser("ls", help="List cached repos and sizes")
+    p_hf_cache_ls.add_argument(
+        "--revisions",
+        action="store_true",
+        help="Show one row per revision (default: one row per repo)",
+    )
+    p_hf_cache_ls.set_defaults(handler=_cmd_hf_cache_ls)
+    p_hf_cache_rm = hf_cache_sub.add_parser(
+        "rm",
+        help="Remove repo(s) from cache (frees disk space)",
+    )
+    p_hf_cache_rm.add_argument(
+        "repo_id",
+        nargs="+",
+        help="Repo id(s) to remove (e.g. TheBloke/Llama-2-7B-GGUF)",
+    )
+    p_hf_cache_rm.add_argument("--dry-run", action="store_true", help="Show what would be freed, do not delete")
+    p_hf_cache_rm.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    p_hf_cache_rm.set_defaults(handler=_cmd_hf_cache_rm)
+
     # downsize (distillation: large → small model)
     p_downsize = subparsers.add_parser(
         "downsize",
@@ -2282,6 +2383,9 @@ def main() -> int:
         return 0
     if parsed.command == "downsize" and not getattr(parsed, "downsize_command", None):
         _cmd_downsize_pipeline(parser, parsed)
+        return 0
+    if parsed.command == "hf-cache" and not getattr(parsed, "hf_cache_command", None):
+        p_hf_cache.print_help()
         return 0
     handler = getattr(parsed, "handler", None)
     if handler is None:

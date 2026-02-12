@@ -62,6 +62,8 @@ Doctor reports:
 - **llama.cpp finetune** — optional; for training pipeline
 - **llama.cpp quantize** — optional; for `convert --quantize` (accepts `quantize` or `llama-quantize` on PATH)
 
+**Hugging Face downloads** use the fast backend (`hf-transfer`) by default.
+
 ---
 
 ## Optional: llama.cpp (finetune & quantize)

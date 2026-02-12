@@ -27,6 +27,7 @@ Full list of commands and what they do. Run `ollama-tools --help` for the latest
 | **abliterate** | Refusal removal (compute-dir; then use Sumandora or export to GGUF) |
 | **adapters** | Find and use adapters (search, recommend) |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
+| **hf-cache** | List or remove Hugging Face Hub local cache (ls, rm) |
 
 ---
 
@@ -53,6 +54,8 @@ Full list of commands and what they do. Run `ollama-tools --help` for the latest
 | Refusal removal | `abliterate compute-dir` |
 | Downsize (distillation) | `downsize --teacher <hf_id> --student <hf_id> --name <name>` |
 | One-file config build | `build recipe.yaml` |
+| List HF cache | `hf-cache ls` |
+| Remove HF cache repo(s) | `hf-cache rm <repo_id> [repo_id ...] [--yes]` |
 
 ---
 
