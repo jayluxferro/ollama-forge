@@ -60,6 +60,7 @@ checkpoints/
 *.gguf
 .cursor/
 git-push
+llama.cpp/
 
 # Secrets / env
 .env
