@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from ollama_tools.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
 from ollama_tools.modelfile import build_modelfile
 from ollama_tools.recipe import load_recipe
@@ -29,6 +31,17 @@ from ollama_tools.training_data import (
 def _which_quantize() -> str | None:
     """Resolve llama.cpp quantize binary (quantize or llama-quantize)."""
     return shutil.which("quantize") or shutil.which("llama-quantize")
+
+
+def _hf_token_available() -> bool:
+    """True if HF token is set via env, .env, or huggingface-cli login."""
+    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        return True
+    try:
+        from huggingface_hub import get_token
+        return bool(get_token())
+    except Exception:
+        return False
 
 
 _QUICKSTART_PROFILES: dict[str, dict[str, float | int | str]] = {
@@ -900,7 +913,7 @@ def _cmd_check(
     except ImportError:
         hf_ok = False
     ok = check_item("huggingface_hub", hf_ok, "run: uv sync") and ok
-    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+    if _hf_token_available():
         print("HF_TOKEN: set (for gated/private repos)")
     else:
         print("HF_TOKEN: not set (optional; needed for gated/private Hugging Face)")
@@ -963,9 +976,7 @@ def _env_status() -> dict[str, bool]:
         abliterate_ok = False
     finetune = bool(shutil.which("finetune") or shutil.which("llama-finetune"))
     quantize = bool(_which_quantize())
-    hf_token_set = bool(
-        os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    )
+    hf_token_set = _hf_token_available()
     return {
         "ollama": bool(shutil.which("ollama")),
         "huggingface_hub": hf_ok,
@@ -1446,7 +1457,14 @@ def _cmd_abliterate_compute_dir(
         return 1
 
 
+def _load_env() -> None:
+    """Load .env from ~/.env then cwd. Never override existing env (e.g. export in shell)."""
+    load_dotenv(Path.home() / ".env")
+    load_dotenv(override=False)  # do not overwrite shell exports
+
+
 def main() -> int:
+    _load_env()
     parser = argparse.ArgumentParser(
         prog="ollama-tools",
         description="Create, retrain, ablate, and convert models for local Ollama.",
