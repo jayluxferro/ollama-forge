@@ -1,6 +1,7 @@
 """CLI entrypoint for ollama-tools."""
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -13,6 +14,7 @@ from ollama_tools.recipe import load_recipe
 from ollama_tools.run_helpers import (
     check_item,
     get_jsonl_paths_or_exit,
+    print_actionable_error,
     require_ollama,
     run_cmd,
     run_ollama_create,
@@ -24,6 +26,49 @@ from ollama_tools.training_data import (
 )
 
 
+def _which_quantize() -> str | None:
+    """Resolve llama.cpp quantize binary (quantize or llama-quantize)."""
+    return shutil.which("quantize") or shutil.which("llama-quantize")
+
+
+_QUICKSTART_PROFILES: dict[str, dict[str, float | int | str]] = {
+    "fast": {
+        "quant": "Q4_0",
+        "temperature": 0.8,
+        "num_ctx": 2048,
+        "top_p": 0.9,
+        "repeat_penalty": 1.05,
+    },
+    "balanced": {
+        "quant": "Q4_K_M",
+        "temperature": 0.7,
+        "num_ctx": 4096,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1,
+    },
+    "quality": {
+        "quant": "Q8_0",
+        "temperature": 0.6,
+        "num_ctx": 8192,
+        "top_p": 0.95,
+        "repeat_penalty": 1.1,
+    },
+    "low-vram": {
+        "quant": "Q4_0",
+        "temperature": 0.7,
+        "num_ctx": 2048,
+        "top_p": 0.9,
+        "repeat_penalty": 1.1,
+    },
+}
+
+_QUICKSTART_TASK_SYSTEMS: dict[str, str] = {
+    "chat": "You are a helpful and concise assistant.",
+    "coding": "You are a senior coding assistant. Provide practical, safe code solutions.",
+    "creative": "You are a creative assistant. Write vivid, engaging, and original responses.",
+}
+
+
 def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     exit_code = require_ollama()
     if exit_code is not None:
@@ -33,6 +78,8 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
         system=args.system,
         temperature=args.temperature,
         num_ctx=args.num_ctx,
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
         adapter=args.adapter,
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
@@ -53,10 +100,13 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         else:
             gguf_files = list_gguf_files(args.repo_id, revision=args.revision)
             if not gguf_files:
-                print(
-                    f"No .gguf files found in {args.repo_id}. "
-                    "Use a repo that has GGUF files, or convert the model first.",
-                    file=sys.stderr,
+                print_actionable_error(
+                    f"no .gguf files found in {args.repo_id}",
+                    next_steps=[
+                        "Use a repo that already includes GGUF files",
+                        "Or convert from HF to GGUF first, then run: "
+                        "ollama-tools convert --gguf <path> --name <name>",
+                    ],
                 )
                 return 1
             chosen = pick_one_gguf(gguf_files, prefer_quant=getattr(args, "quant", None))
@@ -69,7 +119,15 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             gguf_path = download_gguf(args.repo_id, chosen, revision=args.revision)
         print(f"Downloaded to {gguf_path}", file=sys.stderr)
     except Exception as e:
-        print(f"Error downloading: {e}", file=sys.stderr)
+        print_actionable_error(
+            "download failed",
+            cause=str(e),
+            next_steps=[
+                "If the repo is gated/private, run: huggingface-cli login",
+                "Or set: HF_TOKEN=<your_token>",
+                "Try: ollama-tools check",
+            ],
+        )
         return 1
     # Run convert with the downloaded path
     fake = argparse.Namespace(
@@ -78,9 +136,422 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         system=args.system,
         temperature=args.temperature,
         num_ctx=args.num_ctx,
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
         out_modelfile=args.out_modelfile,
     )
     return _cmd_convert(parser, fake)
+
+
+def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Beginner one-command path: fetch a default GGUF and create an Ollama model."""
+    repo_id = getattr(args, "repo_id", "TheBloke/Llama-2-7B-GGUF")
+    name = getattr(args, "name", "my-model")
+    profile = getattr(args, "profile", "balanced")
+    cfg = _QUICKSTART_PROFILES[profile]
+    quant = getattr(args, "quant", None) or str(cfg["quant"])
+    temperature = (
+        getattr(args, "temperature", None)
+        if getattr(args, "temperature", None) is not None
+        else float(cfg["temperature"])
+    )
+    num_ctx = (
+        getattr(args, "num_ctx", None)
+        if getattr(args, "num_ctx", None) is not None
+        else int(cfg["num_ctx"])
+    )
+    top_p = (
+        getattr(args, "top_p", None)
+        if getattr(args, "top_p", None) is not None
+        else float(cfg["top_p"])
+    )
+    repeat_penalty = (
+        getattr(args, "repeat_penalty", None)
+        if getattr(args, "repeat_penalty", None) is not None
+        else float(cfg["repeat_penalty"])
+    )
+    task = getattr(args, "task", None)
+    system = getattr(args, "system", None)
+    system_source = "custom"
+    if system is None and task in _QUICKSTART_TASK_SYSTEMS:
+        system = _QUICKSTART_TASK_SYSTEMS[task]
+        system_source = f"task:{task}"
+    elif system is None:
+        system_source = "none"
+    if not getattr(args, "json", False):
+        print("Quickstart plan:", file=sys.stderr)
+        print(f"  model name: {name}", file=sys.stderr)
+        print(f"  repo: {repo_id}@{getattr(args, 'revision', 'main')}", file=sys.stderr)
+        print(f"  profile/task: {profile} / {task or 'none'}", file=sys.stderr)
+        print(
+            f"  quant/temp/ctx/top_p/repeat: {quant} / {temperature} / "
+            f"{num_ctx} / {top_p} / {repeat_penalty}",
+            file=sys.stderr,
+        )
+        print(f"  system prompt source: {system_source}", file=sys.stderr)
+    if getattr(args, "plan", False):
+        action = f"ollama-tools fetch {repo_id} --name {name} --quant {quant}"
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "route": "quickstart",
+                        "source": repo_id,
+                        "name": name,
+                        "profile": profile,
+                        "task": task,
+                        "revision": getattr(args, "revision", "main"),
+                        "quant": quant,
+                        "temperature": temperature,
+                        "num_ctx": num_ctx,
+                        "top_p": top_p,
+                        "repeat_penalty": repeat_penalty,
+                        "system_source": system_source,
+                        "action": action,
+                    }
+                )
+            )
+        else:
+            print(f"  action: {action}", file=sys.stderr)
+        return 0
+    fake = argparse.Namespace(
+        repo_id=repo_id,
+        name=name,
+        gguf_file=None,
+        quant=quant,
+        revision=getattr(args, "revision", "main"),
+        system=system,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        top_p=top_p,
+        repeat_penalty=repeat_penalty,
+        out_modelfile=getattr(args, "out_modelfile", None),
+    )
+    code = _cmd_fetch(parser, fake)
+    if code == 0:
+        print(f"Done. Run your model with: ollama run {name}")
+    return code
+
+
+def _cmd_start(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Alias for beginner defaults (same as quickstart)."""
+    fake = argparse.Namespace(
+        name=getattr(args, "name", "my-model"),
+        profile=getattr(args, "profile", "balanced"),
+        repo_id=getattr(args, "repo_id", "TheBloke/Llama-2-7B-GGUF"),
+        quant=getattr(args, "quant", None),
+        revision=getattr(args, "revision", "main"),
+        task=getattr(args, "task", None),
+        system=getattr(args, "system", None),
+        temperature=getattr(args, "temperature", None),
+        num_ctx=getattr(args, "num_ctx", None),
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
+        out_modelfile=getattr(args, "out_modelfile", None),
+    )
+    return _cmd_quickstart(parser, fake)
+
+
+def _cmd_plan_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Plan wrapper for quickstart."""
+    fake = argparse.Namespace(
+        name=args.name,
+        profile=args.profile,
+        repo_id=args.repo_id,
+        quant=args.quant,
+        revision=args.revision,
+        task=args.task,
+        system=args.system,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        top_p=args.top_p,
+        repeat_penalty=args.repeat_penalty,
+        out_modelfile=args.out_modelfile,
+        plan=True,
+        json=getattr(args, "json", False),
+    )
+    return _cmd_quickstart(parser, fake)
+
+
+def _cmd_plan_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Plan wrapper for auto routing."""
+    fake = argparse.Namespace(
+        source=args.source,
+        name=args.name,
+        system=args.system,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        top_p=args.top_p,
+        repeat_penalty=args.repeat_penalty,
+        base=args.base,
+        adapter=args.adapter,
+        output=args.output,
+        gguf_file=args.gguf_file,
+        quant=args.quant,
+        quantize=args.quantize,
+        revision=args.revision,
+        no_prompt=args.no_prompt,
+        out_modelfile=args.out_modelfile,
+        plan=True,
+        json=getattr(args, "json", False),
+    )
+    return _cmd_auto(parser, fake)
+
+
+def _cmd_plan_doctor_fix(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Plan wrapper for doctor --fix."""
+    fake = argparse.Namespace(
+        fix=True,
+        plan=True,
+        fix_llama_cpp=args.fix_llama_cpp,
+        llama_cpp_dir=args.llama_cpp_dir,
+        json=getattr(args, "json", False),
+    )
+    return _cmd_doctor(parser, fake)
+
+
+def _cmd_plan_adapters_apply(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Plan wrapper for adapters recommend --apply."""
+    fake = argparse.Namespace(
+        base=args.base,
+        query=args.query,
+        limit=args.limit,
+        apply=True,
+        plan=True,
+        name=args.name,
+        revision=args.revision,
+        output=args.output,
+        system=args.system,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        top_p=args.top_p,
+        repeat_penalty=args.repeat_penalty,
+        out_modelfile=args.out_modelfile,
+        json=getattr(args, "json", False),
+    )
+    return _cmd_adapters_recommend(parser, fake)
+
+
+def _detect_auto_source(source: str) -> str:
+    """
+    Detect source type for auto workflow.
+    Returns one of: recipe, gguf, local_dir, hf_repo, base.
+    """
+    p = Path(source)
+    if p.is_dir():
+        return "local_dir"
+    suffix = p.suffix.lower()
+    if suffix in (".yaml", ".yml", ".json"):
+        return "recipe"
+    if suffix == ".gguf":
+        return "gguf"
+    if "/" in source:
+        return "hf_repo"
+    return "base"
+
+
+def _prompt_with_default(prompt: str, default: str) -> str:
+    """Prompt in interactive terminals; return default when blank or non-interactive."""
+    if not sys.stdin.isatty():
+        return default
+    try:
+        value = input(f"{prompt} [{default}]: ").strip()
+    except EOFError:
+        return default
+    return value or default
+
+
+def _is_local_adapter_dir(path: Path) -> bool:
+    """Heuristic: detect common adapter artifact files in a local directory."""
+    if not path.is_dir():
+        return False
+    return any(
+        (path / filename).exists()
+        for filename in (
+            "adapter_config.json",
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+        )
+    )
+
+
+def _repo_looks_like_adapter(repo_id: str, revision: str) -> bool:
+    """Heuristic: detect adapter-like HF repos by file names."""
+    try:
+        from huggingface_hub import list_repo_files
+    except ImportError:
+        return False
+    try:
+        files = list_repo_files(repo_id, revision=revision or "main")
+    except Exception:
+        return False
+    names = {Path(f).name for f in files}
+    has_adapter_marker = bool(
+        {"adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"} & names
+    )
+    has_gguf = any(str(f).lower().endswith(".gguf") for f in files)
+    return has_adapter_marker and not has_gguf
+
+
+def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Auto route source to build/fetch/convert/create-from-base."""
+    source = args.source
+    source_type = _detect_auto_source(source)
+    prompt_enabled = sys.stdin.isatty() and not getattr(args, "no_prompt", False)
+    plan_only = getattr(args, "plan", False)
+
+    def maybe_plan(route: str, detail: str) -> bool:
+        if not plan_only:
+            return False
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "route": route,
+                        "source": source,
+                        "action": detail,
+                    }
+                )
+            )
+        else:
+            print("Auto plan:")
+            print(f"  route: {route}")
+            print(f"  source: {source}")
+            print(f"  action: {detail}")
+        return True
+
+    name = args.name
+    if source_type != "recipe" and not name:
+        name = (
+            _prompt_with_default("Model name", "my-model")
+            if prompt_enabled
+            else "my-model"
+        )
+    if source_type == "recipe":
+        fake = argparse.Namespace(recipe=source, out_modelfile=args.out_modelfile)
+        if maybe_plan("build", f"ollama-tools build {source}"):
+            return 0
+        return _cmd_build(parser, fake)
+    if source_type == "gguf":
+        fake = argparse.Namespace(
+            gguf=source,
+            name=name,
+            quantize=args.quantize,
+            system=args.system,
+            temperature=args.temperature,
+            num_ctx=args.num_ctx,
+            top_p=args.top_p,
+            repeat_penalty=args.repeat_penalty,
+            out_modelfile=args.out_modelfile,
+        )
+        if maybe_plan(
+            "convert",
+            f"ollama-tools convert --gguf {source} --name {name}",
+        ):
+            return 0
+        return _cmd_convert(parser, fake)
+    if source_type == "local_dir":
+        source_path = Path(source).resolve()
+        if _is_local_adapter_dir(source_path):
+            base = args.base
+            if not base:
+                base = (
+                    _prompt_with_default("Base model for adapter", "llama3.2")
+                    if prompt_enabled
+                    else "llama3.2"
+                )
+            fake = argparse.Namespace(
+                base=base,
+                adapter=str(source_path),
+                name=name,
+                system=args.system,
+                temperature=args.temperature,
+                num_ctx=args.num_ctx,
+                top_p=args.top_p,
+                repeat_penalty=args.repeat_penalty,
+                out_modelfile=args.out_modelfile,
+            )
+            if maybe_plan(
+                "retrain",
+                f"ollama-tools retrain --base {base} --adapter {source_path} --name {name}",
+            ):
+                return 0
+            return _cmd_retrain(parser, fake)
+        print_actionable_error(
+            f"unsupported local directory source: {source_path}",
+            next_steps=[
+                "Use auto with a recipe/.gguf/HF repo/base model",
+                "Or provide an adapter directory (with adapter_config.json)",
+            ],
+        )
+        return 1
+    if source_type == "hf_repo":
+        if _repo_looks_like_adapter(source, args.revision):
+            base = args.base
+            if not base:
+                base = (
+                    _prompt_with_default("Base model for adapter", "llama3.2")
+                    if prompt_enabled
+                    else "llama3.2"
+                )
+            fake = argparse.Namespace(
+                repo_id=source,
+                base=base,
+                name=name,
+                revision=args.revision,
+                output=args.output,
+                system=args.system,
+                temperature=args.temperature,
+                num_ctx=args.num_ctx,
+                top_p=args.top_p,
+                repeat_penalty=args.repeat_penalty,
+                out_modelfile=args.out_modelfile,
+            )
+            if maybe_plan(
+                "fetch-adapter",
+                f"ollama-tools fetch-adapter {source} --base {base} --name {name}",
+            ):
+                return 0
+            return _cmd_fetch_adapter(parser, fake)
+        quant = args.quant
+        if quant is None and prompt_enabled:
+            quant = _prompt_with_default("Preferred quantization", "Q4_K_M")
+        fake = argparse.Namespace(
+            repo_id=source,
+            name=name,
+            gguf_file=args.gguf_file,
+            quant=quant,
+            revision=args.revision,
+            system=args.system,
+            temperature=args.temperature,
+            num_ctx=args.num_ctx,
+            top_p=args.top_p,
+            repeat_penalty=args.repeat_penalty,
+            out_modelfile=args.out_modelfile,
+        )
+        if maybe_plan(
+            "fetch",
+            f"ollama-tools fetch {source} --name {name}",
+        ):
+            return 0
+        return _cmd_fetch(parser, fake)
+    fake = argparse.Namespace(
+        base=source,
+        name=name,
+        system=args.system,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        top_p=args.top_p,
+        repeat_penalty=args.repeat_penalty,
+        adapter=args.adapter,
+        out_modelfile=args.out_modelfile,
+    )
+    if maybe_plan(
+        "create-from-base",
+        f"ollama-tools create-from-base --base {source} --name {name}",
+    ):
+        return 0
+    return _cmd_create_from_base(parser, fake)
 
 
 def _cmd_fetch_adapter(
@@ -101,7 +572,15 @@ def _cmd_fetch_adapter(
         )
         print(f"Downloaded adapter to {adapter_dir}", file=sys.stderr)
     except Exception as e:
-        print(f"Error downloading adapter: {e}", file=sys.stderr)
+        print_actionable_error(
+            "adapter download failed",
+            cause=str(e),
+            next_steps=[
+                "Confirm adapter repo id is correct on Hugging Face",
+                "If gated/private, run: huggingface-cli login",
+                "Then retry fetch-adapter",
+            ],
+        )
         return 1
     fake = argparse.Namespace(
         base=args.base,
@@ -109,6 +588,8 @@ def _cmd_fetch_adapter(
         system=args.system,
         temperature=args.temperature,
         num_ctx=args.num_ctx,
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
         adapter=str(adapter_dir),
         out_modelfile=args.out_modelfile,
     )
@@ -119,17 +600,26 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     """Create an Ollama model from a GGUF file (e.g. after HF→GGUF via llama.cpp)."""
     gguf = Path(args.gguf).resolve()
     if not gguf.is_file():
-        print(f"Error: GGUF file not found: {gguf}", file=sys.stderr)
+        print_actionable_error(
+            f"GGUF file not found: {gguf}",
+            next_steps=[
+                "Check the path and file extension (.gguf)",
+                "Or fetch a GGUF from HF: ollama-tools fetch <repo_id> --name <name>",
+            ],
+        )
         return 1
     gguf_to_use = str(gguf)
     if getattr(args, "quantize", None):
         q = args.quantize
-        quantize_bin = shutil.which("quantize")
+        quantize_bin = _which_quantize()
         if not quantize_bin:
-            print(
-                "Error: --quantize requires llama.cpp 'quantize' on PATH. "
-                "Build llama.cpp and add it to PATH, or use a pre-quantized GGUF.",
-                file=sys.stderr,
+            print_actionable_error(
+                "--quantize requires llama.cpp 'quantize' or 'llama-quantize' on PATH",
+                next_steps=[
+                    "Run: ollama-tools setup-llama-cpp",
+                    "Add its build/bin path to PATH",
+                    "Or use a pre-quantized GGUF and skip --quantize",
+                ],
             )
             return 1
         out_gguf = gguf.parent / f"{gguf.stem}-{q}.gguf"
@@ -147,6 +637,8 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         system=args.system,
         temperature=args.temperature,
         num_ctx=args.num_ctx,
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
@@ -155,7 +647,13 @@ def _cmd_validate_training_data(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
     """Validate JSONL training data (instruction/input/output format)."""
-    paths = get_jsonl_paths_or_exit(args.data)
+    paths = get_jsonl_paths_or_exit(
+        args.data,
+        next_steps=[
+            "Pass one or more .jsonl files",
+            "Or pass a directory that contains .jsonl files",
+        ],
+    )
     if paths is None:
         return 1
     ok, errors, count = validate_training_data_paths(paths)
@@ -171,7 +669,13 @@ def _cmd_prepare_training_data(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
     """Convert JSONL training data to plain text for trainers (e.g. llama.cpp)."""
-    paths = get_jsonl_paths_or_exit(args.data)
+    paths = get_jsonl_paths_or_exit(
+        args.data,
+        next_steps=[
+            "Pass one or more .jsonl files",
+            "Or pass a directory that contains .jsonl files",
+        ],
+    )
     if paths is None:
         return 1
     ok, errors, _ = validate_training_data_paths(paths)
@@ -186,7 +690,14 @@ def _cmd_prepare_training_data(
             paths, out, format_name=args.format
         )
     except OSError as e:
-        print(f"Error writing output: {e}", file=sys.stderr)
+        print_actionable_error(
+            "failed to write output file",
+            cause=str(e),
+            next_steps=[
+                "Check parent directory exists and is writable",
+                "Try a different output path with -o/--output",
+            ],
+        )
         return 1
     print(f"Wrote {len(paths)} file(s) → {out} ({out.stat().st_size} bytes)")
     print(
@@ -203,6 +714,10 @@ def _cmd_train(
     paths = get_jsonl_paths_or_exit(
         args.data,
         error_msg="Error: no .jsonl files found at --data. Use a file or directory.",
+        next_steps=[
+            "Pass one or more .jsonl files",
+            "Or pass a directory that contains .jsonl files",
+        ],
     )
     if paths is None:
         return 1
@@ -281,10 +796,13 @@ def _namespace_for_fetch(
         repo_id=recipe["hf_repo"],
         name=recipe["name"],
         gguf_file=recipe.get("gguf_file"),
+        quant=recipe.get("quant"),
         revision=recipe.get("revision", "main"),
         system=recipe.get("system"),
         temperature=recipe.get("temperature"),
         num_ctx=recipe.get("num_ctx"),
+        top_p=recipe.get("top_p"),
+        repeat_penalty=recipe.get("repeat_penalty"),
         out_modelfile=out_modelfile,
     )
 
@@ -296,9 +814,12 @@ def _namespace_for_convert(
     return argparse.Namespace(
         gguf=str(gguf_path),
         name=recipe["name"],
+        quantize=recipe.get("quantize"),
         system=recipe.get("system"),
         temperature=recipe.get("temperature"),
         num_ctx=recipe.get("num_ctx"),
+        top_p=recipe.get("top_p"),
+        repeat_penalty=recipe.get("repeat_penalty"),
         out_modelfile=out_modelfile,
     )
 
@@ -313,6 +834,8 @@ def _namespace_for_create_from_base(
         system=recipe.get("system"),
         temperature=recipe.get("temperature"),
         num_ctx=recipe.get("num_ctx"),
+        top_p=recipe.get("top_p"),
+        repeat_penalty=recipe.get("repeat_penalty"),
         adapter=recipe.get("adapter"),
         out_modelfile=out_modelfile,
     )
@@ -323,10 +846,20 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     try:
         recipe = load_recipe(args.recipe)
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            str(e),
+            next_steps=["Check recipe path and retry: ollama-tools build <recipe.yaml>"],
+        )
         return 1
     except (ValueError, ImportError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "invalid recipe",
+            cause=str(e),
+            next_steps=[
+                "Run: ollama-tools build <recipe.yaml> --help",
+                "Ensure recipe has name and exactly one of base/gguf/hf_repo",
+            ],
+        )
         return 1
     out_modelfile = getattr(args, "out_modelfile", None)
     if "hf_repo" in recipe:
@@ -334,7 +867,13 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     if "gguf" in recipe:
         gguf = Path(recipe["gguf"]).resolve()
         if not gguf.is_file():
-            print(f"Error: GGUF file not found: {gguf}", file=sys.stderr)
+            print_actionable_error(
+                f"GGUF file not found: {gguf}",
+                next_steps=[
+                    "Fix the gguf path in recipe",
+                    "Or use hf_repo + optional quant in recipe instead",
+                ],
+            )
             return 1
         return _cmd_convert(
             parser, _namespace_for_convert(recipe, gguf, out_modelfile)
@@ -385,7 +924,7 @@ def _cmd_check(
         "run: uv sync --extra abliterate",
     )
     finetune = shutil.which("finetune") or shutil.which("llama-finetune")
-    quantize = shutil.which("quantize")
+    quantize = _which_quantize()
     check_item(
         "llama.cpp finetune",
         bool(finetune),
@@ -396,6 +935,153 @@ def _cmd_check(
         "llama.cpp quantize",
         bool(quantize),
         "optional for convert --quantize",
+    )
+    return 0 if ok else 1
+
+
+def _env_status() -> dict[str, bool]:
+    """Collect environment readiness booleans used by check/doctor."""
+    try:
+        from huggingface_hub import HfApi
+
+        HfApi()
+        hf_ok = True
+    except ImportError:
+        hf_ok = False
+    try:
+        import yaml  # noqa: F401
+
+        yaml_ok = True
+    except ImportError:
+        yaml_ok = False
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+
+        abliterate_ok = True
+    except ImportError:
+        abliterate_ok = False
+    finetune = bool(shutil.which("finetune") or shutil.which("llama-finetune"))
+    quantize = bool(_which_quantize())
+    hf_token_set = bool(
+        os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
+    return {
+        "ollama": bool(shutil.which("ollama")),
+        "huggingface_hub": hf_ok,
+        "pyyaml": yaml_ok,
+        "hf_token": hf_token_set,
+        "abliterate_deps": abliterate_ok,
+        "finetune": finetune,
+        "quantize": quantize,
+    }
+
+
+def _cmd_doctor(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Diagnose environment and optionally apply common fixes."""
+    status = _env_status()
+    json_mode = bool(getattr(args, "json", False))
+    if not json_mode:
+        print("Doctor report:")
+        check_item(
+            "ollama",
+            status["ollama"],
+            "install from https://ollama.com and add to PATH",
+        )
+        check_item("huggingface_hub", status["huggingface_hub"], "run: uv sync")
+        check_item("pyyaml", status["pyyaml"], "run: uv sync")
+        if status["hf_token"]:
+            print("HF_TOKEN: set (for gated/private repos)")
+        else:
+            print("HF_TOKEN: not set (optional; needed for gated/private Hugging Face)")
+        check_item(
+            "abliterate deps",
+            status["abliterate_deps"],
+            "run: uv sync --extra abliterate",
+        )
+        check_item(
+            "llama.cpp finetune",
+            status["finetune"],
+            "run: ollama-tools setup-llama-cpp",
+        )
+        check_item(
+            "llama.cpp quantize",
+            status["quantize"],
+            "run: ollama-tools setup-llama-cpp",
+        )
+
+    if not getattr(args, "fix", False):
+        ok = status["ollama"] and status["huggingface_hub"] and status["pyyaml"]
+        return 0 if ok else 1
+
+    plan_only = getattr(args, "plan", False)
+    if plan_only:
+        planned: list[str] = []
+        if not status["huggingface_hub"] or not status["pyyaml"]:
+            planned.append("Run: uv sync")
+        if (
+            getattr(args, "fix_llama_cpp", False)
+            and (not status["finetune"] or not status["quantize"])
+        ):
+            target_dir = getattr(args, "llama_cpp_dir", None) or "./llama.cpp"
+            planned.append(f"Run: ollama-tools setup-llama-cpp --dir {target_dir}")
+        if not planned:
+            planned.append("No fix actions needed.")
+        if getattr(args, "json", False):
+            print(json.dumps({"route": "doctor-fix", "actions": planned}))
+        else:
+            print("\nFix plan:")
+            for step in planned:
+                print(f"  - {step}")
+        return 0
+
+    print("\nApplying fixes...", file=sys.stderr)
+    if not status["huggingface_hub"] or not status["pyyaml"]:
+        code = run_cmd(
+            ["uv", "sync"],
+            not_found_message="Error: uv not found. Install uv first: https://docs.astral.sh/uv/",
+            process_error_message="Error: uv sync failed: {e}",
+            not_found_next_steps=["Install uv, then run: uv sync"],
+            process_error_next_steps=[
+                "Resolve errors above, then rerun: ollama-tools doctor --fix"
+            ],
+        )
+        if code != 0:
+            return code
+        print("Applied: uv sync", file=sys.stderr)
+
+    if (
+        getattr(args, "fix_llama_cpp", False)
+        and (not status["finetune"] or not status["quantize"])
+    ):
+        code = _cmd_setup_llama_cpp(
+            parser,
+            argparse.Namespace(dir=getattr(args, "llama_cpp_dir", None)),
+        )
+        if code != 0:
+            return code
+    elif (not status["finetune"] or not status["quantize"]) and not getattr(
+        args, "fix_llama_cpp", False
+    ):
+        print(
+            "Tip: add --fix-llama-cpp to auto-install llama.cpp tools.",
+            file=sys.stderr,
+        )
+
+    if not status["ollama"]:
+        print(
+            "Cannot auto-install Ollama here. Install from https://ollama.com, then rerun doctor.",
+            file=sys.stderr,
+        )
+        return 1
+
+    final_status = _env_status()
+    ok = (
+        final_status["ollama"]
+        and final_status["huggingface_hub"]
+        and final_status["pyyaml"]
     )
     return 0 if ok else 1
 
@@ -473,6 +1159,131 @@ def _cmd_adapters_search(
         print(f"    → ollama-tools fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
     print("\nReplace <BASE_MODEL> with the model the adapter was trained for (e.g. llama3.2).")
     return 0
+
+
+def _score_adapter_repo(repo_id: str, base: str | None) -> int:
+    """Simple ranking heuristic for adapter recommendations."""
+    rid = repo_id.lower()
+    score = 0
+    if "adapter" in rid:
+        score += 5
+    if "lora" in rid:
+        score += 4
+    if "qlora" in rid:
+        score += 3
+    if "gguf" in rid:
+        score -= 2
+    if base:
+        base_tokens = [t for t in base.lower().replace("-", " ").replace("_", " ").split() if t]
+        if any(tok in rid for tok in base_tokens):
+            score += 6
+    return score
+
+
+def _cmd_adapters_recommend(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Recommend adapter repos and optionally apply the top one."""
+    from huggingface_hub import HfApi
+
+    base = getattr(args, "base", None)
+    query = getattr(args, "query", None) or (f"{base} lora adapter" if base else "lora adapter")
+    limit = max(1, int(getattr(args, "limit", 5)))
+    json_mode = bool(getattr(args, "json", False))
+    api = HfApi()
+    if not json_mode:
+        print(f"Finding adapter recommendations for query: {query!r}", file=sys.stderr)
+    try:
+        candidates = list(api.list_models(search=query, limit=max(limit * 4, 20)))
+    except Exception as e:
+        print_actionable_error(
+            "failed to search adapter recommendations",
+            cause=str(e),
+            next_steps=[
+                "Check internet/Hugging Face connectivity",
+                "Try a broader query: ollama-tools adapters recommend --query \"lora adapter\"",
+            ],
+        )
+        return 1
+    if not candidates:
+        print("No adapter recommendations found.")
+        return 0
+    ranked = sorted(
+        ((m.id, _score_adapter_repo(m.id, base)) for m in candidates),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:limit]
+    if not json_mode:
+        print("Recommended adapters:\n")
+        for repo, score in ranked:
+            print(f"  {repo}  (score={score})")
+            if base:
+                print(f"    -> ollama-tools fetch-adapter {repo} --base {base} --name <NAME>")
+            else:
+                print(f"    -> ollama-tools fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
+    elif not getattr(args, "apply", False):
+        print(
+            json.dumps(
+                {
+                    "route": "adapters-recommend",
+                    "base": base,
+                    "query": query,
+                    "recommendations": [
+                        {"repo": repo, "score": score} for repo, score in ranked
+                    ],
+                }
+            )
+        )
+        return 0
+    if not getattr(args, "apply", False):
+        return 0
+    top_repo = ranked[0][0]
+    if not base:
+        print_actionable_error(
+            "--apply requires --base",
+            next_steps=[
+                "Re-run with: ollama-tools adapters recommend "
+                f"--base <BASE_MODEL> --apply --query \"{query}\"",
+            ],
+        )
+        return 1
+    target_name = getattr(args, "name", None) or f"{base}-adapter"
+    if getattr(args, "plan", False):
+        action = f"ollama-tools fetch-adapter {top_repo} --base {base} --name {target_name}"
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "route": "adapters-apply",
+                        "top_repo": top_repo,
+                        "base": base,
+                        "name": target_name,
+                        "action": action,
+                    }
+                )
+            )
+        else:
+            print("\nApply plan:")
+            print(f"  top repo: {top_repo}")
+            print(f"  base: {base}")
+            print(f"  output model: {target_name}")
+            print(f"  action: {action}")
+        return 0
+    print(f"\nApplying top recommendation: {top_repo} -> model {target_name!r}", file=sys.stderr)
+    fake = argparse.Namespace(
+        repo_id=top_repo,
+        base=base,
+        name=target_name,
+        revision=getattr(args, "revision", "main"),
+        output=getattr(args, "output", None),
+        system=getattr(args, "system", None),
+        temperature=getattr(args, "temperature", None),
+        num_ctx=getattr(args, "num_ctx", None),
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
+        out_modelfile=getattr(args, "out_modelfile", None),
+    )
+    return _cmd_fetch_adapter(parser, fake)
 
 
 def _cmd_downsize_pipeline(
@@ -650,6 +1461,336 @@ def main() -> int:
     )
     p_check.set_defaults(handler=_cmd_check)
 
+    # doctor (diagnose + optional fixes)
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="Diagnose environment and optionally apply common fixes",
+    )
+    p_doctor.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply lightweight fixes (e.g. uv sync)",
+    )
+    p_doctor.add_argument(
+        "--plan",
+        action="store_true",
+        help="With --fix, show planned fix actions without executing",
+    )
+    p_doctor.add_argument(
+        "--fix-llama-cpp",
+        action="store_true",
+        help="Also run setup-llama-cpp when finetune/quantize are missing",
+    )
+    p_doctor.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Directory for setup-llama-cpp when --fix-llama-cpp is used",
+    )
+    p_doctor.set_defaults(handler=_cmd_doctor)
+
+    # plan (global dry-run wrappers for key flows)
+    p_plan = subparsers.add_parser(
+        "plan",
+        help="Preview major operations without executing them",
+    )
+    plan_sub = p_plan.add_subparsers(dest="plan_command")
+
+    p_plan_quickstart = plan_sub.add_parser(
+        "quickstart",
+        help="Preview quickstart/start resolved settings and action",
+    )
+    p_plan_quickstart.add_argument(
+        "--name",
+        default="my-model",
+        help="Name for the new Ollama model (default: my-model)",
+    )
+    p_plan_quickstart.add_argument(
+        "--profile",
+        choices=["fast", "balanced", "quality", "low-vram"],
+        default="balanced",
+        help="Preset for quant/parameters (default: balanced)",
+    )
+    p_plan_quickstart.add_argument(
+        "--task",
+        choices=sorted(_QUICKSTART_TASK_SYSTEMS.keys()),
+        default=None,
+        help="Task preset for default system prompt",
+    )
+    p_plan_quickstart.add_argument(
+        "--repo-id",
+        default="TheBloke/Llama-2-7B-GGUF",
+        help="Hugging Face GGUF repo to use (default: TheBloke/Llama-2-7B-GGUF)",
+    )
+    p_plan_quickstart.add_argument(
+        "--quant",
+        default=None,
+        help="Override profile quantization (e.g. Q4_K_M)",
+    )
+    p_plan_quickstart.add_argument(
+        "--revision",
+        default="main",
+        help="Repo revision (default: main)",
+    )
+    p_plan_quickstart.add_argument("--system", help="System message (role/instructions)")
+    p_plan_quickstart.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_plan_quickstart.add_argument(
+        "--num-ctx",
+        type=int,
+        help="Context window size in tokens (e.g. 4096)",
+    )
+    p_plan_quickstart.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_plan_quickstart.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
+    p_plan_quickstart.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_plan_quickstart.add_argument(
+        "--json",
+        action="store_true",
+        help="Output plan as JSON",
+    )
+    p_plan_quickstart.set_defaults(handler=_cmd_plan_quickstart)
+
+    p_plan_auto = plan_sub.add_parser(
+        "auto",
+        help="Preview auto route/action for a source",
+    )
+    p_plan_auto.add_argument(
+        "source",
+        help="Source input: recipe path, .gguf path, HF repo id, or local base model name",
+    )
+    p_plan_auto.add_argument("--name", default=None, help="Model name for non-recipe flows")
+    p_plan_auto.add_argument("--system", help="System message (role/instructions)")
+    p_plan_auto.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_plan_auto.add_argument(
+        "--num-ctx",
+        type=int,
+        help="Context window size in tokens (e.g. 4096)",
+    )
+    p_plan_auto.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_plan_auto.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
+    p_plan_auto.add_argument("--base", help="Base model for adapter sources")
+    p_plan_auto.add_argument("--adapter", help="Path to LoRA/adapter directory (base mode)")
+    p_plan_auto.add_argument("--output", help="Adapter download directory in adapter repo mode")
+    p_plan_auto.add_argument("--gguf-file", help="Specific .gguf filename for HF repos")
+    p_plan_auto.add_argument("--quant", help="Preferred quantization for HF repo mode")
+    p_plan_auto.add_argument("--quantize", help="Quantize GGUF first in gguf mode")
+    p_plan_auto.add_argument("--revision", default="main", help="Repo revision (default: main)")
+    p_plan_auto.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Disable interactive prompts and use defaults for missing values",
+    )
+    p_plan_auto.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_plan_auto.add_argument(
+        "--json",
+        action="store_true",
+        help="Output plan as JSON",
+    )
+    p_plan_auto.set_defaults(handler=_cmd_plan_auto)
+
+    p_plan_doctor = plan_sub.add_parser(
+        "doctor-fix",
+        help="Preview doctor --fix actions",
+    )
+    p_plan_doctor.add_argument(
+        "--fix-llama-cpp",
+        action="store_true",
+        help="Include setup-llama-cpp in plan when tools are missing",
+    )
+    p_plan_doctor.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Directory for setup-llama-cpp when --fix-llama-cpp is used",
+    )
+    p_plan_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Output plan as JSON",
+    )
+    p_plan_doctor.set_defaults(handler=_cmd_plan_doctor_fix)
+
+    p_plan_adapters = plan_sub.add_parser(
+        "adapters-apply",
+        help="Preview adapters recommend --apply action",
+    )
+    p_plan_adapters.add_argument("--base", required=True, help="Base model for apply")
+    p_plan_adapters.add_argument("--query", default=None, help="Search query override")
+    p_plan_adapters.add_argument("--limit", type=int, default=5, help="Max recommendations")
+    p_plan_adapters.add_argument("--name", default=None, help="Output model name")
+    p_plan_adapters.add_argument("--revision", default="main", help="Repo revision")
+    p_plan_adapters.add_argument("--output", default=None, help="Adapter download directory")
+    p_plan_adapters.add_argument("--system", help="System message")
+    p_plan_adapters.add_argument("--temperature", type=float, help="Temperature")
+    p_plan_adapters.add_argument("--num-ctx", type=int, help="Context window")
+    p_plan_adapters.add_argument("--top-p", type=float, help="Top-p")
+    p_plan_adapters.add_argument("--repeat-penalty", type=float, help="Repeat penalty")
+    p_plan_adapters.add_argument("--out-modelfile", default=None, help="Write Modelfile path")
+    p_plan_adapters.add_argument(
+        "--json",
+        action="store_true",
+        help="Output plan as JSON",
+    )
+    p_plan_adapters.set_defaults(handler=_cmd_plan_adapters_apply)
+
+    # quickstart (beginner one-command flow)
+    p_quickstart = subparsers.add_parser(
+        "quickstart",
+        help="Beginner one-command setup: fetch a default model and create an Ollama model",
+    )
+    p_quickstart.add_argument(
+        "--name",
+        default="my-model",
+        help="Name for the new Ollama model (default: my-model)",
+    )
+    p_quickstart.add_argument(
+        "--profile",
+        choices=["fast", "balanced", "quality", "low-vram"],
+        default="balanced",
+        help="Quickstart preset for quant + generation params (default: balanced)",
+    )
+    p_quickstart.add_argument(
+        "--task",
+        choices=sorted(_QUICKSTART_TASK_SYSTEMS.keys()),
+        default=None,
+        help="Task preset that sets a default system prompt (overridden by --system)",
+    )
+    p_quickstart.add_argument(
+        "--repo-id",
+        default="TheBloke/Llama-2-7B-GGUF",
+        help="Hugging Face GGUF repo to use (default: TheBloke/Llama-2-7B-GGUF)",
+    )
+    p_quickstart.add_argument(
+        "--quant",
+        default=None,
+        help="Override profile quantization (e.g. Q4_K_M)",
+    )
+    p_quickstart.add_argument("--revision", default="main", help="Repo revision (default: main)")
+    p_quickstart.add_argument("--system", help="System message (role/instructions)")
+    p_quickstart.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_quickstart.add_argument(
+        "--num-ctx",
+        type=int,
+        help="Context window size in tokens (e.g. 4096)",
+    )
+    p_quickstart.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_quickstart.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
+    p_quickstart.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_quickstart.set_defaults(handler=_cmd_quickstart)
+
+    # start (alias for quickstart defaults)
+    p_start = subparsers.add_parser(
+        "start",
+        help="Alias for quickstart with beginner defaults",
+    )
+    p_start.add_argument(
+        "--name",
+        default="my-model",
+        help="Name for the new Ollama model (default: my-model)",
+    )
+    p_start.add_argument(
+        "--profile",
+        choices=["fast", "balanced", "quality", "low-vram"],
+        default="balanced",
+        help="Preset for quant/parameters (default: balanced)",
+    )
+    p_start.add_argument(
+        "--task",
+        choices=sorted(_QUICKSTART_TASK_SYSTEMS.keys()),
+        default=None,
+        help="Task preset that sets a default system prompt (overridden by --system)",
+    )
+    p_start.add_argument(
+        "--repo-id",
+        default="TheBloke/Llama-2-7B-GGUF",
+        help="Hugging Face GGUF repo to use (default: TheBloke/Llama-2-7B-GGUF)",
+    )
+    p_start.add_argument(
+        "--quant",
+        default=None,
+        help="Override profile quantization (e.g. Q4_K_M)",
+    )
+    p_start.add_argument("--revision", default="main", help="Repo revision (default: main)")
+    p_start.add_argument("--system", help="System message (role/instructions)")
+    p_start.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_start.add_argument(
+        "--num-ctx",
+        type=int,
+        help="Context window size in tokens (e.g. 4096)",
+    )
+    p_start.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_start.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
+    p_start.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_start.set_defaults(handler=_cmd_start)
+
+    # auto (detect source type and route)
+    p_auto = subparsers.add_parser(
+        "auto",
+        help="Auto-detect source (recipe, gguf, hf repo, base) and run the right flow",
+    )
+    p_auto.add_argument(
+        "source",
+        help="Source input: recipe path, .gguf path, HF repo id, or local base model name",
+    )
+    p_auto.add_argument(
+        "--name",
+        default=None,
+        help="Name for created model when source is not a recipe (interactive/default: my-model)",
+    )
+    p_auto.add_argument("--system", help="System message (role/instructions)")
+    p_auto.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_auto.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
+    p_auto.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_auto.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
+    p_auto.add_argument(
+        "--base",
+        help="Base model for adapter sources (auto-detected adapter repo/dir)",
+    )
+    p_auto.add_argument("--adapter", help="Path to LoRA/adapter directory (base mode)")
+    p_auto.add_argument(
+        "--output",
+        help="Directory to download adapter into for HF adapter repos",
+    )
+    p_auto.add_argument("--gguf-file", help="Specific .gguf filename for HF repos")
+    p_auto.add_argument(
+        "--quant",
+        help="Preferred quantization for HF repo mode (e.g. Q4_K_M)",
+    )
+    p_auto.add_argument(
+        "--quantize",
+        help="Quantize GGUF first in gguf mode (e.g. Q4_K_M)",
+    )
+    p_auto.add_argument("--revision", default="main", help="Repo revision (default: main)")
+    p_auto.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Disable interactive prompts and use defaults for missing values",
+    )
+    p_auto.add_argument(
+        "--plan",
+        action="store_true",
+        help="Show detected route and planned action without executing",
+    )
+    p_auto.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_auto.set_defaults(handler=_cmd_auto)
+
     # setup-llama-cpp (clone and build)
     p_setup = subparsers.add_parser(
         "setup-llama-cpp",
@@ -676,6 +1817,12 @@ def main() -> int:
     p_create.add_argument("--system", help="System message (role/instructions)")
     p_create.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_create.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
+    p_create.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_create.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
     p_create.add_argument("--adapter", help="Path to LoRA/adapter directory")
     p_create.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_create.set_defaults(handler=_cmd_create_from_base)
@@ -694,6 +1841,12 @@ def main() -> int:
     p_convert.add_argument("--system", help="System message (role/instructions)")
     p_convert.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_convert.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
+    p_convert.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_convert.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
     p_convert.add_argument(
         "--quantize",
         help="Quantize the GGUF first (e.g. Q4_K_M); requires llama.cpp 'quantize' on PATH",
@@ -723,6 +1876,12 @@ def main() -> int:
     p_fetch.add_argument("--system", help="System message (role/instructions)")
     p_fetch.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_fetch.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
+    p_fetch.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_fetch.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
     p_fetch.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_fetch.set_defaults(handler=_cmd_fetch)
 
@@ -745,6 +1904,12 @@ def main() -> int:
     p_fetch_adapter.add_argument("--system", help="System message")
     p_fetch_adapter.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_fetch_adapter.add_argument("--num-ctx", type=int, help="Context window size in tokens")
+    p_fetch_adapter.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_fetch_adapter.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
     p_fetch_adapter.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_fetch_adapter.set_defaults(handler=_cmd_fetch_adapter)
 
@@ -834,6 +1999,12 @@ def main() -> int:
     p_retrain.add_argument("--system", help="System message")
     p_retrain.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_retrain.add_argument("--num-ctx", type=int, help="Context window size in tokens")
+    p_retrain.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_retrain.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty (e.g. 1.1)",
+    )
     p_retrain.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_retrain.set_defaults(handler=_cmd_retrain)
 
@@ -908,6 +2079,75 @@ def main() -> int:
     )
     p_adapters_search.set_defaults(handler=_cmd_adapters_search)
 
+    p_adapters_recommend = adapters_sub.add_parser(
+        "recommend",
+        help="Recommend likely adapter repos (optionally apply top result)",
+    )
+    p_adapters_recommend.add_argument(
+        "--base",
+        default=None,
+        help="Base model name/path to bias recommendations and use with --apply",
+    )
+    p_adapters_recommend.add_argument(
+        "--query",
+        default=None,
+        help="Search query override (default uses --base if given)",
+    )
+    p_adapters_recommend.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Max recommendations to show (default: 5)",
+    )
+    p_adapters_recommend.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply top recommendation via fetch-adapter (requires --base)",
+    )
+    p_adapters_recommend.add_argument(
+        "--plan",
+        action="store_true",
+        help="When used with --apply, show the planned fetch-adapter command only",
+    )
+    p_adapters_recommend.add_argument(
+        "--name",
+        default=None,
+        help="Output model name when using --apply (default: <base>-adapter)",
+    )
+    p_adapters_recommend.add_argument(
+        "--revision",
+        default="main",
+        help="Repo revision when using --apply (default: main)",
+    )
+    p_adapters_recommend.add_argument(
+        "--output",
+        default=None,
+        help="Adapter download directory when using --apply",
+    )
+    p_adapters_recommend.add_argument("--system", help="System message for --apply")
+    p_adapters_recommend.add_argument(
+        "--temperature",
+        type=float,
+        help="Temperature for --apply (e.g. 0.7)",
+    )
+    p_adapters_recommend.add_argument(
+        "--num-ctx",
+        type=int,
+        help="Context window for --apply (e.g. 4096)",
+    )
+    p_adapters_recommend.add_argument("--top-p", type=float, help="Top-p for --apply")
+    p_adapters_recommend.add_argument(
+        "--repeat-penalty",
+        type=float,
+        help="Repeat penalty for --apply",
+    )
+    p_adapters_recommend.add_argument(
+        "--out-modelfile",
+        default=None,
+        help="Also write Modelfile when using --apply",
+    )
+    p_adapters_recommend.set_defaults(handler=_cmd_adapters_recommend)
+
     # downsize (distillation: large → small model)
     p_downsize = subparsers.add_parser(
         "downsize",
@@ -950,6 +2190,9 @@ def main() -> int:
         return 0
     if parsed.command == "adapters" and not getattr(parsed, "adapters_command", None):
         p_adapters.print_help()
+        return 0
+    if parsed.command == "plan" and not getattr(parsed, "plan_command", None):
+        p_plan.print_help()
         return 0
     if parsed.command == "downsize" and not getattr(parsed, "downsize_command", None):
         _cmd_downsize_pipeline(parser, parsed)

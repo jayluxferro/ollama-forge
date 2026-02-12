@@ -16,11 +16,15 @@ def test_build_modelfile_with_system_and_params() -> None:
         system="You are helpful.",
         temperature=0.7,
         num_ctx=4096,
+        top_p=0.9,
+        repeat_penalty=1.1,
     )
     assert "FROM llama3.2" in out
     assert "You are helpful." in out
     assert "PARAMETER temperature 0.7" in out
     assert "PARAMETER num_ctx 4096" in out
+    assert "PARAMETER top_p 0.9" in out
+    assert "PARAMETER repeat_penalty 1.1" in out
 
 
 def test_build_modelfile_with_adapter() -> None:

@@ -59,7 +59,6 @@ output/
 checkpoints/
 *.gguf
 .cursor/
-docs/
 git-push
 
 # Secrets / env

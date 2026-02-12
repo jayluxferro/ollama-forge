@@ -21,7 +21,7 @@ All the tools live here: fetch, convert, adapters, recipes. You run a few comman
 - **From this repo:** `uv sync` then `uv run ollama-tools` (or `uv run ollama-tools --help`).
 - **Run from anywhere:** From the repo run `uv tool install .` so `ollama-tools` is on your PATH; or `pip install -e .` for a development install.
 - Install **[Ollama](https://ollama.com)** and ensure `ollama` is on your PATH.
-- Run **`uv run ollama-tools check`** to see what’s installed (ollama, Hugging Face, optional deps, llama.cpp). Use **`uv run ollama-tools setup-llama-cpp`** to clone and build llama.cpp so you can use `finetune` and `quantize`.
+- Run **`uv run ollama-tools check`** to see what’s installed (ollama, Hugging Face, optional deps, llama.cpp). Run **`uv run ollama-tools doctor`** for guided diagnosis, **`uv run ollama-tools doctor --fix --plan`** to preview fixes, or **`uv run ollama-tools doctor --fix`** to apply common fixes. Use **`uv run ollama-tools setup-llama-cpp`** to clone and build llama.cpp so you can use `finetune` and `quantize`.
 
 ---
 
@@ -29,15 +29,21 @@ All the tools live here: fetch, convert, adapters, recipes. You run a few comman
 
 | What you want | Command |
 |---------------|---------|
+| Short alias for beginner start | `start [--name my-model]` |
+| Easiest one-command start (auto defaults) | `quickstart [--name my-model]` |
+| One command that auto-detects source type | `auto <source> [--name my-model]` |
+| Preview major operations from one place | `plan <quickstart|auto|doctor-fix|adapters-apply> ...` |
 | Get a GGUF from Hugging Face and create a model | `fetch <repo_id> --name <name>` (use `--quant Q4_K_M` to pick size) |
 | Turn a GGUF file into an Ollama model | `convert --gguf <path> --name <name>` (use `--quantize Q4_K_M` to shrink first) |
 | Find adapters on Hugging Face | `adapters search "llama lora"` |
+| Get adapter recommendations (optionally auto-apply top result) | `adapters recommend [--base llama3.2] [--apply]` |
 | Get an adapter from HF and create a model | `fetch-adapter <repo_id> --base <base> --name <name>` |
 | Customize a model (prompt, params, adapter) | `create-from-base`, `retrain`, or `build recipe.yaml` |
 | Validate training data (JSONL) | `validate-training-data <file(s) or dir>` |
 | Convert JSONL → trainer format | `prepare-training-data <file(s) or dir> -o out.txt` |
 | Generate training pipeline script | `train --data <file(s) or dir> --base <base> --name <name> --write-script train.sh` |
 | Check environment (ollama, HF, llama.cpp) | `check` |
+| Diagnose and optionally auto-fix environment | `doctor [--fix] [--plan] [--fix-llama-cpp]` |
 | Install llama.cpp (clone + build) | `setup-llama-cpp [--dir ./llama.cpp]` |
 | Refusal removal (abliterate) | `abliterate compute-dir` (optional: use built-in harmful/harmless lists) |
 | Downsize (e.g. 30B→3B) | `downsize --teacher <hf_id> --student <hf_id> --name <name> [--quantize Q4_K_M]` |
@@ -46,6 +52,73 @@ All the tools live here: fetch, convert, adapters, recipes. You run a few comman
 ---
 
 ## Simplest workflows
+
+**Fastest path for beginners (auto defaults):**
+```bash
+uv run ollama-tools start --name my-model
+# same behavior as:
+uv run ollama-tools quickstart --name my-model
+ollama run my-model
+```
+By default this uses `TheBloke/Llama-2-7B-GGUF` with the `balanced` profile. Override with `--repo-id` and `--quant`.
+
+`quickstart` profiles:
+- `fast` — quick/smaller defaults (`Q4_0`, lower context).
+- `balanced` — general default (`Q4_K_M`, moderate context).
+- `quality` — higher-quality defaults (`Q8_0`, larger context).
+- `low-vram` — constrained-memory defaults (`Q4_0`, smaller context).
+
+Examples:
+```bash
+uv run ollama-tools quickstart --profile low-vram --name my-lite-model
+uv run ollama-tools quickstart --profile quality --name my-best-model
+# Explicit flags override the profile:
+uv run ollama-tools quickstart --profile balanced --quant Q8_0 --num-ctx 8192 --name my-tuned-model
+```
+
+Task presets (set default system prompt):
+```bash
+uv run ollama-tools start --task chat --name my-chat-model
+uv run ollama-tools quickstart --task coding --name my-coder
+uv run ollama-tools quickstart --task creative --name my-writer
+# --system overrides --task prompt
+uv run ollama-tools quickstart --task coding --system "You are terse." --name my-coder
+```
+
+**Auto-detect source and run the right flow:**
+```bash
+# Recipe file -> build
+uv run ollama-tools auto ./examples/recipes/from-hf.yaml
+
+# GGUF file -> convert
+uv run ollama-tools auto /path/to/model.gguf --name my-model --quantize Q4_K_M
+
+# HF repo id -> fetch
+uv run ollama-tools auto TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_M
+
+# Base local model -> create-from-base
+uv run ollama-tools auto llama3.2 --name my-assistant --system "You are helpful."
+
+# Adapter directory -> retrain (auto-detected adapter files)
+uv run ollama-tools auto /path/to/adapter_dir --base llama3.2 --name my-finetuned
+
+# Adapter HF repo -> fetch-adapter (auto-detected by repo files)
+uv run ollama-tools auto user/my-lora-adapter --base llama3.2 --name my-finetuned
+
+# Preview route without running anything
+uv run ollama-tools auto TheBloke/Llama-2-7B-GGUF --plan
+```
+When `--name` (and in HF mode, `--quant`) is missing, `auto` prompts in interactive terminals with safe defaults. For non-interactive scripts, add `--no-prompt` to avoid prompts and use defaults. Use `--plan` to preview the detected route before execution.
+
+**Global dry-run planner (one place to preview actions):**
+```bash
+uv run ollama-tools plan quickstart --profile balanced --name my-model
+uv run ollama-tools plan auto TheBloke/Llama-2-7B-GGUF --name my-model
+uv run ollama-tools plan doctor-fix --fix-llama-cpp
+uv run ollama-tools plan adapters-apply --base llama3.2 --query "llama lora adapter"
+# JSON output for scripting/CI:
+uv run ollama-tools plan auto TheBloke/Llama-2-7B-GGUF --name my-model --json
+```
 
 **Get a model from Hugging Face (one command):**
 ```bash
@@ -80,6 +153,19 @@ uv run ollama-tools fetch-adapter username/adapter-repo --base llama3.2 --name m
 ollama run my-finetuned
 ```
 
+**Get recommended adapters and optionally auto-apply one:**
+```bash
+# Show recommendations
+uv run ollama-tools adapters recommend --base llama3.2
+
+# Apply top recommendation automatically
+uv run ollama-tools adapters recommend --base llama3.2 --apply --name my-finetuned
+ollama run my-finetuned
+
+# Preview auto-apply command only (dry-run)
+uv run ollama-tools adapters recommend --base llama3.2 --apply --plan
+```
+
 **Use an adapter you have locally:**
 ```bash
 uv run ollama-tools retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
@@ -96,7 +182,10 @@ Build from a YAML or JSON file: `ollama-tools build recipe.yaml`.
   - `base` — Existing Ollama model or path (create-from-base).
   - `gguf` — Path to a local .gguf file (convert).
   - `hf_repo` — Hugging Face repo id; downloads a GGUF and creates the model (same as `fetch`).
-- **Optional:** `system`, `temperature`, `num_ctx`; with `base`: `adapter`; with `hf_repo`: `gguf_file`, `revision`.
+- **Optional (all sources):** `system`, `temperature`, `num_ctx`, `top_p`, `repeat_penalty`.
+- **With `base`:** `adapter`.
+- **With `gguf`:** `quantize` (e.g. `Q4_K_M`).
+- **With `hf_repo`:** `gguf_file`, `quant`, `revision`.
 
 **Example (from base):**
 ```yaml
@@ -105,12 +194,15 @@ base: llama3.2
 system: You are a concise coding assistant.
 temperature: 0.7
 num_ctx: 4096
+top_p: 0.9
+repeat_penalty: 1.1
 ```
 
 **Example (from Hugging Face):**
 ```yaml
 name: my-model
 hf_repo: TheBloke/Llama-2-7B-GGUF
+quant: Q4_K_M
 temperature: 0.6
 num_ctx: 8192
 ```
@@ -119,6 +211,7 @@ num_ctx: 8192
 ```yaml
 name: my-converted
 gguf: /path/to/model.gguf
+quantize: Q4_K_M
 temperature: 0.6
 ```
 

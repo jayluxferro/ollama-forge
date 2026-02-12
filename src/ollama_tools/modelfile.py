@@ -9,6 +9,8 @@ def build_modelfile(
     system: str | None = None,
     temperature: float | None = None,
     num_ctx: int | None = None,
+    top_p: float | None = None,
+    repeat_penalty: float | None = None,
     adapter: str | None = None,
 ) -> str:
     """Build Modelfile content from base and optional overrides."""
@@ -23,6 +25,10 @@ def build_modelfile(
         lines.append(f"PARAMETER temperature {temperature}")
     if num_ctx is not None:
         lines.append(f"PARAMETER num_ctx {num_ctx}")
+    if top_p is not None:
+        lines.append(f"PARAMETER top_p {top_p}")
+    if repeat_penalty is not None:
+        lines.append(f"PARAMETER repeat_penalty {repeat_penalty}")
     if adapter is not None:
         lines.append(f"ADAPTER {adapter}")
     return "\n".join(lines) + "\n"

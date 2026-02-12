@@ -18,11 +18,33 @@ OLLAMA_MISSING_MSG = (
 )
 
 
+def print_actionable_error(
+    summary: str,
+    *,
+    cause: str | None = None,
+    next_steps: list[str] | None = None,
+) -> None:
+    """Print a structured error with optional cause and next-step guidance."""
+    print(f"Error: {summary}", file=sys.stderr)
+    if cause:
+        print(f"Cause: {cause}", file=sys.stderr)
+    if next_steps:
+        print("Next:", file=sys.stderr)
+        for step in next_steps:
+            print(f"  - {step}", file=sys.stderr)
+
+
 def require_ollama() -> int | None:
     """Return exit code to use if ollama is missing; otherwise None (caller proceeds)."""
     if shutil.which("ollama"):
         return None
-    print(OLLAMA_MISSING_MSG, file=sys.stderr)
+    print_actionable_error(
+        "ollama not found on PATH",
+        next_steps=[
+            "Install Ollama from https://ollama.com",
+            "Run: ollama-tools check",
+        ],
+    )
     return 1
 
 
@@ -44,7 +66,13 @@ def run_ollama_create(
             print(f"Created model {name!r}. Run with: ollama run {name}")
             return 0
         except FileNotFoundError:
-            print(OLLAMA_MISSING_MSG, file=sys.stderr)
+            print_actionable_error(
+                "ollama not found on PATH",
+                next_steps=[
+                    "Install Ollama from https://ollama.com",
+                    "Run: ollama-tools check",
+                ],
+            )
             return 1
         except subprocess.CalledProcessError as e:
             return e.returncode
@@ -59,7 +87,13 @@ def run_ollama_create(
             print(f"Created model {name!r}. Run with: ollama run {name}")
             return 0
         except FileNotFoundError:
-            print(OLLAMA_MISSING_MSG, file=sys.stderr)
+            print_actionable_error(
+                "ollama not found on PATH",
+                next_steps=[
+                    "Install Ollama from https://ollama.com",
+                    "Run: ollama-tools check",
+                ],
+            )
             return 1
         except subprocess.CalledProcessError as e:
             return e.returncode
@@ -101,6 +135,8 @@ def run_cmd(
     process_error_message: str = "Error: command failed: {e}",
     *,
     cwd: str | Path | None = None,
+    not_found_next_steps: list[str] | None = None,
+    process_error_next_steps: list[str] | None = None,
 ) -> int:
     """Run command; on FileNotFoundError print not_found_message and return 1;
     on CalledProcessError print process_error_message and return code."""
@@ -108,22 +144,32 @@ def run_cmd(
         subprocess.run(cmd, check=True, cwd=cwd)
         return 0
     except FileNotFoundError:
-        print(not_found_message, file=sys.stderr)
+        print_actionable_error(
+            not_found_message.replace("Error: ", ""),
+            next_steps=not_found_next_steps,
+        )
         return 1
     except subprocess.CalledProcessError as e:
-        print(process_error_message.format(e=e), file=sys.stderr)
+        print_actionable_error(
+            process_error_message.format(e=e).replace("Error: ", ""),
+            next_steps=process_error_next_steps,
+        )
         return e.returncode
 
 
 def get_jsonl_paths_or_exit(
     data_arg: list[str | Path] | str | Path,
     error_msg: str = "Error: no .jsonl files found. Give one or more files or a directory.",
+    next_steps: list[str] | None = None,
 ) -> list[Path] | None:
     """Resolve data_arg to .jsonl paths; if none, print error and return None (caller returns 1)."""
     paths_input = data_arg if isinstance(data_arg, list) else [data_arg]
     paths = collect_jsonl_paths(paths_input)
     if not paths:
-        print(error_msg, file=sys.stderr)
+        print_actionable_error(
+            error_msg.replace("Error: ", ""),
+            next_steps=next_steps,
+        )
         return None
     return paths
 
