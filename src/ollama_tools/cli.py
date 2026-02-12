@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from ollama_tools.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
-from ollama_tools.modelfile import build_modelfile
+from ollama_tools.modelfile import build_modelfile, merge_modelfile_with_reference_template
 from ollama_tools.recipe import load_recipe
 from ollama_tools.run_helpers import (
     check_item,
@@ -20,6 +20,7 @@ from ollama_tools.run_helpers import (
     require_ollama,
     run_cmd,
     run_ollama_create,
+    run_ollama_show_modelfile,
     write_temp_text_file,
 )
 from ollama_tools.training_data import (
@@ -96,6 +97,43 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
         adapter=args.adapter,
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
+
+
+def _cmd_refresh_template(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Recreate a model using the base model's latest chat template (fixes Chat API issues)."""
+    exit_code = require_ollama()
+    if exit_code is not None:
+        return exit_code
+    name = getattr(args, "name", None)
+    base = getattr(args, "base", None)
+    output_name = getattr(args, "output_name", None) or name
+    current = run_ollama_show_modelfile(name)
+    if not current:
+        print_actionable_error(
+            f"Could not get Modelfile for model {name!r}",
+            next_steps=[
+                f"Ensure the model exists: ollama run {name}",
+                "Use a model name that is already created in Ollama",
+            ],
+        )
+        return 1
+    reference = run_ollama_show_modelfile(base)
+    if not reference:
+        print_actionable_error(
+            f"Could not get Modelfile for base {base!r}",
+            next_steps=[
+                f"Pull the base model first: ollama pull {base}",
+                "Use a base model name that exists in Ollama (e.g. llama3.2)",
+            ],
+        )
+        return 1
+    template_only = getattr(args, "template_only", False)
+    merged = merge_modelfile_with_reference_template(
+        current, reference, base, template_only=template_only
+    )
+    return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
 
 
 def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -1844,6 +1882,36 @@ def main() -> int:
     p_create.add_argument("--adapter", help="Path to LoRA/adapter directory")
     p_create.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_create.set_defaults(handler=_cmd_create_from_base)
+
+    # refresh-template (recreate model with base's latest chat template)
+    p_refresh = subparsers.add_parser(
+        "refresh-template",
+        help="Recreate a model using the base model's latest chat template (fixes Chat API issues)",
+    )
+    p_refresh.add_argument(
+        "--name",
+        required=True,
+        help="Name of the existing model to refresh (must exist in Ollama)",
+    )
+    p_refresh.add_argument(
+        "--base",
+        required=True,
+        help="Base model to take the template from (e.g. llama3.2); pull first with ollama pull",
+    )
+    p_refresh.add_argument(
+        "--output-name",
+        help="Name for the recreated model (default: same as --name, overwrites)",
+    )
+    p_refresh.add_argument(
+        "--template-only",
+        action="store_true",
+        help="Only replace TEMPLATE; keep current model's weights (FROM unchanged). Use when updating an old model's template so tools/Chat API work.",
+    )
+    p_refresh.add_argument(
+        "--out-modelfile",
+        help="Also write the merged Modelfile to this path",
+    )
+    p_refresh.set_defaults(handler=_cmd_refresh_template)
 
     # convert (GGUF → Ollama; use after HF→GGUF via llama.cpp)
     p_convert = subparsers.add_parser(

@@ -48,6 +48,22 @@ def require_ollama() -> int | None:
     return 1
 
 
+def run_ollama_show_modelfile(model: str) -> str | None:
+    """Run `ollama show --modelfile <model>` and return stdout, or None on failure."""
+    if not shutil.which("ollama"):
+        return None
+    try:
+        result = subprocess.run(
+            ["ollama", "show", model, "--modelfile"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout or ""
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 def run_ollama_create(
     name: str,
     modelfile_content: str,
