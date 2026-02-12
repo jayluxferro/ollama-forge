@@ -1,0 +1,18 @@
+# ollama-tools Wiki
+
+- [Home](Home)
+- [Installation](Installation)
+- [Quick Start](Quick-Start)
+- [Auto & Plan](Auto-and-Plan)
+- [Fetch & Convert](Fetch-and-Convert)
+- [Recipes](Recipes)
+- [Modelfile](Modelfile)
+- [Adapters](Adapters)
+- [Training Data](Training-Data)
+- [Retrain Pipeline](Retrain-Pipeline)
+- [Abliterate](Abliterate)
+- [Downsizing](Downsizing)
+- [Hugging Face without GGUF](Hugging-Face-Without-GGUF)
+- [Quantization](Quantization)
+- [CI / Automation](CI-Automation)
+- [Command Reference](Command-Reference)
