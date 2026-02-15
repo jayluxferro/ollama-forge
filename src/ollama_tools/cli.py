@@ -4,9 +4,11 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
@@ -1512,8 +1514,8 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
         harmful_path = default_harmful_file
         harmless_path = default_harmless_file
         print(
-            "Using bundled default harmful/harmless lists. "
-            "Pass --harmful/--harmless or --harmful-dir/--harmless-dir for custom.",
+            "Using bundled default harmful/harmless lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction; up to 32 pairs sampled for direction). "
+            "Pass --harmful/--harmless for custom lists.",
             file=sys.stderr,
         )
     else:
@@ -1533,6 +1535,263 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
     return harmful_path, harmless_path, temp_files
 
 
+# Online lists used by download-lists and bundled defaults
+# (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction/Arditi et al.)
+ABLITERATE_HARMFUL_URL = "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmful.txt"
+ABLITERATE_HARMBENCH_URL = "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv"
+ABLITERATE_JBB_HARMFUL_URL = "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/harmful-behaviors.csv"
+ABLITERATE_JBB_BENIGN_URL = "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/benign-behaviors.csv"
+ABLITERATE_ADVBENCH_URL = "https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv"
+ABLITERATE_HARMLESS_URL = "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmless.txt"
+# refusal_direction (Arditi et al. – arXiv:2406.11717): JSON with "instruction" key
+ABLITERATE_REFUSAL_DIR_HARMFUL = (
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmful_train.json",
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmful_val.json",
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmful_test.json",
+)
+ABLITERATE_REFUSAL_DIR_HARMLESS = (
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmless_train.json",
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmless_val.json",
+    "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmless_test.json",
+)
+
+
+def _abliterate_fetch_json_instructions(urls: tuple[str, ...]) -> list[str]:
+    """Fetch JSON arrays from URLs; each item must have 'instruction' key. Return deduped list."""
+    instructions: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        with urlopen(url, timeout=90) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        for item in data:
+            if isinstance(item, dict) and "instruction" in item:
+                s = (item["instruction"] or "").strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    instructions.append(s)
+    return instructions
+
+
+def _abliterate_merge_harmful_sources() -> list[str]:
+    """Fetch and merge all harmful sources (Sumandora, HarmBench, JBB, AdvBench, refusal_direction)."""
+    import csv
+
+    with urlopen(ABLITERATE_HARMFUL_URL, timeout=60) as r:
+        sumandora = r.read().decode("utf-8")
+    lines = [s.strip() for s in sumandora.splitlines() if s.strip() and not s.strip().startswith("#")]
+    seen = set(lines)
+    with urlopen(ABLITERATE_HARMBENCH_URL, timeout=60) as r:
+        reader = csv.reader(r.read().decode("utf-8").splitlines())
+        next(reader)
+        for row in reader:
+            if row:
+                b = row[0].strip()
+                if b and b not in seen:
+                    seen.add(b)
+                    lines.append(b)
+    with urlopen(ABLITERATE_JBB_HARMFUL_URL, timeout=60) as r:
+        reader = csv.reader(r.read().decode("utf-8").splitlines())
+        next(reader)
+        for row in reader:
+            if len(row) > 1:
+                b = row[1].strip()  # Goal column
+                if b and b not in seen:
+                    seen.add(b)
+                    lines.append(b)
+    with urlopen(ABLITERATE_ADVBENCH_URL, timeout=60) as r:
+        reader = csv.reader(r.read().decode("utf-8").splitlines())
+        next(reader)
+        for row in reader:
+            if row:
+                b = row[0].strip()  # goal column
+                if b and b not in seen:
+                    seen.add(b)
+                    lines.append(b)
+    for instr in _abliterate_fetch_json_instructions(ABLITERATE_REFUSAL_DIR_HARMFUL):
+        if instr not in seen:
+            seen.add(instr)
+            lines.append(instr)
+    return lines
+
+
+def _abliterate_merge_harmless_sources() -> list[str]:
+    """Fetch and merge harmless sources (Sumandora + JBB benign + refusal_direction)."""
+    import csv
+
+    with urlopen(ABLITERATE_HARMLESS_URL, timeout=60) as r:
+        lines = [s.strip() for s in r.read().decode("utf-8").splitlines() if s.strip()]
+    seen = set(lines)
+    with urlopen(ABLITERATE_JBB_BENIGN_URL, timeout=60) as r:
+        reader = csv.reader(r.read().decode("utf-8").splitlines())
+        next(reader)
+        for row in reader:
+            if len(row) > 1:
+                b = row[1].strip()  # Goal column
+                if b and b not in seen:
+                    seen.add(b)
+                    lines.append(b)
+    for instr in _abliterate_fetch_json_instructions(ABLITERATE_REFUSAL_DIR_HARMLESS):
+        if instr not in seen:
+            seen.add(instr)
+            lines.append(instr)
+    return lines
+
+
+def _cmd_abliterate_download_lists(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Download harmful/harmless instruction lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction)."""
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    harmful_path = out_dir / "harmful.txt"
+    harmless_path = out_dir / "harmless.txt"
+    try:
+        harmful_lines = _abliterate_merge_harmful_sources()
+        harmless_lines = _abliterate_merge_harmless_sources()
+        harmful_path.write_text("\n".join(harmful_lines) + "\n", encoding="utf-8")
+        harmless_path.write_text("\n".join(harmless_lines) + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"Error downloading lists: {e}", file=sys.stderr)
+        return 1
+    print(f"Saved harmful list:  {harmful_path} ({len(harmful_lines)} instructions)")
+    print(f"Saved harmless list: {harmless_path} ({len(harmless_lines)} instructions)")
+    print("Use with: --harmful", harmful_path, "--harmless", harmless_path)
+    return 0
+
+
+def _abliterate_output_dir_from_name(name: str) -> str:
+    """Return a default output dir name from abliterate run --name (e.g. google/gemma-3-4b-it-abliterated -> abliterate-google-gemma-3-4b-it-abliterated)."""
+    sanitized = name.replace("/", "-").strip()
+    while "  " in sanitized:
+        sanitized = sanitized.replace("  ", " ")
+    sanitized = sanitized.replace(" ", "-")
+    return f"abliterate-{sanitized}"
+
+
+def _cmd_abliterate_chat(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Interactive chat with abliterated checkpoint using the HF tokenizer (correct tokenization).
+    If abliterate serve is already running with the same model, chat connects to it instead of loading the checkpoint (saves memory and startup time). Use --no-serve to always load locally."""
+    try:
+        from ollama_tools.abliterate import run_chat
+        from ollama_tools.abliterate_serve import chat_via_serve
+    except ImportError:
+        print(
+            "Error: abliterate chat requires optional deps. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        return 1
+    name = getattr(args, "name", None)
+    checkpoint_arg = getattr(args, "checkpoint", None)
+    if name and checkpoint_arg:
+        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        return 1
+    if name:
+        checkpoint = (Path(_abliterate_output_dir_from_name(name)) / "checkpoint").resolve()
+        model_name = name
+    elif checkpoint_arg:
+        checkpoint = Path(checkpoint_arg).resolve()
+        model_name = None
+    else:
+        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        return 1
+    if not checkpoint.is_dir():
+        print(
+            f"Error: checkpoint dir not found: {checkpoint}",
+            file=sys.stderr,
+        )
+        if name:
+            print("  Run abliterate run first with that --name (checkpoint is saved by default).", file=sys.stderr)
+        return 1
+
+    # If we have a model name and user didn't pass --no-serve, try existing abliterate serve first
+    use_serve = not getattr(args, "no_serve", False)
+    if use_serve and model_name is not None:
+        serve_url = getattr(args, "serve_url", None) or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11435")
+        if chat_via_serve(
+            serve_url,
+            model_name,
+            max_new_tokens=getattr(args, "max_new_tokens", None),
+        ):
+            return 0
+        # Serve unreachable or model mismatch; fall back to local load
+        print("No serve at that URL (or model mismatch). Using local checkpoint.", file=sys.stderr)
+
+    try:
+        run_chat(
+            checkpoint,
+            max_new_tokens=getattr(args, "max_new_tokens", None),
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_abliterate_serve(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Start Ollama-API-compatible server for abliterated model (HF tokenizer)."""
+    try:
+        from ollama_tools.abliterate_serve import serve_abliterated
+    except ImportError:
+        print(
+            "Error: abliterate serve requires optional deps. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        return 1
+    name = getattr(args, "name", None)
+    checkpoint_arg = getattr(args, "checkpoint", None)
+    if name and checkpoint_arg:
+        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        return 1
+    if name:
+        checkpoint = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
+        model_name = name
+    elif checkpoint_arg:
+        checkpoint = Path(checkpoint_arg)
+        model_name = checkpoint.name if checkpoint.name != "checkpoint" else (checkpoint.parent.name if checkpoint.parent else "abliterated")
+    else:
+        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        return 1
+    if not checkpoint.is_dir():
+        print(f"Error: checkpoint dir not found: {checkpoint}", file=sys.stderr)
+        if name:
+            print("  Run abliterate run first with that --name.", file=sys.stderr)
+        return 1
+    try:
+        serve_abliterated(
+            str(checkpoint.resolve()),
+            model_name=model_name,
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 11435),
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _abliterate_resolve_model(model_id: str) -> str:
+    """
+    Resolve --model to the path or Hugging Face repo id to load.
+    Returns a path for a local .gguf file or local HF-format directory, otherwise the given model_id (HF repo).
+    """
+    p = Path(model_id)
+    if p.is_file() and str(model_id).lower().endswith(".gguf"):
+        return str(p.resolve())
+    if p.is_dir() and (p / "config.json").is_file():
+        return str(p.resolve())
+    return model_id
+
+
 def _cmd_abliterate_compute_dir(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
@@ -1546,16 +1805,23 @@ def _cmd_abliterate_compute_dir(
         )
         print(str(e), file=sys.stderr)
         return 1
+    model_id = _abliterate_resolve_model(args.model)
+    gguf_file_for_load = str(model_id) if str(model_id).lower().endswith(".gguf") else None
+    if gguf_file_for_load:
+        print(f"Using local GGUF at {model_id}", file=sys.stderr)
     try:
         harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
         try:
             compute_refusal_dir(
-                args.model,
+                model_id,
                 str(harmful_path),
                 str(harmless_path),
                 args.output,
                 num_instructions=args.num_instructions,
-                layer_frac=args.layer_frac,
+                layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
+                n_directions=getattr(args, "num_directions", 1),
+                load_in_8bit=getattr(args, "load_in_8bit", False),
+                gguf_file=gguf_file_for_load,
             )
             print(f"Saved refusal direction to {args.output}")
             return 0
@@ -1568,6 +1834,163 @@ def _cmd_abliterate_compute_dir(
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+
+def _cmd_abliterate_run(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
+    try:
+        from ollama_tools.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
+    except ImportError:
+        print(
+            "Error: abliterate run requires optional deps. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        return 1
+    exit_code = require_ollama()
+    if exit_code is not None:
+        return exit_code
+    model_id = getattr(args, "model", None)
+    name = getattr(args, "name", None)
+    if not model_id or not name:
+        print("Error: --model and --name are required", file=sys.stderr)
+        return 1
+    model_id = _abliterate_resolve_model(model_id)
+    gguf_file_for_load_run = str(model_id) if str(model_id).lower().endswith(".gguf") else None
+    if gguf_file_for_load_run:
+        print(f"Using local GGUF at {model_id}", file=sys.stderr)
+    default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
+    output_dir = Path(getattr(args, "output_dir", None) or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-tools-abliterate-")))
+    llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
+    if not llama_cpp_dir:
+        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+            if (candidate / "convert_hf_to_gguf.py").is_file():
+                llama_cpp_dir = candidate
+                break
+    if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+        print(
+            "Error: convert_hf_to_gguf.py not found. Set --llama-cpp-dir to your llama.cpp clone.",
+            file=sys.stderr,
+        )
+        return 1
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    refusal_pt = output_dir / "refusal_dir.pt"
+    checkpoint_dir = output_dir / "checkpoint"
+    gguf_path = output_dir / "model.gguf"
+    try:
+        harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
+        try:
+            print("Computing refusal direction...", file=sys.stderr)
+            compute_refusal_dir(
+                model_id,
+                str(harmful_path),
+                str(harmless_path),
+                str(refusal_pt),
+                num_instructions=getattr(args, "num_instructions", 32),
+                layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
+                n_directions=getattr(args, "num_directions", 1),
+                load_in_8bit=getattr(args, "load_in_8bit", False),
+                gguf_file=gguf_file_for_load_run,
+            )
+            print("Baking ablation into weights and saving checkpoint...", file=sys.stderr)
+            apply_refusal_dir_and_save(
+                model_id,
+                refusal_pt,
+                checkpoint_dir,
+                verify=not getattr(args, "no_verify", False),
+                gguf_file=gguf_file_for_load_run,
+                strength=getattr(args, "strength", 1.0),
+                skip_begin_layers=getattr(args, "skip_begin_layers", 0),
+                skip_end_layers=getattr(args, "skip_end_layers", 0),
+            )
+        finally:
+            for t in temp_files:
+                Path(t).unlink(missing_ok=True)
+    except Exception as e:
+        import traceback
+        msg = str(e).strip() or f"{type(e).__name__} (no message)"
+        print(f"Error: {msg}", file=sys.stderr)
+        if not str(e).strip():
+            traceback.print_exc(file=sys.stderr)
+        return 1
+    print("Converting to GGUF...", file=sys.stderr)
+    convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
+    checkpoint_abs = checkpoint_dir.resolve()
+    gguf_path_abs = gguf_path.resolve()
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(convert_script),
+                str(checkpoint_abs),
+                "--outfile",
+                str(gguf_path_abs),
+            ],
+            cwd=str(llama_cpp_dir.resolve()),
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Error: GGUF conversion failed: {e}", file=sys.stderr)
+        return 1
+    if not gguf_path.is_file():
+        print("Error: GGUF file was not produced", file=sys.stderr)
+        return 1
+    gguf_to_use = gguf_path
+    requantize = not getattr(args, "no_requantize", False)
+    if requantize:
+        quant_type = getattr(args, "quant", "Q4_K_M")
+        quantize_bin = _which_quantize()
+        if not quantize_bin:
+            print(
+                "Error: requantize (default) requires llama.cpp 'quantize' or 'llama-quantize' on PATH",
+                file=sys.stderr,
+            )
+            print("  Add llama.cpp build dir to PATH, or pass --no-requantize to keep full-size GGUF.", file=sys.stderr)
+            return 1
+        quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
+        print(f"Quantizing to {quant_type}...", file=sys.stderr)
+        try:
+            subprocess.run(
+                [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"Error: quantization failed: {e}", file=sys.stderr)
+            return 1
+        if quant_gguf.is_file():
+            gguf_to_use = quant_gguf
+    # Use absolute path so Ollama finds the GGUF when the Modelfile is in a temp dir
+    gguf_for_modelfile = gguf_to_use.resolve()
+    content = build_modelfile(str(gguf_for_modelfile))
+    _model_path = Path(model_id)
+    _is_local_hf = _model_path.is_dir() and (_model_path / "config.json").is_file()
+    template_from = getattr(args, "template_from", None) or (None if _is_local_hf else model_id)
+    if template_from:
+        ref_content = run_ollama_show_modelfile(template_from)
+        if ref_content:
+            content = merge_modelfile_with_reference_template(
+                content, ref_content, base=str(gguf_for_modelfile), template_only=True
+            )
+            print(f"Using chat template from Ollama model {template_from!r} (for tool/Chat API support)", file=sys.stderr)
+        else:
+            print(f"Note: no Ollama model {template_from!r} found; pull it first if the abliterated model should support tools.", file=sys.stderr)
+    elif _is_local_hf:
+        print("Note: using local HF path; pass --template-from <ollama_model> if the abliterated model should support tools.", file=sys.stderr)
+    if not getattr(args, "output_dir", None):
+        print(
+            "To chat with correct tokenization (HF tokenizer): "
+            f"ollama-tools abliterate chat --name {name}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "To chat with correct tokenization (HF tokenizer): "
+            f"ollama-tools abliterate chat --checkpoint {output_dir / 'checkpoint'}",
+            file=sys.stderr,
+        )
+    return run_ollama_create(name, content)
 
 
 def _load_env() -> None:
@@ -2180,7 +2603,11 @@ def main() -> int:
         help="Compute refusal direction from harmful/harmless instructions "
         "(needs: uv sync --extra abliterate)",
     )
-    p_compute.add_argument("--model", required=True, help="Hugging Face model id")
+    p_compute.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
+    )
     p_compute.add_argument(
         "--harmful",
         help="Path to file with harmful instructions (one per line)",
@@ -2209,12 +2636,187 @@ def main() -> int:
         help="Number of instructions to sample (default: 32)",
     )
     p_compute.add_argument(
-        "--layer-frac",
+        "--layer-fracs",
         type=float,
-        default=0.6,
-        help="Layer index as fraction of depth (default: 0.6)",
+        nargs="+",
+        default=[0.4, 0.5, 0.6],
+        metavar="F",
+        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
+    )
+    p_compute.add_argument(
+        "--num-directions",
+        type=int,
+        default=1,
+        help="Number of refusal directions from SVD (default: 1)",
+    )
+    p_compute.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
     )
     p_compute.set_defaults(handler=_cmd_abliterate_compute_dir)
+
+    p_run = abliterate_sub.add_parser(
+        "run",
+        help="Compute, apply, convert to GGUF, requantize (default), and create Ollama model",
+    )
+    p_run.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
+    )
+    p_run.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_run.add_argument(
+        "--output-dir",
+        help="Directory for checkpoint and GGUF (default: ./abliterate-<name>, or temp if no --name)",
+    )
+    p_run.add_argument(
+        "--llama-cpp-dir",
+        help="Path to llama.cpp clone (for convert_hf_to_gguf.py); default: ./llama.cpp or ~/llama.cpp",
+    )
+    p_run.add_argument("--harmful", help="Path to file with harmful instructions (one per line)")
+    p_run.add_argument("--harmless", help="Path to file with harmless instructions (one per line)")
+    p_run.add_argument("--harmful-dir", help="Directory of .txt files with harmful instructions")
+    p_run.add_argument("--harmless-dir", help="Directory of .txt files with harmless instructions")
+    p_run.add_argument(
+        "--num-instructions",
+        type=int,
+        default=32,
+        help="Number of instructions for direction (default: 32)",
+    )
+    p_run.add_argument(
+        "--layer-fracs",
+        type=float,
+        nargs="+",
+        default=[0.4, 0.5, 0.6],
+        metavar="F",
+        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
+    )
+    p_run.add_argument(
+        "--num-directions",
+        type=int,
+        default=1,
+        help="Number of refusal directions from SVD (default: 1)",
+    )
+    p_run.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
+    )
+    p_run.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip forward-pass verification after ablation (default: verify)",
+    )
+    p_run.add_argument(
+        "--strength",
+        type=float,
+        default=1.0,
+        metavar="ALPHA",
+        help="Ablation strength 0 < ALPHA <= 1 (default: 1.0). Use 0.5–0.7 on small models to reduce coherence loss.",
+    )
+    p_run.add_argument(
+        "--skip-begin-layers",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Number of layers to skip at the start (default: 0 for full abliteration).",
+    )
+    p_run.add_argument(
+        "--skip-end-layers",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Number of layers to skip at the end (default: 0 for full abliteration).",
+    )
+    p_run.add_argument(
+        "--no-requantize",
+        action="store_true",
+        help="Skip quantizing GGUF (default: quantize to --quant to keep size similar to input)",
+    )
+    p_run.add_argument(
+        "--quant",
+        default="Q4_K_M",
+        help="GGUF quantization when requantizing (default: Q4_K_M); requires quantize on PATH",
+    )
+    p_run.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Ollama model to copy chat template from (default: same as --model; pull that model first for tool support)",
+    )
+    p_run.set_defaults(handler=_cmd_abliterate_run)
+
+    p_download = abliterate_sub.add_parser(
+        "download-lists",
+        help="Download harmful/harmless lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction)",
+    )
+    p_download.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory to write harmful.txt and harmless.txt (default: current dir)",
+    )
+    p_download.set_defaults(handler=_cmd_abliterate_download_lists)
+
+    p_chat = abliterate_sub.add_parser(
+        "chat",
+        help="Interactive chat using abliterated checkpoint (HF tokenizer; use when GGUF/Ollama output is garbled)",
+    )
+    p_chat.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Ollama/model name from abliterate run (finds checkpoint in ./abliterate-<name>/checkpoint)",
+    )
+    p_chat.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Path to checkpoint dir (alternative to --name)",
+    )
+    p_chat.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max new tokens per reply (default: from model config max_position_embeddings, capped at 8192)",
+    )
+    p_chat.add_argument(
+        "--serve-url",
+        metavar="URL",
+        default=None,
+        help="Try this abliterate serve URL first (default: OLLAMA_HOST or http://127.0.0.1:11435); if reachable and model matches, chat uses it instead of loading the checkpoint",
+    )
+    p_chat.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Do not try an existing serve; always load the checkpoint locally",
+    )
+    p_chat.set_defaults(handler=_cmd_abliterate_chat)
+
+    p_serve = abliterate_sub.add_parser(
+        "serve",
+        help="Ollama-API-compatible server for abliterated model (HF tokenizer); agents use OLLAMA_HOST to point here",
+    )
+    p_serve.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Ollama/model name from abliterate run (checkpoint in ./abliterate-<name>/checkpoint)",
+    )
+    p_serve.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Path to checkpoint directory (alternative to --name)",
+    )
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (use 0.0.0.0 if clients run in Docker/another host)",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=11435,
+        help="Bind port (default: 11435; use a different port if Ollama runs on 11434)",
+    )
+    p_serve.set_defaults(handler=_cmd_abliterate_serve)
 
     # adapters (search Hugging Face for adapters)
     p_adapters = subparsers.add_parser(

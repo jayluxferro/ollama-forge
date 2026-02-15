@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25"]
+abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25", "gguf>=0.10.0"]
 
 [project.scripts]
 ollama-tools = "ollama_tools.cli:main"
