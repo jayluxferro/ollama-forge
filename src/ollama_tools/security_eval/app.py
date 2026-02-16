@@ -81,24 +81,49 @@ def main() -> None:
         if by_cat:
             st.subheader("By category")
             import pandas as pd
-            df_cat = pd.DataFrame([
-                {"category": cat, "ASR %": v.get("asr_pct", 0), "Refusal %": v.get("refusal_rate_pct", 0), "total": v.get("total", 0)}
-                for cat, v in by_cat.items()
-            ])
+
+            df_cat = pd.DataFrame(
+                [
+                    {
+                        "category": cat,
+                        "ASR %": v.get("asr_pct", 0),
+                        "Refusal %": v.get("refusal_rate_pct", 0),
+                        "total": v.get("total", 0),
+                    }
+                    for cat, v in by_cat.items()
+                ]
+            )
             st.dataframe(df_cat, use_container_width=True)
             try:
                 import plotly.express as px
-                fig = px.bar(df_cat, x="category", y=["ASR %", "Refusal %"], barmode="group", title="ASR and Refusal rate by category")
+
+                fig = px.bar(
+                    df_cat,
+                    x="category",
+                    y=["ASR %", "Refusal %"],
+                    barmode="group",
+                    title="ASR and Refusal rate by category",
+                )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 pass
 
         st.subheader("Per-prompt results")
         import pandas as pd
+
         df = pd.DataFrame(results)
         if not df.empty:
-            st.dataframe(df[["index", "category", "refusal", "compliance", "extraction", "duration_sec", "error"]], use_container_width=True)
-        st.json({"model": run_meta.get("model"), "prompt_set": run_meta.get("prompt_set"), "timestamp_iso": run_meta.get("timestamp_iso")})
+            st.dataframe(
+                df[["index", "category", "refusal", "compliance", "extraction", "duration_sec", "error"]],
+                use_container_width=True,
+            )
+        st.json(
+            {
+                "model": run_meta.get("model"),
+                "prompt_set": run_meta.get("prompt_set"),
+                "timestamp_iso": run_meta.get("timestamp_iso"),
+            }
+        )
 
     st.divider()
     st.subheader("Run history")
@@ -106,13 +131,24 @@ def main() -> None:
         runs = load_runs(limit=50)
         if runs:
             import pandas as pd
-            df_runs = pd.DataFrame([
-                {"id": r["id"], "model": r["model"], "prompt_set": r["prompt_set"], "timestamp": r["timestamp_iso"], "ASR %": r["kpis"].get("asr_pct"), "Refusal %": r["kpis"].get("refusal_rate_pct")}
-                for r in runs
-            ])
+
+            df_runs = pd.DataFrame(
+                [
+                    {
+                        "id": r["id"],
+                        "model": r["model"],
+                        "prompt_set": r["prompt_set"],
+                        "timestamp": r["timestamp_iso"],
+                        "ASR %": r["kpis"].get("asr_pct"),
+                        "Refusal %": r["kpis"].get("refusal_rate_pct"),
+                    }
+                    for r in runs
+                ]
+            )
             st.dataframe(df_runs, use_container_width=True)
             try:
                 import plotly.express as px
+
                 df_runs["timestamp"] = pd.to_datetime(df_runs["timestamp"], errors="coerce")
                 df_plot = df_runs.dropna(subset=["timestamp"]).sort_values("timestamp")
                 if not df_plot.empty:

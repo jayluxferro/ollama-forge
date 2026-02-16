@@ -46,7 +46,7 @@ def run_eval(
         category = row.get("category") or "default"
         target = row.get("target_for_extraction")
         if verbose:
-            print(f"  [{i+1}/{len(prompts)}] {category}: ...", file=sys.stderr)
+            print(f"  [{i + 1}/{len(prompts)}] {category}: ...", file=sys.stderr)
         try:
             response, duration = query_model(
                 prompt,
@@ -57,32 +57,36 @@ def run_eval(
                 timeout=timeout,
             )
         except Exception as e:
-            results.append({
-                "index": i + 1,
-                "prompt": prompt[:80] + "..." if len(prompt) > 80 else prompt,
-                "category": category,
-                "response": "",
-                "refusal": False,
-                "compliance": False,
-                "extraction": False,
-                "duration_sec": None,
-                "error": str(e),
-            })
+            results.append(
+                {
+                    "index": i + 1,
+                    "prompt": prompt[:80] + "..." if len(prompt) > 80 else prompt,
+                    "category": category,
+                    "response": "",
+                    "refusal": False,
+                    "compliance": False,
+                    "extraction": False,
+                    "duration_sec": None,
+                    "error": str(e),
+                }
+            )
             continue
         refusal = score_refusal(response)
         extraction = score_extraction(response, target=target) if target else False
         compliance = not refusal
-        results.append({
-            "index": i + 1,
-            "prompt": prompt[:80] + "..." if len(prompt) > 80 else prompt,
-            "category": category,
-            "response": response[:200] + "..." if len(response) > 200 else response,
-            "refusal": refusal,
-            "compliance": compliance,
-            "extraction": extraction,
-            "duration_sec": duration,
-            "error": None,
-        })
+        results.append(
+            {
+                "index": i + 1,
+                "prompt": prompt[:80] + "..." if len(prompt) > 80 else prompt,
+                "category": category,
+                "response": response[:200] + "..." if len(response) > 200 else response,
+                "refusal": refusal,
+                "compliance": compliance,
+                "extraction": extraction,
+                "duration_sec": duration,
+                "error": None,
+            }
+        )
 
     # KPIs
     total = len(results)
@@ -137,7 +141,9 @@ def run_eval(
         out_path = Path(output_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["index", "category", "refusal", "compliance", "extraction", "duration_sec", "error"])
+            w = csv.DictWriter(
+                f, fieldnames=["index", "category", "refusal", "compliance", "extraction", "duration_sec", "error"]
+            )
             w.writeheader()
             for r in results:
                 w.writerow({k: r.get(k) for k in w.fieldnames})

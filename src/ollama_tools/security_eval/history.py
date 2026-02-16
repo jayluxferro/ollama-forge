@@ -61,19 +61,22 @@ def load_runs(db_path: str | Path | None = None, limit: int = 100) -> list[dict]
         return []
     conn = sqlite3.connect(path)
     rows = conn.execute(
-        "SELECT id, model, base_url, prompt_set, timestamp_iso, kpis_json, results_json FROM runs ORDER BY id DESC LIMIT ?",
+        "SELECT id, model, base_url, prompt_set, timestamp_iso, kpis_json, results_json "
+        "FROM runs ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     conn.close()
     out = []
     for r in rows:
-        out.append({
-            "id": r[0],
-            "model": r[1],
-            "base_url": r[2],
-            "prompt_set": r[3],
-            "timestamp_iso": r[4],
-            "kpis": json.loads(r[5]) if r[5] else {},
-            "results": json.loads(r[6]) if r[6] else [],
-        })
+        out.append(
+            {
+                "id": r[0],
+                "model": r[1],
+                "base_url": r[2],
+                "prompt_set": r[3],
+                "timestamp_iso": r[4],
+                "kpis": json.loads(r[5]) if r[5] else {},
+                "results": json.loads(r[6]) if r[6] else [],
+            }
+        )
     return out

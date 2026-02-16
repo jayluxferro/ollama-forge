@@ -19,9 +19,7 @@ def load_recipe(path: str | Path) -> dict:
         try:
             import yaml
         except ImportError:
-            raise ImportError(
-                "PyYAML required for YAML recipes. Install with: uv add pyyaml"
-            ) from None
+            raise ImportError("PyYAML required for YAML recipes. Install with: uv add pyyaml") from None
         data = yaml.safe_load(text)
     else:
         raise ValueError(f"Unsupported recipe format: {suffix}. Use .yaml, .yml, or .json")
@@ -32,8 +30,7 @@ def load_recipe(path: str | Path) -> dict:
     sources = [k for k in ("base", "gguf", "hf_repo") if data.get(k)]
     if len(sources) == 0:
         raise ValueError(
-            "Recipe must include one of: 'base' (create-from-base), 'gguf' (path), "
-            "or 'hf_repo' (Hugging Face repo id)"
+            "Recipe must include one of: 'base' (create-from-base), 'gguf' (path), or 'hf_repo' (Hugging Face repo id)"
         )
     if len(sources) > 1:
         raise ValueError("Recipe must include only one of: 'base', 'gguf', 'hf_repo'")

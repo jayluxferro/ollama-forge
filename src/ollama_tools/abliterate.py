@@ -11,7 +11,8 @@ from pathlib import Path
 
 
 def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
-    """Remove leading/trailing role-only lines (user/model/assistant or User:/Model:/Assistant:) and echoed last user message."""
+    """Remove leading/trailing role-only lines (user/model/assistant or User:/Model:/Assistant:)
+    and echoed last user message."""
     if not text or not text.strip():
         return text
     role_only = re.compile(r"^(model|user|assistant|User|Model|Assistant)\s*:?\s*$", re.IGNORECASE)
@@ -23,7 +24,8 @@ def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
         if not line:
             lines.pop(0)
             continue
-        if role_only.match(line) or (last_stripped and line == last_stripped) or (last_stripped and (line == f"User: {last_stripped}" or line == f"user: {last_stripped}")):
+        user_echo = last_stripped and (line == f"User: {last_stripped}" or line == f"user: {last_stripped}")
+        if role_only.match(line) or (last_stripped and line == last_stripped) or user_echo:
             lines.pop(0)
             continue
         break
@@ -41,7 +43,8 @@ def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
 
 
 def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict):
-    """Call AutoModelForCausalLM.from_pretrained; if Invalid version 'N/A' (e.g. from GGUF metadata), patch packaging.version and retry."""
+    """Call AutoModelForCausalLM.from_pretrained; on Invalid version 'N/A' (e.g. GGUF metadata),
+    patch packaging.version and retry."""
     from transformers import AutoModelForCausalLM
 
     try:
@@ -95,10 +98,15 @@ def _model_max_position_embeddings(model):  # noqa: ANN001
 
 
 def get_layers(model):  # noqa: ANN001
-    """Return the list of transformer layers (model.model.layers, model.model.language_model.layers, or model.transformer.h)."""
+    """Return transformer layers (model.model.layers, model.model.language_model.layers, or
+    model.transformer.h)."""
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return model.model.layers
-    if hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "layers"):
+    if (
+        hasattr(model, "model")
+        and hasattr(model.model, "language_model")
+        and hasattr(model.model.language_model, "layers")
+    ):
         return model.model.language_model.layers
     if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         return model.transformer.h
@@ -145,9 +153,7 @@ def compute_refusal_dir(
         harmless_lines = [s for s in (line.strip() for line in f) if s]
 
     # Support loading from GGUF (e.g. Ollama blob path) when gguf_file is set or model_id is a .gguf path
-    use_gguf = gguf_file is not None or (
-        isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf")
-    )
+    use_gguf = gguf_file is not None or (isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf"))
     gguf_path_str = str(gguf_file) if gguf_file else (str(model_id) if use_gguf else None)
     load_from_gguf_kw: dict = {}
     if gguf_path_str:
@@ -155,9 +161,7 @@ def compute_refusal_dir(
         if use_gguf and not gguf_file:
             model_id = gguf_path_str  # use path as identifier for GGUF-only load
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, **load_from_gguf_kw
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, **load_from_gguf_kw)
     if device is None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         device = "cpu"
     load_kw: dict = {
@@ -171,8 +175,7 @@ def compute_refusal_dir(
             from transformers import BitsAndBytesConfig
         except ImportError:
             raise ImportError(
-                "load_in_8bit requires bitsandbytes and transformers support. "
-                "Install with: pip install bitsandbytes"
+                "load_in_8bit requires bitsandbytes and transformers support. Install with: pip install bitsandbytes"
             ) from None
         load_kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
     elif not gguf_path_str:
@@ -330,15 +333,11 @@ def apply_refusal_dir_and_save(
             d[:, j] = col / nrm
     I_minus_DDT = torch.eye(hidden_size) - strength * (d @ d.T)
 
-    use_gguf = gguf_file is not None or (
-        isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf")
-    )
+    use_gguf = gguf_file is not None or (isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf"))
     gguf_path_str = str(gguf_file) if gguf_file else (str(model_id) if use_gguf else None)
     load_gguf_kw: dict = {"gguf_file": gguf_path_str} if gguf_path_str else {}
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=True, **load_gguf_kw
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, **load_gguf_kw)
     load_apply_kw = {
         "trust_remote_code": True,
         "dtype": torch.bfloat16,
@@ -444,9 +443,7 @@ def run_chat(
 
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.is_dir() or not (checkpoint_dir / "config.json").is_file():
-        raise FileNotFoundError(
-            f"Checkpoint dir not found or invalid (no config.json): {checkpoint_dir}"
-        )
+        raise FileNotFoundError(f"Checkpoint dir not found or invalid (no config.json): {checkpoint_dir}")
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, trust_remote_code=True)
     load_kw: dict = {

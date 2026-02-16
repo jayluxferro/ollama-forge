@@ -49,6 +49,7 @@ def _normalize_message_for_template(m: dict) -> dict:
             args = fn.get("arguments")
             if isinstance(args, dict):
                 import json
+
                 args = json.dumps(args)
             out["tool_calls"].append({"type": "function", "function": {"name": name, "arguments": args or "{}"}})
     if m.get("role") == "tool":
@@ -57,7 +58,8 @@ def _normalize_message_for_template(m: dict) -> dict:
 
 
 def _ollama_tools_to_hf(tools: list[dict] | None) -> list[dict] | None:
-    """Convert Ollama tools array to format HF apply_chat_template expects (type, function with name, description, parameters)."""
+    """Convert Ollama tools to format HF apply_chat_template expects
+    (type, function with name, description, parameters)."""
     if not tools:
         return None
     out = []
@@ -65,14 +67,16 @@ def _ollama_tools_to_hf(tools: list[dict] | None) -> list[dict] | None:
         if t.get("type") != "function":
             continue
         fn = t.get("function") or {}
-        out.append({
-            "type": "function",
-            "function": {
-                "name": fn.get("name") or "",
-                "description": fn.get("description") or "",
-                "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-            },
-        })
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": fn.get("name") or "",
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                },
+            }
+        )
     return out if out else None
 
 
@@ -128,7 +132,9 @@ def _format_instruction(format_spec: str | dict | None) -> str | None:
     if format_spec == "json":
         return "Respond with valid JSON only. No markdown code fences or explanation outside the JSON."
     if isinstance(format_spec, dict):
-        return "Respond with a single JSON object that conforms to this schema (no other text): " + json.dumps(format_spec)
+        return "Respond with a single JSON object that conforms to this schema (no other text): " + json.dumps(
+            format_spec
+        )
     return None
 
 
@@ -152,7 +158,7 @@ def _inject_format_into_messages(messages: list[dict], format_instruction: str |
 
 def _split_thinking_content(text: str) -> tuple[str, str]:
     """Split model output into thinking and content. Supports <think>...</think>
- and similar tags. Returns (thinking, content)."""
+    and similar tags. Returns (thinking, content)."""
     thinking_parts = []
     rest = text
     while True:
@@ -171,7 +177,8 @@ def _split_thinking_content(text: str) -> tuple[str, str]:
 
 
 def _parse_tool_calls_from_text(text: str) -> list[dict]:
-    """Extract tool call(s) from model output. Returns list of Ollama-format tool_calls (type, function.name, function.arguments)."""
+    """Extract tool call(s) from model output. Returns list of Ollama-format tool_calls
+    (type, function.name, function.arguments)."""
     tool_calls = []
     i = 0
     while i < len(text):
@@ -194,10 +201,12 @@ def _parse_tool_calls_from_text(text: str) -> list[dict]:
                         if name and args is not None:
                             if isinstance(args, dict):
                                 args = json.dumps(args)
-                            tool_calls.append({
-                                "type": "function",
-                                "function": {"name": name, "arguments": args},
-                            })
+                            tool_calls.append(
+                                {
+                                    "type": "function",
+                                    "function": {"name": name, "arguments": args},
+                                }
+                            )
                     except (json.JSONDecodeError, TypeError):
                         pass
                     i = j + 1
@@ -208,7 +217,9 @@ def _parse_tool_calls_from_text(text: str) -> list[dict]:
     return tool_calls
 
 
-def _messages_to_input_ids(tokenizer, messages: list[dict], add_generation_prompt: bool = True, tools: list[dict] | None = None):
+def _messages_to_input_ids(
+    tokenizer, messages: list[dict], add_generation_prompt: bool = True, tools: list[dict] | None = None
+):
     """Convert Ollama-style messages to input_ids. Returns (input_ids tensor, attention_mask)."""
     import torch
 
@@ -266,7 +277,11 @@ def _prompt_system_to_input_ids(tokenizer, prompt: str, system: str | None, form
                 return_tensors="pt",
             )
             input_ids = encoded if isinstance(encoded, torch.Tensor) else encoded["input_ids"]
-            attention_mask = encoded.get("attention_mask") if isinstance(encoded, dict) else torch.ones_like(input_ids, dtype=torch.long)
+            attention_mask = (
+                encoded.get("attention_mask")
+                if isinstance(encoded, dict)
+                else torch.ones_like(input_ids, dtype=torch.long)
+            )
             return input_ids, attention_mask
         except Exception:
             pass
@@ -284,6 +299,7 @@ def _prompt_system_to_input_ids(tokenizer, prompt: str, system: str | None, form
 def _compute_logprobs(tokenizer, scores_tuple, generated_ids, top_logprobs: int = 0) -> list[dict]:
     """Build Ollama-style logprobs from HF generate output. scores_tuple is per-token (batch, vocab_size)."""
     import torch
+
     logprobs_list = []
     for i, logits in enumerate(scores_tuple):
         # logits: (1, vocab_size)
@@ -319,6 +335,7 @@ def _generate(
     stop: list[str] | None = None,
     return_logprobs: bool = False,
     top_logprobs: int = 0,
+    pixel_values=None,
 ):
     """Run generation; returns (full_text, prompt_tok_count, gen_tok_count, logprobs_or_none)."""
     import torch
@@ -327,7 +344,6 @@ def _generate(
         "input_ids": input_ids.to(model.device),
         "attention_mask": attention_mask.to(model.device),
     }
-    pixel_values = gen_kw.pop("pixel_values", None)
     if pixel_values is not None:
         toks["pixel_values"] = pixel_values.to(model.device)
     gen_kw: dict = {
@@ -402,6 +418,7 @@ def _generate_stream(model, tokenizer, input_ids, attention_mask, **gen_kw):
 def _embed_text(model, tokenizer, text: str):
     """Return L2-normalized embedding vector for text (mean-pool last hidden state)."""
     import torch
+
     toks = tokenizer(text, return_tensors="pt", truncation=True, max_length=8192)
     toks = {k: v.to(model.device) for k, v in toks.items()}
     with torch.inference_mode():
@@ -414,7 +431,7 @@ def _embed_text(model, tokenizer, text: str):
     else:
         pooled = hidden.mean(dim=1)
     vec = pooled.float().cpu().numpy()
-    norm = (vec ** 2).sum(axis=1, keepdims=True) ** 0.5
+    norm = (vec**2).sum(axis=1, keepdims=True) ** 0.5
     norm = norm.clip(1e-12)
     vec = (vec / norm).astype("float32")
     return vec.tolist()[0]
@@ -438,20 +455,23 @@ def _options_to_gen_kw(options: dict | None) -> dict:
 
 
 def _last_user_content_from_prompt(prompt: str) -> str | None:
-    """From a generate prompt that may contain 'User: ...' / 'Assistant: ...' turns, return the last user segment for stripping."""
+    """From a generate prompt with 'User: ...' / 'Assistant: ...' turns,
+    return the last user segment for stripping."""
     import re
+
     if not prompt or not prompt.strip():
         return None
     # Find last "User: ..." or "user: ..." segment (up to next Assistant:/User: or end)
     parts = re.split(r"\n\s*(?:User|Assistant|Model)\s*:\s*", prompt, flags=re.IGNORECASE)
     if not parts:
         return None
-    # If prompt starts with "User: ", parts[0] may be empty or system; odd-indexed parts are User, even are Assistant in typical alternation. Last segment is often the current user turn.
+    # If prompt starts with "User: ", parts[0] may be empty or system; odd=User, even=Assistant.
+    # Last segment is often the current user turn.
     for i in range(len(parts) - 1, -1, -1):
         segment = parts[i].strip()
         if not segment:
             continue
-        # Heuristic: last non-empty segment after a split on "User:" or "Assistant:" is often the last user message (CLI builds User: A\n\nAssistant: B\n\nUser: C, so we get [..., "C"] or similar)
+        # Heuristic: last non-empty segment after split on "User:"/"Assistant:" is last user msg.
         return segment
     return None
 
@@ -463,23 +483,24 @@ def _strip_leading_chat_artifacts(
     strip_user_contents: set[str] | None = None,
     strip_assistant_contents: list[str] | None = None,
 ) -> str:
-    """Remove leading previous assistant echo(s), role labels, or any echoed user message from the conversation."""
+    """Remove leading previous assistant echo(s), role labels, or echoed user message."""
     import re
+
     if not text or not text.strip():
         return text
-    # Whole-line role labels: "user", "model", "assistant" or "User:", "Model:", "Assistant:" (with optional colon/spaces)
+    # Whole-line role labels: user/model/assistant or User:/Model:/Assistant: (optional colon/spaces)
     role_only = re.compile(r"^(model|user|assistant|User|Model|Assistant)\s*:?\s*$", re.IGNORECASE)
     user_contents = strip_user_contents or set()
     if last_user_content:
         user_contents = set(user_contents) | {(last_user_content or "").strip()}
-    # All previous assistant replies (try longest first so we strip a full reply, not a prefix)
+    # Previous assistant replies (longest first so we strip full reply, not prefix)
     sorted_assistant = sorted((a for a in (strip_assistant_contents or []) if a), key=len, reverse=True)
 
     while True:
         rest = text.lstrip()
         if not rest:
             return rest
-        # Strip leading block of any previous assistant reply when followed by a role line (model echoing full conversation)
+        # Strip leading block of previous assistant reply when followed by role line
         stripped_block = False
         for ac in sorted_assistant:
             if rest.startswith(ac):
@@ -520,6 +541,7 @@ def _strip_leading_chat_artifacts(
 def _strip_trailing_role_lines(text: str) -> str:
     """Remove trailing lines that are only role labels (model/user/assistant or User:/Model:/Assistant:)."""
     import re
+
     if not text or not text.strip():
         return text
     role_only = re.compile(r"^(model|user|assistant|User|Model|Assistant)\s*:?\s*$", re.IGNORECASE)
@@ -541,14 +563,15 @@ def _strip_leading_role_line(text: str) -> str:
     return _strip_leading_chat_artifacts(text, last_user_content=None)
 
 
-# Prefixes we hold back so we don't send "model", "user", "assistant" or "User:", "Model:" to the client when they arrive across chunk boundaries
+# Prefixes we hold back so "model"/"user"/"assistant" or "User:"/"Model:" don't reach client across chunks
 _ROLE_PREFIXES = ("model", "user", "assistant", "user:", "model:", "assistant:")
 
 
 def _strip_role_lines_and_hold_prefix(text: str) -> tuple[str, str]:
-    """Remove leading lines that are only model/user/assistant or User:/Model:/Assistant:. Return (to_yield, pending).
-    If the remainder is a prefix of a role word (e.g. 'mod'), hold it in pending so we don't send it yet."""
+    """Remove leading role-only lines. Return (to_yield, pending). If remainder is a prefix of a role
+    word (e.g. 'mod'), hold in pending so we don't send it yet."""
     import re
+
     if not text:
         return "", ""
     role_only = re.compile(r"^(model|user|assistant|User|Model|Assistant)\s*:?\s*$", re.IGNORECASE)
@@ -574,7 +597,8 @@ def _strip_role_lines_and_hold_prefix(text: str) -> tuple[str, str]:
     rest_lower = rest.lower()
     for role in _ROLE_PREFIXES:
         r = role.rstrip(":")
-        if rest_lower == r or rest_lower == role or (len(rest_lower) < len(r) and r.startswith(rest_lower)):
+        is_prefix = len(rest_lower) < len(r) and r.startswith(rest_lower)
+        if rest_lower == r or rest_lower == role or is_prefix:
             return "", rest
     return rest, ""
 
@@ -586,8 +610,8 @@ def _stream_strip_leading_role(
     strip_user_contents: set[str] | None = None,
     strip_assistant_contents: list[str] | None = None,
 ):
-    """Yield (content, done) from chunks, stripping leading previous assistant echo(s), role lines, and any echoed user message.
-    After the first batch we keep filtering role-only lines from every chunk so 'user'/'model' never reach the client."""
+    """Yield (content, done) from chunks, stripping leading assistant echo(s), role lines, echoed user.
+    After first batch keep filtering role-only lines so 'user'/'model' never reach the client."""
     buffer = []
     stripped = False
     pending = ""
@@ -620,15 +644,18 @@ def _stream_strip_leading_role(
                 yield full, False
             buffer = []
     if buffer and not stripped:
-        yield _strip_trailing_role_lines(
-            _strip_leading_chat_artifacts(
-                "".join(buffer),
-                last_user_content=last_user_content,
-                last_assistant_content=last_assistant_content,
-                strip_user_contents=strip_user_contents,
-                strip_assistant_contents=strip_assistant_contents,
-            )
-        ), True
+        yield (
+            _strip_trailing_role_lines(
+                _strip_leading_chat_artifacts(
+                    "".join(buffer),
+                    last_user_content=last_user_content,
+                    last_assistant_content=last_assistant_content,
+                    strip_user_contents=strip_user_contents,
+                    strip_assistant_contents=strip_assistant_contents,
+                )
+            ),
+            True,
+        )
 
 
 def _make_ollama_chat_event(model_name: str, content: str, done: bool, **extra) -> dict:
@@ -663,6 +690,7 @@ def _strip_serve_reply_artifacts(
     (or model) returns full conversation instead of just the new turn.
     """
     import re
+
     if not text or not text.strip():
         return text
     last_user = (last_user_content or "").strip()
@@ -936,37 +964,45 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path == "/api/tags":
             # Match Ollama response shape so clients (e.g. Open WebUI) show the model
-            self._send_json({
-                "models": [{
-                    "name": self._model_name,
-                    "model": self._model_name,
-"modified_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-            "size": getattr(self.server, "_ollama_model_size", 0),
-            "digest": "abliterate-serve",
-            "details": {
-                "format": "abliterate",
-                        "family": "abliterated",
-                        "families": ["abliterated"],
-                        "parameter_size": "",
-                        "quantization_level": "",
-                    },
-                }]
-            })
+            self._send_json(
+                {
+                    "models": [
+                        {
+                            "name": self._model_name,
+                            "model": self._model_name,
+                            "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                            "size": getattr(self.server, "_ollama_model_size", 0),
+                            "digest": "abliterate-serve",
+                            "details": {
+                                "format": "abliterate",
+                                "family": "abliterated",
+                                "families": ["abliterated"],
+                                "parameter_size": "",
+                                "quantization_level": "",
+                            },
+                        }
+                    ]
+                }
+            )
             return
         if path == "/api/ps":
             # List running models (Ollama format)
-            self._send_json({
-                "models": [{
-                    "name": self._model_name,
-                    "model": self._model_name,
-                    "size": getattr(self.server, "_ollama_model_size", 0),
-                    "digest": "abliterate-serve",
-                    "details": {"parent_model": "", "format": "abliterate", "family": "abliterated"},
-                    "expires_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                    "size_vram": 0,
-                    "context_length": 4096,
-                }]
-            })
+            self._send_json(
+                {
+                    "models": [
+                        {
+                            "name": self._model_name,
+                            "model": self._model_name,
+                            "size": getattr(self.server, "_ollama_model_size", 0),
+                            "digest": "abliterate-serve",
+                            "details": {"parent_model": "", "format": "abliterate", "family": "abliterated"},
+                            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                            "size_vram": 0,
+                            "context_length": 4096,
+                        }
+                    ]
+                }
+            )
             return
         if path == "/api/version":
             self._send_json({"version": "0.1.0-abliterate"})
@@ -1016,15 +1052,17 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
             if model_req != self._model_name:
                 self._send_json({"error": f"model {model_req!r} not loaded"}, 404)
                 return
-            self._send_json({
-                "modelfile": f"# abliterate serve: {self._model_name}\nFROM <checkpoint>\n",
-                "parameters": "temperature 0.7\nnum_ctx 4096\nnum_predict 2048",
-                "license": "",
-                "capabilities": ["completion"],
-                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                "details": {"parent_model": "", "format": "abliterate", "family": "abliterated"},
-                "template": "",
-            })
+            self._send_json(
+                {
+                    "modelfile": f"# abliterate serve: {self._model_name}\nFROM <checkpoint>\n",
+                    "parameters": "temperature 0.7\nnum_ctx 4096\nnum_predict 2048",
+                    "license": "",
+                    "capabilities": ["completion"],
+                    "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                    "details": {"parent_model": "", "format": "abliterate", "family": "abliterated"},
+                    "template": "",
+                }
+            )
             return
         if path in ("/api/pull", "/api/push", "/api/copy"):
             # No-op: model is already loaded; return success so clients don't fail
@@ -1056,13 +1094,15 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
                 return
             total_ns = time.perf_counter_ns() - t0
-            self._send_json({
-                "model": model_req,
-                "embeddings": embeddings,
-                "total_duration": total_ns,
-                "load_duration": 0,
-                "prompt_eval_count": 0,
-            })
+            self._send_json(
+                {
+                    "model": model_req,
+                    "embeddings": embeddings,
+                    "total_duration": total_ns,
+                    "load_duration": 0,
+                    "prompt_eval_count": 0,
+                }
+            )
             return
         if path != "/api/chat" and path != "/api/generate":
             self.send_response(404)
@@ -1118,9 +1158,7 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
                 system_img = "".join(parts).strip() if parts else None
                 if format_instruction:
                     system_img = (system_img or "") + ("\n\n" + format_instruction)
-                multimodal = _process_images_if_supported(
-                    checkpoint_dir, prompt_img, system_img or None, images_b64
-                )
+                multimodal = _process_images_if_supported(checkpoint_dir, prompt_img, system_img or None, images_b64)
                 if multimodal is not None:
                     input_ids, attention_mask, pixel_values = multimodal
                 else:
@@ -1133,9 +1171,7 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
                 messages = _inject_format_into_messages(messages, format_instruction)
                 tools = body.get("tools")
                 try:
-                    input_ids, attention_mask = _messages_to_input_ids(
-                        self._tokenizer, messages, tools=tools
-                    )
+                    input_ids, attention_mask = _messages_to_input_ids(self._tokenizer, messages, tools=tools)
                 except Exception as e:
                     self._send_json({"error": str(e)}, 400)
                     return
@@ -1186,12 +1222,18 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
                     break
             strip_user_contents = {(m.get("content") or "").strip() for m in messages if m.get("role") == "user"}
             strip_user_contents.discard("")
-            strip_assistant_contents = [(m.get("content") or "").strip() for m in messages if m.get("role") == "assistant"]
+            strip_assistant_contents = [
+                (m.get("content") or "").strip() for m in messages if m.get("role") == "assistant"
+            ]
             strip_assistant_contents = [s for s in strip_assistant_contents if s]
         else:
             prompt_text = (body.get("prompt") or "").strip() or ""
-            # Use full prompt for stripping when single-turn; for multi-turn (User:/Assistant: in prompt) use last user segment so we strip echoed follow-up
-            last_user_content = _last_user_content_from_prompt(prompt_text) if ("Assistant:" in prompt_text or "User:" in prompt_text) else None
+            # Single-turn: use full prompt; multi-turn (User:/Assistant:): use last user segment for strip
+            last_user_content = (
+                _last_user_content_from_prompt(prompt_text)
+                if ("Assistant:" in prompt_text or "User:" in prompt_text)
+                else None
+            )
             if last_user_content is None:
                 last_user_content = prompt_text or None
         gen_kw["return_logprobs"] = want_logprobs
@@ -1282,6 +1324,7 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
 def _checkpoint_dir_size(checkpoint_dir: str) -> int:
     """Return total size in bytes of all files under checkpoint_dir."""
     from pathlib import Path
+
     total = 0
     path = Path(checkpoint_dir)
     if not path.is_dir():

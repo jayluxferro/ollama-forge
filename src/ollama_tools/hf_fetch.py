@@ -11,6 +11,7 @@ def _enable_fast_downloads() -> None:
     if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") is None:
         try:
             import hf_transfer  # noqa: F401
+
             os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
         except ImportError:
             pass

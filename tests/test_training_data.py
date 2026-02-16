@@ -45,9 +45,7 @@ def test_validate_training_data_file_not_found() -> None:
 
 def test_validate_training_data_valid_file() -> None:
     """Valid JSONL file passes."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"instruction": "A", "output": "B"}\n')
         f.write('{"instruction": "C", "input": "", "output": "D"}\n')
         path = f.name
@@ -62,9 +60,7 @@ def test_validate_training_data_valid_file() -> None:
 
 def test_validate_training_data_invalid_line() -> None:
     """Invalid line is reported."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"instruction": "A", "output": "B"}\n')
         f.write('{"wrong": "key"}\n')
         path = f.name
@@ -79,9 +75,7 @@ def test_validate_training_data_invalid_line() -> None:
 
 def test_collect_jsonl_paths_single_file() -> None:
     """Single file returns that file."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write("{}")
         path = f.name
     try:
@@ -106,14 +100,10 @@ def test_collect_jsonl_paths_directory() -> None:
 
 def test_validate_training_data_paths() -> None:
     """validate_training_data_paths aggregates multiple files."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f1:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f1:
         f1.write('{"instruction": "X", "output": "Y"}\n')
         p1 = f1.name
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f2:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f2:
         f2.write('{"instruction": "A", "output": "B"}\n')
         p2 = f2.name
     try:
@@ -128,14 +118,10 @@ def test_validate_training_data_paths() -> None:
 
 def test_convert_jsonl_to_plain_text() -> None:
     """convert_jsonl_to_plain_text writes Alpaca-style blocks."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
         f.write('{"instruction": "Hi?", "output": "Hello!"}\n')
         p_in = f.name
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
         p_out = f.name
     try:
         convert_jsonl_to_plain_text([Path(p_in)], Path(p_out), format_name="llama.cpp")

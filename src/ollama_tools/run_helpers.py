@@ -13,9 +13,7 @@ from typing import Iterator
 
 from ollama_tools.training_data import collect_jsonl_paths
 
-OLLAMA_MISSING_MSG = (
-    "Error: ollama not found. Install Ollama and ensure it is on PATH."
-)
+OLLAMA_MISSING_MSG = "Error: ollama not found. Install Ollama and ensure it is on PATH."
 
 
 def print_actionable_error(
@@ -92,9 +90,7 @@ def run_ollama_create(
             return 1
         except subprocess.CalledProcessError as e:
             return e.returncode
-    with temporary_text_file(
-        modelfile_content, suffix=".Modelfile", prefix=""
-    ) as path:
+    with temporary_text_file(modelfile_content, suffix=".Modelfile", prefix="") as path:
         try:
             subprocess.run(
                 ["ollama", "create", name, "-f", str(path)],

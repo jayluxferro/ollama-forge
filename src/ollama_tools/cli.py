@@ -42,6 +42,7 @@ def _hf_token_available() -> bool:
         return True
     try:
         from huggingface_hub import get_token
+
         return bool(get_token())
     except Exception:
         return False
@@ -101,9 +102,7 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
 
-def _cmd_refresh_template(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Recreate a model using the base model's latest chat template (fixes Chat API issues)."""
     exit_code = require_ollama()
     if exit_code is not None:
@@ -132,9 +131,7 @@ def _cmd_refresh_template(
         )
         return 1
     template_only = getattr(args, "template_only", False)
-    merged = merge_modelfile_with_reference_template(
-        current, reference, base, template_only=template_only
-    )
+    merged = merge_modelfile_with_reference_template(current, reference, base, template_only=template_only)
     return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
 
 
@@ -157,16 +154,14 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                     f"no .gguf files found in {args.repo_id}",
                     next_steps=[
                         "Use a repo that already includes GGUF files",
-                        "Or convert from HF to GGUF first, then run: "
-                        "ollama-tools convert --gguf <path> --name <name>",
+                        "Or convert from HF to GGUF first, then run: ollama-tools convert --gguf <path> --name <name>",
                     ],
                 )
                 return 1
             chosen = pick_one_gguf(gguf_files, prefer_quant=getattr(args, "quant", None))
             if len(gguf_files) > 1:
                 print(
-                    f"Multiple .gguf files found; using {chosen!r}. "
-                    "Use --gguf-file <filename> to pick another.",
+                    f"Multiple .gguf files found; using {chosen!r}. Use --gguf-file <filename> to pick another.",
                     file=sys.stderr,
                 )
             gguf_path = download_gguf(args.repo_id, chosen, revision=args.revision)
@@ -208,16 +203,8 @@ def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         if getattr(args, "temperature", None) is not None
         else float(cfg["temperature"])
     )
-    num_ctx = (
-        getattr(args, "num_ctx", None)
-        if getattr(args, "num_ctx", None) is not None
-        else int(cfg["num_ctx"])
-    )
-    top_p = (
-        getattr(args, "top_p", None)
-        if getattr(args, "top_p", None) is not None
-        else float(cfg["top_p"])
-    )
+    num_ctx = getattr(args, "num_ctx", None) if getattr(args, "num_ctx", None) is not None else int(cfg["num_ctx"])
+    top_p = getattr(args, "top_p", None) if getattr(args, "top_p", None) is not None else float(cfg["top_p"])
     repeat_penalty = (
         getattr(args, "repeat_penalty", None)
         if getattr(args, "repeat_penalty", None) is not None
@@ -237,8 +224,7 @@ def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         print(f"  repo: {repo_id}@{getattr(args, 'revision', 'main')}", file=sys.stderr)
         print(f"  profile/task: {profile} / {task or 'none'}", file=sys.stderr)
         print(
-            f"  quant/temp/ctx/top_p/repeat: {quant} / {temperature} / "
-            f"{num_ctx} / {top_p} / {repeat_penalty}",
+            f"  quant/temp/ctx/top_p/repeat: {quant} / {temperature} / {num_ctx} / {top_p} / {repeat_penalty}",
             file=sys.stderr,
         )
         print(f"  system prompt source: {system_source}", file=sys.stderr)
@@ -439,9 +425,7 @@ def _repo_looks_like_adapter(repo_id: str, revision: str) -> bool:
     except Exception:
         return False
     names = {Path(f).name for f in files}
-    has_adapter_marker = bool(
-        {"adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"} & names
-    )
+    has_adapter_marker = bool({"adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"} & names)
     has_gguf = any(str(f).lower().endswith(".gguf") for f in files)
     return has_adapter_marker and not has_gguf
 
@@ -475,11 +459,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     name = args.name
     if source_type != "recipe" and not name:
-        name = (
-            _prompt_with_default("Model name", "my-model")
-            if prompt_enabled
-            else "my-model"
-        )
+        name = _prompt_with_default("Model name", "my-model") if prompt_enabled else "my-model"
     if source_type == "recipe":
         fake = argparse.Namespace(recipe=source, out_modelfile=args.out_modelfile)
         if maybe_plan("build", f"ollama-tools build {source}"):
@@ -508,11 +488,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if _is_local_adapter_dir(source_path):
             base = args.base
             if not base:
-                base = (
-                    _prompt_with_default("Base model for adapter", "llama3.2")
-                    if prompt_enabled
-                    else "llama3.2"
-                )
+                base = _prompt_with_default("Base model for adapter", "llama3.2") if prompt_enabled else "llama3.2"
             fake = argparse.Namespace(
                 base=base,
                 adapter=str(source_path),
@@ -542,11 +518,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if _repo_looks_like_adapter(source, args.revision):
             base = args.base
             if not base:
-                base = (
-                    _prompt_with_default("Base model for adapter", "llama3.2")
-                    if prompt_enabled
-                    else "llama3.2"
-                )
+                base = _prompt_with_default("Base model for adapter", "llama3.2") if prompt_enabled else "llama3.2"
             fake = argparse.Namespace(
                 repo_id=source,
                 base=base,
@@ -607,16 +579,12 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     return _cmd_create_from_base(parser, fake)
 
 
-def _cmd_fetch_adapter(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Download an adapter from Hugging Face and create an Ollama model (base + adapter)."""
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
-    adapter_dir = Path(args.output) if args.output else Path(
-        tempfile.mkdtemp(prefix="ollama-adapter-")
-    )
+    adapter_dir = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix="ollama-adapter-"))
     try:
         download_adapter(
             args.repo_id,
@@ -696,9 +664,7 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
 
-def _cmd_validate_training_data(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_validate_training_data(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Validate JSONL training data (instruction/input/output format)."""
     paths = get_jsonl_paths_or_exit(
         args.data,
@@ -718,9 +684,7 @@ def _cmd_validate_training_data(
     return 1
 
 
-def _cmd_prepare_training_data(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Convert JSONL training data to plain text for trainers (e.g. llama.cpp)."""
     paths = get_jsonl_paths_or_exit(
         args.data,
@@ -739,9 +703,7 @@ def _cmd_prepare_training_data(
         return 1
     out = Path(args.output)
     try:
-        convert_jsonl_to_plain_text(
-            paths, out, format_name=args.format
-        )
+        convert_jsonl_to_plain_text(paths, out, format_name=args.format)
     except OSError as e:
         print_actionable_error(
             "failed to write output file",
@@ -760,9 +722,7 @@ def _cmd_prepare_training_data(
     return 0
 
 
-def _cmd_train(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Generate a training script: validate → prepare data → trainer → retrain."""
     paths = get_jsonl_paths_or_exit(
         args.data,
@@ -841,9 +801,7 @@ def _cmd_retrain(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     return _cmd_create_from_base(parser, args)
 
 
-def _namespace_for_fetch(
-    recipe: dict, out_modelfile: str | None
-) -> argparse.Namespace:
+def _namespace_for_fetch(recipe: dict, out_modelfile: str | None) -> argparse.Namespace:
     """Build a Namespace for _cmd_fetch from a recipe dict."""
     return argparse.Namespace(
         repo_id=recipe["hf_repo"],
@@ -860,9 +818,7 @@ def _namespace_for_fetch(
     )
 
 
-def _namespace_for_convert(
-    recipe: dict, gguf_path: Path, out_modelfile: str | None
-) -> argparse.Namespace:
+def _namespace_for_convert(recipe: dict, gguf_path: Path, out_modelfile: str | None) -> argparse.Namespace:
     """Build a Namespace for _cmd_convert from a recipe dict."""
     return argparse.Namespace(
         gguf=str(gguf_path),
@@ -877,9 +833,7 @@ def _namespace_for_convert(
     )
 
 
-def _namespace_for_create_from_base(
-    recipe: dict, out_modelfile: str | None
-) -> argparse.Namespace:
+def _namespace_for_create_from_base(recipe: dict, out_modelfile: str | None) -> argparse.Namespace:
     """Build a Namespace for _cmd_create_from_base from a recipe dict."""
     return argparse.Namespace(
         base=recipe["base"],
@@ -928,26 +882,24 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 ],
             )
             return 1
-        return _cmd_convert(
-            parser, _namespace_for_convert(recipe, gguf, out_modelfile)
-        )
-    return _cmd_create_from_base(
-        parser, _namespace_for_create_from_base(recipe, out_modelfile)
-    )
+        return _cmd_convert(parser, _namespace_for_convert(recipe, gguf, out_modelfile))
+    return _cmd_create_from_base(parser, _namespace_for_create_from_base(recipe, out_modelfile))
 
 
-def _cmd_check(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_check(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Verify ollama, HF, optional deps, and llama.cpp; print what's missing."""
     ok = True
-    ok = check_item(
-        "ollama",
-        bool(shutil.which("ollama")),
-        "install from https://ollama.com and add to PATH",
-    ) and ok
+    ok = (
+        check_item(
+            "ollama",
+            bool(shutil.which("ollama")),
+            "install from https://ollama.com and add to PATH",
+        )
+        and ok
+    )
     try:
         from huggingface_hub import HfApi
+
         HfApi()
         hf_ok = True
     except ImportError:
@@ -959,15 +911,15 @@ def _cmd_check(
         print("HF_TOKEN: not set (optional; needed for gated/private Hugging Face)")
     try:
         import yaml  # noqa: F401
+
         yaml_ok = True
     except ImportError:
         yaml_ok = False
-    ok = check_item(
-        "pyyaml", yaml_ok, "run: uv sync (included by default)"
-    ) and ok
+    ok = check_item("pyyaml", yaml_ok, "run: uv sync (included by default)") and ok
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
+
         abliterate_ok = True
     except ImportError:
         abliterate_ok = False
@@ -981,8 +933,7 @@ def _cmd_check(
     check_item(
         "llama.cpp finetune",
         bool(finetune),
-        "for train/run-trainer, build llama.cpp and add finetune to PATH, "
-        "or run: ollama-tools setup-llama-cpp",
+        "for train/run-trainer, build llama.cpp and add finetune to PATH, or run: ollama-tools setup-llama-cpp",
     )
     check_item(
         "llama.cpp quantize",
@@ -1028,9 +979,7 @@ def _env_status() -> dict[str, bool]:
     }
 
 
-def _cmd_doctor(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Diagnose environment and optionally apply common fixes."""
     status = _env_status()
     json_mode = bool(getattr(args, "json", False))
@@ -1072,10 +1021,7 @@ def _cmd_doctor(
         planned: list[str] = []
         if not status["huggingface_hub"] or not status["pyyaml"]:
             planned.append("Run: uv sync")
-        if (
-            getattr(args, "fix_llama_cpp", False)
-            and (not status["finetune"] or not status["quantize"])
-        ):
+        if getattr(args, "fix_llama_cpp", False) and (not status["finetune"] or not status["quantize"]):
             target_dir = getattr(args, "llama_cpp_dir", None) or "./llama.cpp"
             planned.append(f"Run: ollama-tools setup-llama-cpp --dir {target_dir}")
         if not planned:
@@ -1095,27 +1041,20 @@ def _cmd_doctor(
             not_found_message="Error: uv not found. Install uv first: https://docs.astral.sh/uv/",
             process_error_message="Error: uv sync failed: {e}",
             not_found_next_steps=["Install uv, then run: uv sync"],
-            process_error_next_steps=[
-                "Resolve errors above, then rerun: ollama-tools doctor --fix"
-            ],
+            process_error_next_steps=["Resolve errors above, then rerun: ollama-tools doctor --fix"],
         )
         if code != 0:
             return code
         print("Applied: uv sync", file=sys.stderr)
 
-    if (
-        getattr(args, "fix_llama_cpp", False)
-        and (not status["finetune"] or not status["quantize"])
-    ):
+    if getattr(args, "fix_llama_cpp", False) and (not status["finetune"] or not status["quantize"]):
         code = _cmd_setup_llama_cpp(
             parser,
             argparse.Namespace(dir=getattr(args, "llama_cpp_dir", None)),
         )
         if code != 0:
             return code
-    elif (not status["finetune"] or not status["quantize"]) and not getattr(
-        args, "fix_llama_cpp", False
-    ):
+    elif (not status["finetune"] or not status["quantize"]) and not getattr(args, "fix_llama_cpp", False):
         print(
             "Tip: add --fix-llama-cpp to auto-install llama.cpp tools.",
             file=sys.stderr,
@@ -1129,23 +1068,16 @@ def _cmd_doctor(
         return 1
 
     final_status = _env_status()
-    ok = (
-        final_status["ollama"]
-        and final_status["huggingface_hub"]
-        and final_status["pyyaml"]
-    )
+    ok = final_status["ollama"] and final_status["huggingface_hub"] and final_status["pyyaml"]
     return 0 if ok else 1
 
 
-def _cmd_setup_llama_cpp(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Clone and build llama.cpp; print instructions to add to PATH."""
     target_dir = Path(args.dir or "llama.cpp").resolve()
     if target_dir.exists() and any(target_dir.iterdir()):
         print(
-            f"Directory already exists and is non-empty: {target_dir}. "
-            "Use --dir <other> or remove it.",
+            f"Directory already exists and is non-empty: {target_dir}. Use --dir <other> or remove it.",
             file=sys.stderr,
         )
         return 1
@@ -1180,14 +1112,12 @@ def _cmd_setup_llama_cpp(
     bin_dir = build_dir / "bin"
     if not bin_dir.is_dir():
         bin_dir = build_dir  # some layouts put binaries in build/
-    print(f"\nDone. Add to PATH: export PATH=\"{bin_dir}:$PATH\"")
+    print(f'\nDone. Add to PATH: export PATH="{bin_dir}:$PATH"')
     print("Then you can use: finetune, quantize, and other llama.cpp tools.")
     return 0
 
 
-def _cmd_adapters_search(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Search Hugging Face for adapters and show how to use them."""
     from huggingface_hub import HfApi
 
@@ -1231,9 +1161,7 @@ def _score_adapter_repo(repo_id: str, base: str | None) -> int:
     return score
 
 
-def _cmd_adapters_recommend(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Recommend adapter repos and optionally apply the top one."""
     from huggingface_hub import HfApi
 
@@ -1252,7 +1180,7 @@ def _cmd_adapters_recommend(
             cause=str(e),
             next_steps=[
                 "Check internet/Hugging Face connectivity",
-                "Try a broader query: ollama-tools adapters recommend --query \"lora adapter\"",
+                'Try a broader query: ollama-tools adapters recommend --query "lora adapter"',
             ],
         )
         return 1
@@ -1279,9 +1207,7 @@ def _cmd_adapters_recommend(
                     "route": "adapters-recommend",
                     "base": base,
                     "query": query,
-                    "recommendations": [
-                        {"repo": repo, "score": score} for repo, score in ranked
-                    ],
+                    "recommendations": [{"repo": repo, "score": score} for repo, score in ranked],
                 }
             )
         )
@@ -1293,8 +1219,7 @@ def _cmd_adapters_recommend(
         print_actionable_error(
             "--apply requires --base",
             next_steps=[
-                "Re-run with: ollama-tools adapters recommend "
-                f"--base <BASE_MODEL> --apply --query \"{query}\"",
+                f'Re-run with: ollama-tools adapters recommend --base <BASE_MODEL> --apply --query "{query}"',
             ],
         )
         return 1
@@ -1337,9 +1262,7 @@ def _cmd_adapters_recommend(
     return _cmd_fetch_adapter(parser, fake)
 
 
-def _cmd_hf_cache_ls(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_hf_cache_ls(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """List Hugging Face Hub cache (repos and sizes)."""
     try:
         from huggingface_hub import scan_cache_dir
@@ -1359,9 +1282,7 @@ def _cmd_hf_cache_ls(
     return 0
 
 
-def _cmd_hf_cache_rm(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Remove one or more repos from the Hugging Face Hub cache."""
     try:
         from huggingface_hub import scan_cache_dir
@@ -1412,9 +1333,7 @@ def _cmd_hf_cache_rm(
     return 0
 
 
-def _cmd_security_eval_run(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Run security eval: load prompt set, query model, score, print KPIs and optionally write CSV/JSON."""
     try:
         from ollama_tools.security_eval.run import run_eval
@@ -1466,13 +1385,14 @@ def _cmd_security_eval_run(
     if by_cat:
         print("  By category:", file=sys.stderr)
         for cat, v in by_cat.items():
-            print(f"    {cat}: ASR={v.get('asr_pct', 0):.1f}% refusal={v.get('refusal_rate_pct', 0):.1f}%", file=sys.stderr)
+            print(
+                f"    {cat}: ASR={v.get('asr_pct', 0):.1f}% refusal={v.get('refusal_rate_pct', 0):.1f}%",
+                file=sys.stderr,
+            )
     return 0
 
 
-def _cmd_security_eval_ui(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_security_eval_ui(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Launch Streamlit UI for security evaluation."""
     app_dir = Path(__file__).resolve().parent
     app_path = app_dir / "security_eval" / "app.py"
@@ -1493,9 +1413,7 @@ def _cmd_security_eval_ui(
     return 0
 
 
-def _cmd_downsize_pipeline(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_downsize_pipeline(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Print the downsize (distillation) pipeline steps, or generate a script."""
     teacher = getattr(args, "teacher", None)
     student = getattr(args, "student", None)
@@ -1578,15 +1496,9 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
         h_lines = _collect_instructions_from_path(args.harmful_dir)
         l_lines = _collect_instructions_from_path(args.harmless_dir)
         if not h_lines or not l_lines:
-            raise FileNotFoundError(
-                "No instructions in --harmful-dir and/or --harmless-dir"
-            )
-        harmful_path = write_temp_text_file(
-            "\n".join(h_lines), suffix=".txt", prefix="ollama-harmful-"
-        )
-        harmless_path = write_temp_text_file(
-            "\n".join(l_lines), suffix=".txt", prefix="ollama-harmless-"
-        )
+            raise FileNotFoundError("No instructions in --harmful-dir and/or --harmless-dir")
+        harmful_path = write_temp_text_file("\n".join(h_lines), suffix=".txt", prefix="ollama-harmful-")
+        harmless_path = write_temp_text_file("\n".join(l_lines), suffix=".txt", prefix="ollama-harmless-")
         temp_files = [harmful_path, harmless_path]
     elif getattr(args, "harmful", None) and getattr(args, "harmless", None):
         harmful_path = Path(args.harmful)
@@ -1595,17 +1507,13 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
         harmful_path = default_harmful_file
         harmless_path = default_harmless_file
         print(
-            "Using bundled default harmful/harmless lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction; up to 32 pairs sampled for direction). "
+            "Using bundled default harmful/harmless lists (Sumandora, HarmBench, etc.; up to 32 pairs). "
             "Pass --harmful/--harmless for custom lists.",
             file=sys.stderr,
         )
     else:
-        harmful_path = write_temp_text_file(
-            HARMFUL_DEFAULT.strip(), suffix=".txt", prefix="ollama-harmful-"
-        )
-        harmless_path = write_temp_text_file(
-            HARMLESS_DEFAULT.strip(), suffix=".txt", prefix="ollama-harmless-"
-        )
+        harmful_path = write_temp_text_file(HARMFUL_DEFAULT.strip(), suffix=".txt", prefix="ollama-harmful-")
+        harmless_path = write_temp_text_file(HARMLESS_DEFAULT.strip(), suffix=".txt", prefix="ollama-harmless-")
         temp_files = [harmful_path, harmless_path]
         print(
             "Using built-in default harmful/harmless lists. "
@@ -1618,12 +1526,22 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
 
 # Online lists used by download-lists and bundled defaults
 # (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction/Arditi et al.)
-ABLITERATE_HARMFUL_URL = "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmful.txt"
+ABLITERATE_HARMFUL_URL = (
+    "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmful.txt"
+)
 ABLITERATE_HARMBENCH_URL = "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_all.csv"
-ABLITERATE_JBB_HARMFUL_URL = "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/harmful-behaviors.csv"
-ABLITERATE_JBB_BENIGN_URL = "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/benign-behaviors.csv"
-ABLITERATE_ADVBENCH_URL = "https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv"
-ABLITERATE_HARMLESS_URL = "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmless.txt"
+ABLITERATE_JBB_HARMFUL_URL = (
+    "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/harmful-behaviors.csv"
+)
+ABLITERATE_JBB_BENIGN_URL = (
+    "https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors/raw/main/data/benign-behaviors.csv"
+)
+ABLITERATE_ADVBENCH_URL = (
+    "https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv"
+)
+ABLITERATE_HARMLESS_URL = (
+    "https://raw.githubusercontent.com/Sumandora/remove-refusals-with-transformers/master/harmless.txt"
+)
 # refusal_direction (Arditi et al. – arXiv:2406.11717): JSON with "instruction" key
 ABLITERATE_REFUSAL_DIR_HARMFUL = (
     "https://raw.githubusercontent.com/andyrdt/refusal_direction/main/dataset/splits/harmful_train.json",
@@ -1718,10 +1636,8 @@ def _abliterate_merge_harmless_sources() -> list[str]:
     return lines
 
 
-def _cmd_abliterate_download_lists(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
-    """Download harmful/harmless instruction lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction)."""
+def _cmd_abliterate_download_lists(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Download harmful/harmless instruction lists (Sumandora, HarmBench, JailbreakBench, etc.)."""
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     harmful_path = out_dir / "harmful.txt"
@@ -1741,7 +1657,7 @@ def _cmd_abliterate_download_lists(
 
 
 def _abliterate_output_dir_from_name(name: str) -> str:
-    """Return a default output dir name from abliterate run --name (e.g. google/gemma-3-4b-it-abliterated -> abliterate-google-gemma-3-4b-it-abliterated)."""
+    """Return default output dir from abliterate run --name (e.g. name -> abliterate-<sanitized>)."""
     sanitized = name.replace("/", "-").strip()
     while "  " in sanitized:
         sanitized = sanitized.replace("  ", " ")
@@ -1749,11 +1665,9 @@ def _abliterate_output_dir_from_name(name: str) -> str:
     return f"abliterate-{sanitized}"
 
 
-def _cmd_abliterate_chat(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
-    """Interactive chat with abliterated checkpoint using the HF tokenizer (correct tokenization).
-    If abliterate serve is already running with the same model, chat connects to it instead of loading the checkpoint (saves memory and startup time). Use --no-serve to always load locally."""
+def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Interactive chat with abliterated checkpoint (HF tokenizer). If serve is running with same
+    model, chat connects to it instead of loading checkpoint. Use --no-serve to always load locally."""
     try:
         from ollama_tools.abliterate import run_chat
         from ollama_tools.abliterate_serve import chat_via_serve
@@ -1813,9 +1727,7 @@ def _cmd_abliterate_chat(
     return 0
 
 
-def _cmd_abliterate_serve(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Start Ollama-API-compatible server for abliterated model (HF tokenizer)."""
     try:
         from ollama_tools.abliterate_serve import serve_abliterated
@@ -1835,7 +1747,11 @@ def _cmd_abliterate_serve(
         model_name = name
     elif checkpoint_arg:
         checkpoint = Path(checkpoint_arg)
-        model_name = checkpoint.name if checkpoint.name != "checkpoint" else (checkpoint.parent.name if checkpoint.parent else "abliterated")
+        model_name = (
+            checkpoint.name
+            if checkpoint.name != "checkpoint"
+            else (checkpoint.parent.name if checkpoint.parent else "abliterated")
+        )
     else:
         print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
         return 1
@@ -1873,9 +1789,7 @@ def _abliterate_resolve_model(model_id: str) -> str:
     return model_id
 
 
-def _cmd_abliterate_compute_dir(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Compute refusal direction for abliteration (requires: uv sync --extra abliterate)."""
     try:
         from ollama_tools.abliterate import compute_refusal_dir
@@ -1917,9 +1831,7 @@ def _cmd_abliterate_compute_dir(
         return 1
 
 
-def _cmd_abliterate_run(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
     try:
         from ollama_tools.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
@@ -1942,7 +1854,10 @@ def _cmd_abliterate_run(
     if gguf_file_for_load_run:
         print(f"Using local GGUF at {model_id}", file=sys.stderr)
     default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
-    output_dir = Path(getattr(args, "output_dir", None) or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-tools-abliterate-")))
+    output_dir = Path(
+        getattr(args, "output_dir", None)
+        or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-tools-abliterate-"))
+    )
     llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
     if not llama_cpp_dir:
         for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
@@ -1991,6 +1906,7 @@ def _cmd_abliterate_run(
                 Path(t).unlink(missing_ok=True)
     except Exception as e:
         import traceback
+
         msg = str(e).strip() or f"{type(e).__name__} (no message)"
         print(f"Error: {msg}", file=sys.stderr)
         if not str(e).strip():
@@ -2054,15 +1970,22 @@ def _cmd_abliterate_run(
             content = merge_modelfile_with_reference_template(
                 content, ref_content, base=str(gguf_for_modelfile), template_only=True
             )
-            print(f"Using chat template from Ollama model {template_from!r} (for tool/Chat API support)", file=sys.stderr)
+            print(
+                f"Using chat template from Ollama model {template_from!r} (for tool/Chat API support)", file=sys.stderr
+            )
         else:
-            print(f"Note: no Ollama model {template_from!r} found; pull it first if the abliterated model should support tools.", file=sys.stderr)
+            print(
+                f"Note: no Ollama model {template_from!r} found; pull it first for tool support.",
+                file=sys.stderr,
+            )
     elif _is_local_hf:
-        print("Note: using local HF path; pass --template-from <ollama_model> if the abliterated model should support tools.", file=sys.stderr)
+        print(
+            "Note: using local HF path; pass --template-from <ollama_model> for tool support.",
+            file=sys.stderr,
+        )
     if not getattr(args, "output_dir", None):
         print(
-            "To chat with correct tokenization (HF tokenizer): "
-            f"ollama-tools abliterate chat --name {name}",
+            f"To chat with correct tokenization (HF tokenizer): ollama-tools abliterate chat --name {name}",
             file=sys.stderr,
         )
     else:
@@ -2484,7 +2407,7 @@ def main() -> int:
     p_refresh.add_argument(
         "--template-only",
         action="store_true",
-        help="Only replace TEMPLATE; keep current model's weights (FROM unchanged). Use when updating an old model's template so tools/Chat API work.",
+        help="Only replace TEMPLATE; keep weights. Use when updating old model's template for tools/Chat API.",
     )
     p_refresh.add_argument(
         "--out-modelfile",
@@ -2681,8 +2604,7 @@ def main() -> int:
     abliterate_sub = p_abliterate.add_subparsers(dest="abliterate_command")
     p_compute = abliterate_sub.add_parser(
         "compute-dir",
-        help="Compute refusal direction from harmful/harmless instructions "
-        "(needs: uv sync --extra abliterate)",
+        help="Compute refusal direction from harmful/harmless instructions (needs: uv sync --extra abliterate)",
     )
     p_compute.add_argument(
         "--model",
@@ -2823,7 +2745,7 @@ def main() -> int:
     p_run.add_argument(
         "--template-from",
         metavar="OLLAMA_MODEL",
-        help="Ollama model to copy chat template from (default: same as --model; pull that model first for tool support)",
+        help="Ollama model to copy chat template from (default: same as --model; pull first for tools)",
     )
     p_run.set_defaults(handler=_cmd_abliterate_run)
 
@@ -2863,7 +2785,7 @@ def main() -> int:
         "--serve-url",
         metavar="URL",
         default=None,
-        help="Try this abliterate serve URL first (default: OLLAMA_HOST or http://127.0.0.1:11435); if reachable and model matches, chat uses it instead of loading the checkpoint",
+        help="Abliterate serve URL first (default: OLLAMA_HOST or http://127.0.0.1:11435); if reachable, chat uses it",
     )
     p_chat.add_argument(
         "--no-serve",
@@ -3021,14 +2943,14 @@ def main() -> int:
     # security-eval (LLM security evaluation: run prompt sets, score, KPIs)
     p_security_eval = subparsers.add_parser(
         "security-eval",
-        help="LLM security evaluation: run prompt sets against Ollama/serve, score refusal/compliance, output KPIs and CSV",
+        help="LLM security evaluation: run prompt sets, score refusal/compliance, output KPIs and CSV",
     )
     se_sub = p_security_eval.add_subparsers(dest="security_eval_command")
     p_se_run = se_sub.add_parser("run", help="Run eval: load prompt set, query model, score, write CSV/JSON")
     p_se_run.add_argument(
         "prompt_set",
         metavar="PROMPT_SET",
-        help="Path to prompt set: .txt (one prompt per line) or .jsonl (prompt, category, target_for_extraction)",
+        help="Path to .txt (one prompt/line) or .jsonl (prompt, category, target_for_extraction)",
     )
     p_se_run.add_argument(
         "--model",
@@ -3071,12 +2993,15 @@ def main() -> int:
         help="Request timeout in seconds (default: 120)",
     )
     p_se_run.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Less progress output",
     )
     p_se_run.set_defaults(handler=_cmd_security_eval_run)
-    p_se_ui = se_sub.add_parser("ui", help="Launch Streamlit UI for security evaluation (requires: uv sync --extra security-eval-ui)")
+    p_se_ui = se_sub.add_parser(
+        "ui", help="Launch Streamlit UI for security evaluation (requires: uv sync --extra security-eval-ui)"
+    )
     p_se_ui.set_defaults(handler=_cmd_security_eval_ui)
 
     # downsize (distillation: large → small model)
