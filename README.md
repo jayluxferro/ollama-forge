@@ -1,13 +1,17 @@
 # ollama-forge
 
+[![PyPI](https://img.shields.io/pypi/v/ollama-forge.svg)](https://pypi.org/project/ollama-forge/)
+
 Get models from Hugging Face, convert them, add adapters, and run them in [Ollama](https://ollama.com) — without needing deep expertise. One place for fetch, convert, adapters, and recipes.
+
+**Install:** `pip install ollama-forge` or `uv tool install ollama-forge` — [PyPI](https://pypi.org/project/ollama-forge/).
 
 **Quick start:**
 ```bash
-uv sync && uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
+ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
 ```
 
-Or the shortest path: `uv run ollama-forge start --name my-model` then `ollama run my-model`.
+Or the shortest path: `ollama-forge start --name my-model` then `ollama run my-model`.
 
 ---
 
@@ -46,10 +50,10 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 
 ## Setup (one-time)
 
-- **Python 3.10+** and **[uv](https://docs.astral.sh/uv/)** (or pip).
+- **Python 3.10+**. **Install from PyPI:** `pip install ollama-forge` or `uv tool install ollama-forge` ([PyPI](https://pypi.org/project/ollama-forge/)).
 - **From repo:** `uv sync` then `uv run ollama-forge` (or `uv tool install .` to use `ollama-forge` from anywhere).
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
-- **Verify:** `uv run ollama-forge check` — see what’s installed. `uv run ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
+- **Verify:** `ollama-forge check` — see what’s installed. `ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
 - **Optional:** Run Ruff before each commit: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md).
 
 ---
