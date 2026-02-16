@@ -12,13 +12,13 @@ from pathlib import Path
 import streamlit as st
 
 try:
-    from ollama_tools.security_eval.run import run_eval
     from ollama_tools.security_eval.history import load_runs
+    from ollama_tools.security_eval.run import run_eval
 except ImportError:
     # When run as streamlit app from repo root without install
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from ollama_tools.security_eval.run import run_eval
     from ollama_tools.security_eval.history import load_runs
+    from ollama_tools.security_eval.run import run_eval
 
 
 def main() -> None:

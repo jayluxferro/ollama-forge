@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -129,7 +129,7 @@ def compute_refusal_dir(
     Requires torch and transformers. Use: uv sync --extra abliterate.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     harmful_path = Path(harmful_path)
     harmless_path = Path(harmless_path)
@@ -307,7 +307,7 @@ def apply_refusal_dir_and_save(
     coherence loss on small models. If verify=True, runs one forward pass and checks loss is finite.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     refusal_pt_path = Path(refusal_pt_path)
     output_dir = Path(output_dir)
@@ -440,7 +440,7 @@ def run_chat(
     (capped at 8192), else 2048.
     """
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.is_dir() or not (checkpoint_dir / "config.json").is_file():

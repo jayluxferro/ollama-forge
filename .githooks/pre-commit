@@ -1,0 +1,19 @@
+#!/bin/sh
+# Run ruff check --fix and ruff format before commit. Abort if unfixable issues remain.
+
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "Running ruff check --fix and ruff format..."
+uv run ruff check src tests --fix
+uv run ruff format src tests
+
+# Re-run check; abort commit if anything still fails (e.g. line-too-long that format couldn't fix)
+if ! uv run ruff check src tests; then
+  echo "Ruff still reports issues. Fix them and try again."
+  exit 1
+fi
+
+# Stage any fixes so they're included in this commit
+git add src/ tests/
+exit 0

@@ -43,6 +43,7 @@ ollama run my-model
 | [Training Data](Training-Data) | JSONL validate, prepare, train script |
 | [Retrain Pipeline](Retrain-Pipeline) | Data → adapter → Ollama |
 | [Abliterate](Abliterate) | Refusal removal |
+| [Security Eval](Security-Eval) | LLM security evaluation: prompt sets, KPIs, UI |
 | [Downsizing](Downsizing) | Teacher → student distillation |
 | [Hugging Face without GGUF](Hugging-Face-Without-GGUF) | When the repo has no GGUF |
 | [Quantization](Quantization) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |

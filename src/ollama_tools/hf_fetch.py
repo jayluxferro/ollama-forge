@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
 # Use faster downloads when hf_transfer is installed (pip install hf-transfer)
 def _enable_fast_downloads() -> None:
     if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") is None:

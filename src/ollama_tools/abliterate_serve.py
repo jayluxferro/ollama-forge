@@ -18,7 +18,7 @@ def _load_model_and_tokenizer(checkpoint_dir: str | bytes, device: str | None = 
     from pathlib import Path
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     checkpoint_dir = Path(checkpoint_dir) if isinstance(checkpoint_dir, (str, bytes)) else checkpoint_dir
     if isinstance(checkpoint_dir, bytes):
@@ -115,7 +115,6 @@ def _process_images_if_supported(
             return None
         attention_mask = out.get("attention_mask")
         if attention_mask is None:
-            import torch
             attention_mask = input_ids.new_ones(input_ids.shape)
         return input_ids, attention_mask, pixel_values
     except Exception:

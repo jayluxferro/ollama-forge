@@ -27,6 +27,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | [Training Data](wiki/Training-Data.md) | JSONL validate, prepare, train script |
 | [Retrain Pipeline](wiki/Retrain-Pipeline.md) | Data → adapter → Ollama |
 | [Abliterate](wiki/Abliterate.md) | Refusal removal |
+| [Security Eval](wiki/Security-Eval.md) | LLM security evaluation: prompt sets, KPIs, UI |
 | [Downsizing](wiki/Downsizing.md) | Teacher → student distillation |
 | [Hugging Face without GGUF](wiki/Hugging-Face-Without-GGUF.md) | When the repo has no GGUF |
 | [Quantization](wiki/Quantization.md) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |
@@ -49,6 +50,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 - **From repo:** `uv sync` then `uv run ollama-tools` (or `uv tool install .` to use `ollama-tools` from anywhere).
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
 - **Verify:** `uv run ollama-tools check` — see what’s installed. `uv run ollama-tools doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
+- **Optional:** Run Ruff before each commit: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md).
 
 ---
 
@@ -109,5 +111,5 @@ Use `--quant Q4_K_M` to pick size. See [Fetch & Convert](wiki/Fetch-and-Convert.
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
 - **Refusal removal (abliterate)** — `abliterate compute-dir`; optional deps: `uv sync --extra abliterate`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
-- **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [docs/LLM-SECURITY-EVAL-REVIEW.md](docs/LLM-SECURITY-EVAL-REVIEW.md), [src/ollama_tools/security_eval/README.md](src/ollama_tools/security_eval/README.md).
+- **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).
