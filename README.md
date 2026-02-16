@@ -109,4 +109,5 @@ Use `--quant Q4_K_M` to pick size. See [Fetch & Convert](wiki/Fetch-and-Convert.
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
 - **Refusal removal (abliterate)** — `abliterate compute-dir`; optional deps: `uv sync --extra abliterate`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
+- **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [docs/LLM-SECURITY-EVAL-REVIEW.md](docs/LLM-SECURITY-EVAL-REVIEW.md), [src/ollama_tools/security_eval/README.md](src/ollama_tools/security_eval/README.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).

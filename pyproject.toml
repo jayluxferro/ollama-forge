@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25", "gguf>=0.10.0"]
+security-eval-ui = ["streamlit>=1.28", "pandas>=2.0", "plotly>=5.18"]
 
 [project.scripts]
 ollama-tools = "ollama_tools.cli:main"

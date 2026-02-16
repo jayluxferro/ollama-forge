@@ -1412,6 +1412,87 @@ def _cmd_hf_cache_rm(
     return 0
 
 
+def _cmd_security_eval_run(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Run security eval: load prompt set, query model, score, print KPIs and optionally write CSV/JSON."""
+    try:
+        from ollama_tools.security_eval.run import run_eval
+    except ImportError as e:
+        print(f"Error: security-eval failed to import: {e}", file=sys.stderr)
+        return 1
+    prompt_set = getattr(args, "prompt_set", None)
+    if not prompt_set:
+        print("Error: prompt_set path required", file=sys.stderr)
+        return 1
+    base_url = getattr(args, "base_url", None) or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+    model = getattr(args, "model", "llama3.2")
+    output_csv = getattr(args, "output_csv", None)
+    output_json = getattr(args, "output_json", None)
+    system = getattr(args, "system", None)
+    use_chat = not getattr(args, "no_chat", False)
+    timeout = getattr(args, "timeout", 120.0)
+    verbose = not getattr(args, "quiet", False)
+    try:
+        run_meta = run_eval(
+            prompt_set,
+            base_url=base_url,
+            model=model,
+            output_csv=output_csv,
+            output_json=output_json,
+            save_to_history=getattr(args, "save_history", False),
+            use_chat=use_chat,
+            system=system,
+            timeout=timeout,
+            verbose=verbose,
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    kpis = run_meta.get("kpis") or {}
+    print("\n--- KPIs ---", file=sys.stderr)
+    print(f"  Total:        {kpis.get('total', 0)}", file=sys.stderr)
+    print(f"  ASR %:        {kpis.get('asr_pct', 0):.1f}", file=sys.stderr)
+    print(f"  Refusal %:    {kpis.get('refusal_rate_pct', 0):.1f}", file=sys.stderr)
+    print(f"  Extraction %: {kpis.get('extraction_rate_pct', 0):.1f}", file=sys.stderr)
+    print(f"  Errors:       {kpis.get('errors', 0)}", file=sys.stderr)
+    by_cat = kpis.get("by_category") or {}
+    if by_cat:
+        print("  By category:", file=sys.stderr)
+        for cat, v in by_cat.items():
+            print(f"    {cat}: ASR={v.get('asr_pct', 0):.1f}% refusal={v.get('refusal_rate_pct', 0):.1f}%", file=sys.stderr)
+    return 0
+
+
+def _cmd_security_eval_ui(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Launch Streamlit UI for security evaluation."""
+    app_dir = Path(__file__).resolve().parent
+    app_path = app_dir / "security_eval" / "app.py"
+    if not app_path.exists():
+        print(f"Error: App not found at {app_path}", file=sys.stderr)
+        return 1
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.headless", "true"],
+            check=False,
+        )
+    except FileNotFoundError:
+        print(
+            "Error: Streamlit not found. Run: uv sync --extra security-eval-ui",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _cmd_downsize_pipeline(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> int:
@@ -2937,6 +3018,67 @@ def main() -> int:
     p_hf_cache_rm.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_hf_cache_rm.set_defaults(handler=_cmd_hf_cache_rm)
 
+    # security-eval (LLM security evaluation: run prompt sets, score, KPIs)
+    p_security_eval = subparsers.add_parser(
+        "security-eval",
+        help="LLM security evaluation: run prompt sets against Ollama/serve, score refusal/compliance, output KPIs and CSV",
+    )
+    se_sub = p_security_eval.add_subparsers(dest="security_eval_command")
+    p_se_run = se_sub.add_parser("run", help="Run eval: load prompt set, query model, score, write CSV/JSON")
+    p_se_run.add_argument(
+        "prompt_set",
+        metavar="PROMPT_SET",
+        help="Path to prompt set: .txt (one prompt per line) or .jsonl (prompt, category, target_for_extraction)",
+    )
+    p_se_run.add_argument(
+        "--model",
+        default="llama3.2",
+        help="Model name (default: llama3.2)",
+    )
+    p_se_run.add_argument(
+        "--base-url",
+        default=None,
+        help="Ollama or abliterate serve URL (default: OLLAMA_HOST or http://127.0.0.1:11434)",
+    )
+    p_se_run.add_argument(
+        "--output-csv",
+        metavar="PATH",
+        help="Write per-prompt results to CSV",
+    )
+    p_se_run.add_argument(
+        "--output-json",
+        metavar="PATH",
+        help="Write full run (results + KPIs + metadata) to JSON",
+    )
+    p_se_run.add_argument(
+        "--save-history",
+        action="store_true",
+        help="Append run to SQLite history (~/.ollama_tools/security_eval_runs.db) for plots over time",
+    )
+    p_se_run.add_argument(
+        "--system",
+        help="Optional system prompt to send with each request",
+    )
+    p_se_run.add_argument(
+        "--no-chat",
+        action="store_true",
+        help="Use /api/generate instead of /api/chat",
+    )
+    p_se_run.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Request timeout in seconds (default: 120)",
+    )
+    p_se_run.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Less progress output",
+    )
+    p_se_run.set_defaults(handler=_cmd_security_eval_run)
+    p_se_ui = se_sub.add_parser("ui", help="Launch Streamlit UI for security evaluation (requires: uv sync --extra security-eval-ui)")
+    p_se_ui.set_defaults(handler=_cmd_security_eval_ui)
+
     # downsize (distillation: large → small model)
     p_downsize = subparsers.add_parser(
         "downsize",
@@ -2988,6 +3130,9 @@ def main() -> int:
         return 0
     if parsed.command == "hf-cache" and not getattr(parsed, "hf_cache_command", None):
         p_hf_cache.print_help()
+        return 0
+    if parsed.command == "security-eval" and not getattr(parsed, "security_eval_command", None):
+        p_security_eval.print_help()
         return 0
     handler = getattr(parsed, "handler", None)
     if handler is None:
