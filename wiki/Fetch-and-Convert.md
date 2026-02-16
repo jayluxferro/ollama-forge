@@ -9,14 +9,14 @@ Get a GGUF from Hugging Face and create an Ollama model in one command, or turn 
 Use when the Hugging Face repo **already has GGUF files** (e.g. TheBloke-style repos).
 
 ```bash
-uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model
+uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model
 ollama run my-model
 ```
 
 **Pick a specific quantization** when the repo has multiple GGUF files:
 
 ```bash
-uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_M
+uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_M
 # or Q8_0, Q5_K_M, etc.
 ```
 
@@ -35,14 +35,14 @@ uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_
 Use when you **already have a .gguf file** on disk (e.g. downloaded manually or produced by llama.cpp).
 
 ```bash
-uv run ollama-tools convert --gguf /path/to/model.gguf --name my-model
+uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model
 ollama run my-model
 ```
 
 **Shrink first (quantize)** — Reduces size/VRAM; requires llama.cpp `quantize` (or `llama-quantize`) on PATH:
 
 ```bash
-uv run ollama-tools convert --gguf /path/to/model.gguf --name my-model --quantize Q4_K_M
+uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model --quantize Q4_K_M
 ollama run my-model
 ```
 
@@ -60,10 +60,10 @@ Models downloaded by `fetch` and `fetch-adapter` are stored in the Hugging Face 
 
 ```bash
 # List cached repos and sizes
-uv run ollama-tools hf-cache ls
+uv run ollama-forge hf-cache ls
 
 # Remove one or more repos (frees disk space)
-uv run ollama-tools hf-cache rm TheBloke/Llama-2-7B-GGUF
-uv run ollama-tools hf-cache rm repo1 repo2 --yes   # skip confirmation
-uv run ollama-tools hf-cache rm repo1 --dry-run     # preview only
+uv run ollama-forge hf-cache rm TheBloke/Llama-2-7B-GGUF
+uv run ollama-forge hf-cache rm repo1 repo2 --yes   # skip confirmation
+uv run ollama-forge hf-cache rm repo1 --dry-run     # preview only
 ```

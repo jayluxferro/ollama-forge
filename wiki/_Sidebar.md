@@ -1,4 +1,4 @@
-# ollama-tools Wiki
+# ollama-forge Wiki
 
 - [Home](Home)
 - [Installation](Installation)

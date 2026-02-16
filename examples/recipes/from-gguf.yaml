@@ -1,5 +1,5 @@
 # Example: create an Ollama model from a GGUF file (e.g. after fetch or manual download).
-# Copy this file, set gguf to your .gguf path, then: uv run ollama-tools build <file>
+# Copy this file, set gguf to your .gguf path, then: uv run ollama-forge build <file>
 # Copy and set gguf path, then build.
 
 name: my-model

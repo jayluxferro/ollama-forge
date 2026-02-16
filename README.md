@@ -1,13 +1,13 @@
-# ollama-tools
+# ollama-forge
 
 Get models from Hugging Face, convert them, add adapters, and run them in [Ollama](https://ollama.com) — without needing deep expertise. One place for fetch, convert, adapters, and recipes.
 
 **Quick start:**
 ```bash
-uv sync && uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
+uv sync && uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
 ```
 
-Or the shortest path: `uv run ollama-tools start --name my-model` then `ollama run my-model`.
+Or the shortest path: `uv run ollama-forge start --name my-model` then `ollama run my-model`.
 
 ---
 
@@ -36,7 +36,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 
 ---
 
-## Why ollama-tools
+## Why ollama-forge
 
 - **One place** — Fetch, convert, adapters, recipes; no scattered scripts.
 - **Simple** — Clear commands and docs; try things without being an ML expert.
@@ -47,9 +47,9 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 ## Setup (one-time)
 
 - **Python 3.10+** and **[uv](https://docs.astral.sh/uv/)** (or pip).
-- **From repo:** `uv sync` then `uv run ollama-tools` (or `uv tool install .` to use `ollama-tools` from anywhere).
+- **From repo:** `uv sync` then `uv run ollama-forge` (or `uv tool install .` to use `ollama-forge` from anywhere).
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
-- **Verify:** `uv run ollama-tools check` — see what’s installed. `uv run ollama-tools doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
+- **Verify:** `uv run ollama-forge check` — see what’s installed. `uv run ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
 - **Optional:** Run Ruff before each commit: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md).
 
 ---
@@ -68,7 +68,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp | `setup-llama-cpp` |
 
-Full list: [Command Reference](wiki/Command-Reference.md). Run `ollama-tools --help` for options.
+Full list: [Command Reference](wiki/Command-Reference.md). Run `ollama-forge --help` for options.
 
 ---
 
@@ -76,29 +76,29 @@ Full list: [Command Reference](wiki/Command-Reference.md). Run `ollama-tools --h
 
 **Beginner (one command):**
 ```bash
-uv run ollama-tools start --name my-model
+uv run ollama-forge start --name my-model
 ollama run my-model
 ```
 Uses default model + balanced profile. Use `--profile fast|balanced|quality|low-vram` and `--task chat|coding|creative`. See [Quick Start](wiki/Quick-Start.md).
 
 **Auto (any source):** Recipe, GGUF path, HF repo, base model, or adapter — the tool detects and runs the right flow:
 ```bash
-uv run ollama-tools auto ./recipe.yaml
-uv run ollama-tools auto TheBloke/Llama-2-7B-GGUF --name my-model
-uv run ollama-tools auto llama3.2 --name my-assistant --system "You are helpful."
+uv run ollama-forge auto ./recipe.yaml
+uv run ollama-forge auto TheBloke/Llama-2-7B-GGUF --name my-model
+uv run ollama-forge auto llama3.2 --name my-assistant --system "You are helpful."
 ```
 See [Auto & Plan](wiki/Auto-and-Plan.md).
 
 **Fetch from Hugging Face:** When the repo has GGUF files:
 ```bash
-uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model
+uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model
 ollama run my-model
 ```
 Use `--quant Q4_K_M` to pick size. See [Fetch & Convert](wiki/Fetch-and-Convert.md).
 
-**Local GGUF:** `uv run ollama-tools convert --gguf /path/to/model.gguf --name my-model`. Optional `--quantize Q4_K_M` (needs llama.cpp on PATH). See [Quantization](wiki/Quantization.md).
+**Local GGUF:** `uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model`. Optional `--quantize Q4_K_M` (needs llama.cpp on PATH). See [Quantization](wiki/Quantization.md).
 
-**Recipe (one file):** `uv run ollama-tools build recipe.yaml`. See [Recipes](wiki/Recipes.md) for format and examples.
+**Recipe (one file):** `uv run ollama-forge build recipe.yaml`. See [Recipes](wiki/Recipes.md) for format and examples.
 
 **Adapters:** `adapters search "llama lora"`, then `fetch-adapter <repo> --base <base> --name <name>`, or `retrain --base <base> --adapter <path> --name <name>`. See [Adapters](wiki/Adapters.md).
 

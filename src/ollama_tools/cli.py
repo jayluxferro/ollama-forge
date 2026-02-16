@@ -1,4 +1,4 @@
-"""CLI entrypoint for ollama-tools."""
+"""CLI entrypoint for ollama-forge."""
 
 import argparse
 import json
@@ -154,7 +154,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                     f"no .gguf files found in {args.repo_id}",
                     next_steps=[
                         "Use a repo that already includes GGUF files",
-                        "Or convert from HF to GGUF first, then run: ollama-tools convert --gguf <path> --name <name>",
+                        "Or convert from HF to GGUF first, then run: ollama-forge convert --gguf <path> --name <name>",
                     ],
                 )
                 return 1
@@ -173,7 +173,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             next_steps=[
                 "If the repo is gated/private, run: huggingface-cli login",
                 "Or set: HF_TOKEN=<your_token>",
-                "Try: ollama-tools check",
+                "Try: ollama-forge check",
             ],
         )
         return 1
@@ -229,7 +229,7 @@ def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         )
         print(f"  system prompt source: {system_source}", file=sys.stderr)
     if getattr(args, "plan", False):
-        action = f"ollama-tools fetch {repo_id} --name {name} --quant {quant}"
+        action = f"ollama-forge fetch {repo_id} --name {name} --quant {quant}"
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -462,7 +462,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         name = _prompt_with_default("Model name", "my-model") if prompt_enabled else "my-model"
     if source_type == "recipe":
         fake = argparse.Namespace(recipe=source, out_modelfile=args.out_modelfile)
-        if maybe_plan("build", f"ollama-tools build {source}"):
+        if maybe_plan("build", f"ollama-forge build {source}"):
             return 0
         return _cmd_build(parser, fake)
     if source_type == "gguf":
@@ -479,7 +479,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         )
         if maybe_plan(
             "convert",
-            f"ollama-tools convert --gguf {source} --name {name}",
+            f"ollama-forge convert --gguf {source} --name {name}",
         ):
             return 0
         return _cmd_convert(parser, fake)
@@ -502,7 +502,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             )
             if maybe_plan(
                 "retrain",
-                f"ollama-tools retrain --base {base} --adapter {source_path} --name {name}",
+                f"ollama-forge retrain --base {base} --adapter {source_path} --name {name}",
             ):
                 return 0
             return _cmd_retrain(parser, fake)
@@ -534,7 +534,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             )
             if maybe_plan(
                 "fetch-adapter",
-                f"ollama-tools fetch-adapter {source} --base {base} --name {name}",
+                f"ollama-forge fetch-adapter {source} --base {base} --name {name}",
             ):
                 return 0
             return _cmd_fetch_adapter(parser, fake)
@@ -556,7 +556,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         )
         if maybe_plan(
             "fetch",
-            f"ollama-tools fetch {source} --name {name}",
+            f"ollama-forge fetch {source} --name {name}",
         ):
             return 0
         return _cmd_fetch(parser, fake)
@@ -573,7 +573,7 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     )
     if maybe_plan(
         "create-from-base",
-        f"ollama-tools create-from-base --base {source} --name {name}",
+        f"ollama-forge create-from-base --base {source} --name {name}",
     ):
         return 0
     return _cmd_create_from_base(parser, fake)
@@ -625,7 +625,7 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
             f"GGUF file not found: {gguf}",
             next_steps=[
                 "Check the path and file extension (.gguf)",
-                "Or fetch a GGUF from HF: ollama-tools fetch <repo_id> --name <name>",
+                "Or fetch a GGUF from HF: ollama-forge fetch <repo_id> --name <name>",
             ],
         )
         return 1
@@ -637,7 +637,7 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
             print_actionable_error(
                 "--quantize requires llama.cpp 'quantize' or 'llama-quantize' on PATH",
                 next_steps=[
-                    "Run: ollama-tools setup-llama-cpp",
+                    "Run: ollama-forge setup-llama-cpp",
                     "Add its build/bin path to PATH",
                     "Or use a pre-quantized GGUF and skip --quantize",
                 ],
@@ -753,7 +753,7 @@ if command -v finetune >/dev/null 2>&1; then
   finetune --train-data "$PREPARED" --sample-start '### Instruction' \\
     --model-base "$BASE_GGUF" --lora-out "$ADAPTER_DIR" || true
 else
-  echo "Step 3: finetune not on PATH. Run: ollama-tools setup-llama-cpp and add to PATH."
+  echo "Step 3: finetune not on PATH. Run: ollama-forge setup-llama-cpp and add to PATH."
   echo "  Then: finetune --train-data \$PREPARED --sample-start '### Instruction' \\"
   echo "    --model-base \$BASE_GGUF --lora-out \$ADAPTER_DIR"
 fi
@@ -767,7 +767,7 @@ echo "  Or re-run with --base-gguf <path> --run-trainer to run it automatically.
 """
     script = f"""#!/usr/bin/env bash
 # Training pipeline: data → adapter → Ollama model
-# Generated by ollama-tools train --data ... --base {base} --name {name}
+# Generated by ollama-forge train --data ... --base {base} --name {name}
 set -e
 DATA="{data_spec}"
 BASE="{base}"
@@ -777,12 +777,12 @@ PREPARED="train_prepared.txt"
 ADAPTER_DIR="./adapter_out"
 
 echo "Step 1: Validating data..."
-ollama-tools validate-training-data "$DATA"
+ollama-forge validate-training-data "$DATA"
 echo "Step 2: Preparing data for llama.cpp (plain text)..."
-ollama-tools prepare-training-data "$DATA" -o "$PREPARED" --format llama.cpp
+ollama-forge prepare-training-data "$DATA" -o "$PREPARED" --format llama.cpp
 {run_finetune_block}
 echo "Step 4: After training, create Ollama model:"
-echo "  ollama-tools retrain --base $BASE --adapter $ADAPTER_DIR --name $NAME"
+echo "  ollama-forge retrain --base $BASE --adapter $ADAPTER_DIR --name $NAME"
 echo ""
 echo "Then: ollama run $NAME"
 """
@@ -855,7 +855,7 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     except FileNotFoundError as e:
         print_actionable_error(
             str(e),
-            next_steps=["Check recipe path and retry: ollama-tools build <recipe.yaml>"],
+            next_steps=["Check recipe path and retry: ollama-forge build <recipe.yaml>"],
         )
         return 1
     except (ValueError, ImportError) as e:
@@ -863,7 +863,7 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             "invalid recipe",
             cause=str(e),
             next_steps=[
-                "Run: ollama-tools build <recipe.yaml> --help",
+                "Run: ollama-forge build <recipe.yaml> --help",
                 "Ensure recipe has name and exactly one of base/gguf/hf_repo",
             ],
         )
@@ -933,7 +933,7 @@ def _cmd_check(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     check_item(
         "llama.cpp finetune",
         bool(finetune),
-        "for train/run-trainer, build llama.cpp and add finetune to PATH, or run: ollama-tools setup-llama-cpp",
+        "for train/run-trainer, build llama.cpp and add finetune to PATH, or run: ollama-forge setup-llama-cpp",
     )
     check_item(
         "llama.cpp quantize",
@@ -1004,12 +1004,12 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         check_item(
             "llama.cpp finetune",
             status["finetune"],
-            "run: ollama-tools setup-llama-cpp",
+            "run: ollama-forge setup-llama-cpp",
         )
         check_item(
             "llama.cpp quantize",
             status["quantize"],
-            "run: ollama-tools setup-llama-cpp",
+            "run: ollama-forge setup-llama-cpp",
         )
 
     if not getattr(args, "fix", False):
@@ -1023,7 +1023,7 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             planned.append("Run: uv sync")
         if getattr(args, "fix_llama_cpp", False) and (not status["finetune"] or not status["quantize"]):
             target_dir = getattr(args, "llama_cpp_dir", None) or "./llama.cpp"
-            planned.append(f"Run: ollama-tools setup-llama-cpp --dir {target_dir}")
+            planned.append(f"Run: ollama-forge setup-llama-cpp --dir {target_dir}")
         if not planned:
             planned.append("No fix actions needed.")
         if getattr(args, "json", False):
@@ -1041,7 +1041,7 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             not_found_message="Error: uv not found. Install uv first: https://docs.astral.sh/uv/",
             process_error_message="Error: uv sync failed: {e}",
             not_found_next_steps=["Install uv, then run: uv sync"],
-            process_error_next_steps=["Resolve errors above, then rerun: ollama-tools doctor --fix"],
+            process_error_next_steps=["Resolve errors above, then rerun: ollama-forge doctor --fix"],
         )
         if code != 0:
             return code
@@ -1137,7 +1137,7 @@ def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespa
     for m in models:
         repo = m.id
         print(f"  {repo}")
-        print(f"    → ollama-tools fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
+        print(f"    → ollama-forge fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
     print("\nReplace <BASE_MODEL> with the model the adapter was trained for (e.g. llama3.2).")
     return 0
 
@@ -1180,7 +1180,7 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
             cause=str(e),
             next_steps=[
                 "Check internet/Hugging Face connectivity",
-                'Try a broader query: ollama-tools adapters recommend --query "lora adapter"',
+                'Try a broader query: ollama-forge adapters recommend --query "lora adapter"',
             ],
         )
         return 1
@@ -1197,9 +1197,9 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
         for repo, score in ranked:
             print(f"  {repo}  (score={score})")
             if base:
-                print(f"    -> ollama-tools fetch-adapter {repo} --base {base} --name <NAME>")
+                print(f"    -> ollama-forge fetch-adapter {repo} --base {base} --name <NAME>")
             else:
-                print(f"    -> ollama-tools fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
+                print(f"    -> ollama-forge fetch-adapter {repo} --base <BASE_MODEL> --name <NAME>")
     elif not getattr(args, "apply", False):
         print(
             json.dumps(
@@ -1219,13 +1219,13 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
         print_actionable_error(
             "--apply requires --base",
             next_steps=[
-                f'Re-run with: ollama-tools adapters recommend --base <BASE_MODEL> --apply --query "{query}"',
+                f'Re-run with: ollama-forge adapters recommend --base <BASE_MODEL> --apply --query "{query}"',
             ],
         )
         return 1
     target_name = getattr(args, "name", None) or f"{base}-adapter"
     if getattr(args, "plan", False):
-        action = f"ollama-tools fetch-adapter {top_repo} --base {base} --name {target_name}"
+        action = f"ollama-forge fetch-adapter {top_repo} --base {base} --name {target_name}"
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -1435,7 +1435,7 @@ def _cmd_downsize_pipeline(parser: argparse.ArgumentParser, args: argparse.Names
    # See https://huggingface.co/docs/trl (GKD trainer); then export student to GGUF with llama.cpp.
 
 3. Create Ollama model from the student GGUF:
-   ollama-tools convert --gguf <path/to/student.gguf> --name {name}{q_flag}
+   ollama-forge convert --gguf <path/to/student.gguf> --name {name}{q_flag}
    ollama run {name}
 """
         if write_script:
@@ -1453,7 +1453,7 @@ Downsize pipeline (teacher → student → Ollama):
 1. Choose teacher (large) and student (small) model — e.g. 30B and 3B from same family.
 2. Run distillation externally (TRL GKD, Axolotl, Unsloth, or custom).
 3. Export student to GGUF (llama.cpp), then:
-   ollama-tools convert --gguf <path/to/student.gguf> --name my-downsized [--quantize Q4_K_M]
+   ollama-forge convert --gguf <path/to/student.gguf> --name my-downsized [--quantize Q4_K_M]
    ollama run my-downsized
 
 Simpler: use --teacher, --student, --name (and optional --quantize, --write-script).
@@ -1856,7 +1856,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
     output_dir = Path(
         getattr(args, "output_dir", None)
-        or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-tools-abliterate-"))
+        or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-forge-abliterate-"))
     )
     llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
     if not llama_cpp_dir:
@@ -1985,13 +1985,13 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         )
     if not getattr(args, "output_dir", None):
         print(
-            f"To chat with correct tokenization (HF tokenizer): ollama-tools abliterate chat --name {name}",
+            f"To chat with correct tokenization (HF tokenizer): ollama-forge abliterate chat --name {name}",
             file=sys.stderr,
         )
     else:
         print(
             "To chat with correct tokenization (HF tokenizer): "
-            f"ollama-tools abliterate chat --checkpoint {output_dir / 'checkpoint'}",
+            f"ollama-forge abliterate chat --checkpoint {output_dir / 'checkpoint'}",
             file=sys.stderr,
         )
     return run_ollama_create(name, content)
@@ -2006,9 +2006,9 @@ def _load_env() -> None:
 def main() -> int:
     _load_env()
     parser = argparse.ArgumentParser(
-        prog="ollama-tools",
+        prog="ollama-forge",
         description="Create, retrain, ablate, and convert models for local Ollama.",
-        epilog="Quick start: ollama-tools fetch <HF_REPO> --name my-model",
+        epilog="Quick start: ollama-forge fetch <HF_REPO> --name my-model",
     )
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 

@@ -4,7 +4,7 @@ Copy any file here and edit it for your model. Then build:
 
 ```bash
 uv sync
-uv run ollama-tools build your-recipe.yaml
+uv run ollama-forge build your-recipe.yaml
 ollama run <name-from-recipe>
 ```
 

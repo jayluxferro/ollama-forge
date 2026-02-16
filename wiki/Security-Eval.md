@@ -9,13 +9,13 @@ Run prompt sets against Ollama or abliterate serve to evaluate LLM security: jai
 Ensure Ollama (or [abliterate serve](Abliterate)) is running with a model, then:
 
 ```bash
-uv run ollama-tools security-eval run path/to/prompts.txt --model my-model --output-csv results.csv
+uv run ollama-forge security-eval run path/to/prompts.txt --model my-model --output-csv results.csv
 ```
 
 Use abliterate serve (e.g. on port 11435):
 
 ```bash
-OLLAMA_HOST=http://127.0.0.1:11435 uv run ollama-tools security-eval run prompts.jsonl --model google/gemma-3-4b-it-abliterated --output-csv out.csv
+OLLAMA_HOST=http://127.0.0.1:11435 uv run ollama-forge security-eval run prompts.jsonl --model google/gemma-3-4b-it-abliterated --output-csv out.csv
 ```
 
 ---
@@ -66,7 +66,7 @@ Use `--save-history` to append the run to SQLite at `~/.ollama_tools/security_ev
 
 ```bash
 uv sync --extra security-eval-ui
-uv run ollama-tools security-eval ui
+uv run ollama-forge security-eval ui
 ```
 
 ---
@@ -76,13 +76,13 @@ uv run ollama-tools security-eval ui
 The same harmful/harmless lists used by [abliterate](Abliterate) can be used as prompt sets. Download them with:
 
 ```bash
-uv run ollama-tools abliterate download-lists --output-dir ./eval_lists
+uv run ollama-forge abliterate download-lists --output-dir ./eval_lists
 ```
 
 Then run eval on the harmful list (jailbreak-style):
 
 ```bash
-uv run ollama-tools security-eval run ./eval_lists/harmful.txt --model my-model --output-csv harmful_eval.csv
+uv run ollama-forge security-eval run ./eval_lists/harmful.txt --model my-model --output-csv harmful_eval.csv
 ```
 
 See [Abliterate](Abliterate) for refusal removal (abliterate run/serve) and [docs/LLM-SECURITY-EVAL-REVIEW.md](../docs/LLM-SECURITY-EVAL-REVIEW.md) for the full feasibility review and attack categories.

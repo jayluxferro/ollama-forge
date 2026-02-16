@@ -31,4 +31,4 @@ K variants (e.g. K_M, K_S) use mixed quantization for better quality at similar 
 - **Lower bit (e.g. Q4):** Smaller file, less VRAM; may lose nuance or instruction-following.
 - **Higher bit (e.g. Q8, F16):** Larger file, more VRAM; closer to original quality.
 
-Quantization is applied when **creating the GGUF** (llama.cpp convert + quantize), not inside ollama-tools. Choose a quant that fits your hardware and quality needs.
+Quantization is applied when **creating the GGUF** (llama.cpp convert + quantize), not inside ollama-forge. Choose a quant that fits your hardware and quality needs.

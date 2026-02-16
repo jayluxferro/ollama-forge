@@ -1,6 +1,6 @@
 # Recipes
 
-Build an Ollama model from a **single YAML or JSON file** with one command: `ollama-tools build recipe.yaml`.
+Build an Ollama model from a **single YAML or JSON file** with one command: `ollama-forge build recipe.yaml`.
 
 ---
 
@@ -30,7 +30,7 @@ repeat_penalty: 1.1
 ```
 
 ```bash
-uv run ollama-tools build recipe.yaml
+uv run ollama-forge build recipe.yaml
 ollama run my-assistant
 ```
 
@@ -81,6 +81,6 @@ In this repo, see `examples/recipes/`:
 Build any of them:
 
 ```bash
-uv run ollama-tools build examples/recipes/from-hf.yaml
+uv run ollama-forge build examples/recipes/from-hf.yaml
 ollama run <name-from-recipe>
 ```

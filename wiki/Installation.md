@@ -1,6 +1,6 @@
 # Installation
 
-One-time setup to run ollama-tools and optional components (llama.cpp for finetune/quantize).
+One-time setup to run ollama-forge and optional components (llama.cpp for finetune/quantize).
 
 ---
 
@@ -12,13 +12,13 @@ One-time setup to run ollama-tools and optional components (llama.cpp for finetu
 
 ---
 
-## Install ollama-tools
+## Install ollama-forge
 
 **From the repo (development):**
 
 ```bash
 uv sync
-uv run ollama-tools --help
+uv run ollama-forge --help
 ```
 
 **Install globally (run from anywhere):**
@@ -31,7 +31,7 @@ uv tool install .
 pip install -e .
 ```
 
-Then run `ollama-tools` from any directory.
+Then run `ollama-forge` from any directory.
 
 ---
 
@@ -40,16 +40,16 @@ Then run `ollama-tools` from any directory.
 **Quick check** — see what's installed (ollama, Hugging Face, optional deps, llama.cpp):
 
 ```bash
-uv run ollama-tools check
+uv run ollama-forge check
 ```
 
 **Diagnose and fix** — guided diagnosis with optional auto-fix:
 
 ```bash
-uv run ollama-tools doctor
-uv run ollama-tools doctor --fix          # apply safe fixes
-uv run ollama-tools doctor --fix --plan   # preview fixes only
-uv run ollama-tools doctor --fix-llama-cpp  # also run setup-llama-cpp when finetune/quantize missing
+uv run ollama-forge doctor
+uv run ollama-forge doctor --fix          # apply safe fixes
+uv run ollama-forge doctor --fix --plan   # preview fixes only
+uv run ollama-forge doctor --fix-llama-cpp  # also run setup-llama-cpp when finetune/quantize missing
 ```
 
 Doctor reports:
@@ -76,7 +76,7 @@ If you want to:
 then install llama.cpp:
 
 ```bash
-uv run ollama-tools setup-llama-cpp
+uv run ollama-forge setup-llama-cpp
 ```
 
 This clones and builds llama.cpp. **Add the build directory to your PATH** (the command prints the exact path). For example:
@@ -85,7 +85,7 @@ This clones and builds llama.cpp. **Add the build directory to your PATH** (the 
 export PATH="/path/to/llama.cpp/build/bin:$PATH"
 ```
 
-Then run `ollama-tools check` again; finetune and quantize should show as OK.
+Then run `ollama-forge check` again; finetune and quantize should show as OK.
 
 ---
 

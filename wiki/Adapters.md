@@ -14,7 +14,7 @@ A small add-on trained on top of a base model (e.g. Llama, Mistral) that changes
 
 - **Hugging Face** — Many shared adapters. Search on [huggingface.co/models](https://huggingface.co/models) (e.g. "llama lora") or use the tool:
   ```bash
-  uv run ollama-tools adapters search "llama 3 lora"
+  uv run ollama-forge adapters search "llama 3 lora"
   ```
   Then use the suggested `fetch-adapter` command.
 - **Train your own** — e.g. [llama.cpp finetune](https://github.com/ggerganov/llama.cpp/tree/master/examples/finetune), [Axolotl](https://github.com/OpenAccess-AI-Collective/axolotl), [Unsloth](https://github.com/unslothai/unsloth). Then use the adapter locally with `retrain`.
@@ -26,7 +26,7 @@ A small add-on trained on top of a base model (e.g. Llama, Mistral) that changes
 Download an adapter from Hugging Face and create the model in one step:
 
 ```bash
-uv run ollama-tools fetch-adapter username/adapter-repo --base llama3.2 --name my-finetuned
+uv run ollama-forge fetch-adapter username/adapter-repo --base llama3.2 --name my-finetuned
 ollama run my-finetuned
 ```
 
@@ -39,7 +39,7 @@ Options: `--output /path/to/dir` to keep the adapter on disk; `--revision main`.
 Use an adapter you already have on disk:
 
 ```bash
-uv run ollama-tools retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
+uv run ollama-forge retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
 ollama run my-finetuned
 ```
 
@@ -51,14 +51,14 @@ Get recommendations for a base model and optionally apply the top one:
 
 ```bash
 # Show recommendations
-uv run ollama-tools adapters recommend --base llama3.2
+uv run ollama-forge adapters recommend --base llama3.2
 
 # Apply top recommendation
-uv run ollama-tools adapters recommend --base llama3.2 --apply --name my-finetuned
+uv run ollama-forge adapters recommend --base llama3.2 --apply --name my-finetuned
 ollama run my-finetuned
 
 # Preview only (dry-run)
-uv run ollama-tools adapters recommend --base llama3.2 --apply --plan
+uv run ollama-forge adapters recommend --base llama3.2 --apply --plan
 ```
 
 ---

@@ -1,6 +1,6 @@
 # Command Reference
 
-Full list of commands and what they do. Run `ollama-tools --help` for the latest.
+Full list of commands and what they do. Run `ollama-forge --help` for the latest.
 
 ---
 
@@ -64,4 +64,4 @@ Full list of commands and what they do. Run `ollama-tools --help` for the latest
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir` (and others; run `abliterate --help`).
 
-Use `ollama-tools <command> --help` for options and examples.
+Use `ollama-forge <command> --help` for options and examples.

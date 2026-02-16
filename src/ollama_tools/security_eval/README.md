@@ -6,7 +6,7 @@ Run prompt sets against Ollama or abliterate serve, score refusal/compliance/ext
 
 ```bash
 # Ensure Ollama (or abliterate serve) is running with a model
-uv run ollama-tools security-eval run path/to/prompts.txt --model my-model --output-csv results.csv
+uv run ollama-forge security-eval run path/to/prompts.txt --model my-model --output-csv results.csv
 ```
 
 ## Prompt set formats
@@ -22,8 +22,8 @@ Sample files: `src/ollama_tools/security_eval/data/sample_prompts.txt`, `sample_
 
 ## CLI
 
-- **Run eval:** `ollama-tools security-eval run PROMPT_SET [--model NAME] [--base-url URL] [--output-csv PATH] [--output-json PATH] [--save-history]`
-- **Launch UI:** `ollama-tools security-eval ui` (requires `uv sync --extra security-eval-ui`)
+- **Run eval:** `ollama-forge security-eval run PROMPT_SET [--model NAME] [--base-url URL] [--output-csv PATH] [--output-json PATH] [--save-history]`
+- **Launch UI:** `ollama-forge security-eval ui` (requires `uv sync --extra security-eval-ui`)
 
 ## KPIs
 

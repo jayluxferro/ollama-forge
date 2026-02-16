@@ -20,9 +20,9 @@ Ollama runs **GGUF** models. If the Hugging Face repo only has PyTorch/Safetenso
    ./quantize model.gguf model-Q4_K_M.gguf Q4_K_M
    ```
    (Requires llama.cpp built; see [Installation](Installation).)
-4. **Create Ollama model** — Use ollama-tools:
+4. **Create Ollama model** — Use ollama-forge:
    ```bash
-   uv run ollama-tools convert --gguf /path/to/model.gguf --name my-model
+   uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model
    ollama run my-model
    ```
 
@@ -30,10 +30,10 @@ Ollama runs **GGUF** models. If the Hugging Face repo only has PyTorch/Safetenso
 
 ## When GGUF is already on the Hub
 
-If the repo **already has GGUF files**, use ollama-tools directly — no conversion step:
+If the repo **already has GGUF files**, use ollama-forge directly — no conversion step:
 
 ```bash
-uv run ollama-tools fetch <repo_id> --name my-model
+uv run ollama-forge fetch <repo_id> --name my-model
 ollama run my-model
 ```
 

@@ -1,5 +1,5 @@
 [project]
-name = "ollama-tools"
+name = "ollama-forge"
 version = "1.0.0"
 description = "Create, retrain, ablate, and convert models for local Ollama"
 readme = "README.md"
@@ -16,7 +16,7 @@ abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25", "gguf>=0.1
 security-eval-ui = ["streamlit>=1.28", "pandas>=2.0", "plotly>=5.18"]
 
 [project.scripts]
-ollama-tools = "ollama_tools.cli:main"
+ollama-forge = "ollama_tools.cli:main"
 
 [build-system]
 requires = ["hatchling"]

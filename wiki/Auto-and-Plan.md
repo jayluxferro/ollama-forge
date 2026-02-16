@@ -22,28 +22,28 @@ Examples:
 
 ```bash
 # Recipe → build
-uv run ollama-tools auto ./examples/recipes/from-hf.yaml
+uv run ollama-forge auto ./examples/recipes/from-hf.yaml
 
 # GGUF file → convert
-uv run ollama-tools auto /path/to/model.gguf --name my-model --quantize Q4_K_M
+uv run ollama-forge auto /path/to/model.gguf --name my-model --quantize Q4_K_M
 
 # HF repo → fetch
-uv run ollama-tools auto TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_M
+uv run ollama-forge auto TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_M
 
 # Base model → create-from-base
-uv run ollama-tools auto llama3.2 --name my-assistant --system "You are helpful."
+uv run ollama-forge auto llama3.2 --name my-assistant --system "You are helpful."
 
 # Adapter dir → retrain
-uv run ollama-tools auto /path/to/adapter_dir --base llama3.2 --name my-finetuned
+uv run ollama-forge auto /path/to/adapter_dir --base llama3.2 --name my-finetuned
 
 # Adapter HF repo → fetch-adapter
-uv run ollama-tools auto user/my-lora-adapter --base llama3.2 --name my-finetuned
+uv run ollama-forge auto user/my-lora-adapter --base llama3.2 --name my-finetuned
 ```
 
 **Preview only (no execution):**
 
 ```bash
-uv run ollama-tools auto TheBloke/Llama-2-7B-GGUF --plan
+uv run ollama-forge auto TheBloke/Llama-2-7B-GGUF --plan
 ```
 
 When **--name** (and in HF mode, **--quant**) is missing, **auto** prompts in interactive terminals with safe defaults. For non-interactive scripts use **--no-prompt** to avoid prompts and use defaults.
@@ -55,16 +55,16 @@ When **--name** (and in HF mode, **--quant**) is missing, **auto** prompts in in
 Preview what would happen for quickstart, auto, doctor-fix, or adapters-apply.
 
 ```bash
-uv run ollama-tools plan quickstart --profile balanced --name my-model
-uv run ollama-tools plan auto TheBloke/Llama-2-7B-GGUF --name my-model
-uv run ollama-tools plan doctor-fix --fix-llama-cpp
-uv run ollama-tools plan adapters-apply --base llama3.2 --query "llama lora adapter"
+uv run ollama-forge plan quickstart --profile balanced --name my-model
+uv run ollama-forge plan auto TheBloke/Llama-2-7B-GGUF --name my-model
+uv run ollama-forge plan doctor-fix --fix-llama-cpp
+uv run ollama-forge plan adapters-apply --base llama3.2 --query "llama lora adapter"
 ```
 
 **JSON output** (for scripting/CI):
 
 ```bash
-uv run ollama-tools plan auto TheBloke/Llama-2-7B-GGUF --name my-model --json
+uv run ollama-forge plan auto TheBloke/Llama-2-7B-GGUF --name my-model --json
 ```
 
 Plan does not run the underlying commands; it only shows the steps and, with **--json**, machine-readable output.

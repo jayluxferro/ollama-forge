@@ -40,7 +40,7 @@ def require_ollama() -> int | None:
         "ollama not found on PATH",
         next_steps=[
             "Install Ollama from https://ollama.com",
-            "Run: ollama-tools check",
+            "Run: ollama-forge check",
         ],
     )
     return 1
@@ -84,7 +84,7 @@ def run_ollama_create(
                 "ollama not found on PATH",
                 next_steps=[
                     "Install Ollama from https://ollama.com",
-                    "Run: ollama-tools check",
+                    "Run: ollama-forge check",
                 ],
             )
             return 1
@@ -103,7 +103,7 @@ def run_ollama_create(
                 "ollama not found on PATH",
                 next_steps=[
                     "Install Ollama from https://ollama.com",
-                    "Run: ollama-tools check",
+                    "Run: ollama-forge check",
                 ],
             )
             return 1

@@ -7,7 +7,7 @@ The fastest way to get a working model with one command: **start** or **quicksta
 ## One command
 
 ```bash
-uv run ollama-tools start --name my-model
+uv run ollama-forge start --name my-model
 ollama run my-model
 ```
 
@@ -29,10 +29,10 @@ Profiles set default quantization and model parameters so you don't have to reme
 Examples:
 
 ```bash
-uv run ollama-tools quickstart --profile low-vram --name my-lite-model
-uv run ollama-tools quickstart --profile quality --name my-best-model
+uv run ollama-forge quickstart --profile low-vram --name my-lite-model
+uv run ollama-forge quickstart --profile quality --name my-best-model
 # Override profile with explicit flags:
-uv run ollama-tools quickstart --profile balanced --quant Q8_0 --num-ctx 8192 --name my-tuned-model
+uv run ollama-forge quickstart --profile balanced --quant Q8_0 --num-ctx 8192 --name my-tuned-model
 ```
 
 ---
@@ -42,11 +42,11 @@ uv run ollama-tools quickstart --profile balanced --quant Q8_0 --num-ctx 8192 --
 Task presets set a default **system prompt** (e.g. chat, coding, creative).
 
 ```bash
-uv run ollama-tools start --task chat --name my-chat-model
-uv run ollama-tools quickstart --task coding --name my-coder
-uv run ollama-tools quickstart --task creative --name my-writer
+uv run ollama-forge start --task chat --name my-chat-model
+uv run ollama-forge quickstart --task coding --name my-coder
+uv run ollama-forge quickstart --task creative --name my-writer
 # Override task with custom system prompt:
-uv run ollama-tools quickstart --task coding --system "You are terse." --name my-coder
+uv run ollama-forge quickstart --task coding --system "You are terse." --name my-coder
 ```
 
 Use `--system "..."` to override the task's prompt.

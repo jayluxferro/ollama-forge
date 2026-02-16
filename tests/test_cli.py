@@ -6,14 +6,14 @@ import sys
 
 
 def test_cli_help() -> None:
-    """ollama-tools --help exits 0 and prints usage."""
+    """ollama-forge --help exits 0 and prints usage."""
     result = subprocess.run(
         [sys.executable, "-m", "ollama_tools.cli", "--help"],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert "ollama-tools" in result.stdout or "usage" in result.stdout.lower()
+    assert "ollama-forge" in result.stdout or "usage" in result.stdout.lower()
 
 
 def test_cli_prog_name() -> None:

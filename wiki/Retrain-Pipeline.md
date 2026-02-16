@@ -16,7 +16,7 @@ End-to-end: **data → adapter → Ollama model**.
 ## One-command script
 
 ```bash
-uv run ollama-tools train --data ./data/ --base llama3.2 --name my-model --write-script train.sh
+uv run ollama-forge train --data ./data/ --base llama3.2 --name my-model --write-script train.sh
 ./train.sh
 ```
 
@@ -29,7 +29,7 @@ With llama.cpp on PATH and a base GGUF, you can add `--base-gguf /path/to/base.g
 You have an adapter directory. Create the Ollama model:
 
 ```bash
-uv run ollama-tools retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
+uv run ollama-forge retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
 ollama run my-finetuned
 ```
 

@@ -1,5 +1,5 @@
 # Example: create an Ollama model from a Hugging Face repo (no local GGUF).
-# Copy and set hf_repo + name, then: uv run ollama-tools build <file>
+# Copy and set hf_repo + name, then: uv run ollama-forge build <file>
 # Copy and set hf_repo + name, then build.
 
 name: my-model

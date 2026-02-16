@@ -1,5 +1,5 @@
 # Example: create a custom model from an existing Ollama base (no adapter).
-# Copy this file, edit name/base/system, then: uv run ollama-tools build <file>
+# Copy this file, edit name/base/system, then: uv run ollama-forge build <file>
 # Copy and edit name/base/system, then build.
 
 name: my-assistant

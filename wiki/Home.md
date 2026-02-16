@@ -1,4 +1,4 @@
-# ollama-tools
+# ollama-forge
 
 **Get models from Hugging Face, convert them, add adapters, and run them in [Ollama](https://ollama.com) — in a simple way, without needing deep expertise.**
 
@@ -9,13 +9,13 @@ All the tools live here: fetch, convert, adapters, recipes. You run a few comman
 ## Quick start
 
 ```bash
-uv sync && uv run ollama-tools fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
+uv sync && uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-model
 ```
 
 Or the shortest path for beginners:
 
 ```bash
-uv run ollama-tools start --name my-model
+uv run ollama-forge start --name my-model
 ollama run my-model
 ```
 
@@ -66,4 +66,4 @@ ollama run my-model
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp (finetune, quantize) | `setup-llama-cpp` |
 
-Run `ollama-tools --help` for the full list.
+Run `ollama-forge --help` for the full list.

@@ -23,7 +23,7 @@ The tool ships with default harmful/harmless lists. **Harmful:** [Sumandora](htt
 Run without `--harmful`/`--harmless`:
 
 ```bash
-uv run ollama-tools abliterate compute-dir --model <hf_id> --output refusal.pt
+uv run ollama-forge abliterate compute-dir --model <hf_id> --output refusal.pt
 ```
 
 **`--model`** is a Hugging Face model id (downloaded from the Hub), or a path to a local HF-format directory or a `.gguf` file.
@@ -45,7 +45,7 @@ Use a Hugging Face model id or a local path (HF dir or .gguf file).
 - **Directories:** `--harmful-dir ./harmful/ --harmless-dir ./harmless/` to use all `.txt` files in those directories.
 
 ```bash
-uv run ollama-tools abliterate compute-dir --model <hf_id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt
+uv run ollama-forge abliterate compute-dir --model <hf_id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt
 ```
 
 ### Download lists (online, “mark everything allowed” style)
@@ -53,9 +53,9 @@ uv run ollama-tools abliterate compute-dir --model <hf_id> --harmful harmful.txt
 You can download the same lists as the bundled defaults (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction for harmful; Sumandora + JBB benign + refusal_direction for harmless):
 
 ```bash
-uv run ollama-tools abliterate download-lists --output-dir ./my_lists
+uv run ollama-forge abliterate download-lists --output-dir ./my_lists
 # Then:
-uv run ollama-tools abliterate compute-dir --model <hf_id> --harmful my_lists/harmful.txt --harmless my_lists/harmless.txt --output refusal.pt
+uv run ollama-forge abliterate compute-dir --model <hf_id> --harmful my_lists/harmful.txt --harmless my_lists/harmless.txt --output refusal.pt
 ```
 
 ---
@@ -69,14 +69,14 @@ The apply step saves a **full-precision** (bf16) checkpoint, so the saved model 
 - **`--quant Q5_K_M`:** Use a different quantization type when requantizing (default: Q4_K_M).
 
 ```bash
-uv run ollama-tools abliterate run --model <hf_id> --name my-abliterated
+uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated
 # Optional: --no-requantize to keep full-size GGUF; or --quant Q5_K_M
 ```
 
 **Stronger / full abliteration:** The pipeline ablates **all attention projections** (q, k, v, o) with `strength=1.0` by default and skips the first and last layer to reduce coherence loss. If the model still refuses after a default run, re-run with **no layer skip** so every layer is ablated:
 
 ```bash
-uv run ollama-tools abliterate run --model <hf_id> --name my-abliterated --skip-begin-layers 0 --skip-end-layers 0
+uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --skip-begin-layers 0 --skip-end-layers 0
 ```
 
 Keep `--strength 1` (default) for full ablation strength. Use `--strength 0.7` or similar only if quality degrades.
@@ -84,7 +84,7 @@ Keep `--strength 1` (default) for full ablation strength. Use `--strength 0.7` o
 The checkpoint is saved by default under **`./abliterate-<name>/checkpoint`**. To chat using the **Hugging Face tokenizer** (correct tokenization; use when the GGUF/Ollama model produces garbled output, e.g. some Gemma 3 exports), run:
 
 ```bash
-uv run ollama-tools abliterate chat --name my-abliterated
+uv run ollama-forge abliterate chat --name my-abliterated
 ```
 
 If you passed **`--output-dir DIR`** to run, use **`--checkpoint DIR/checkpoint`** instead of `--name`.
@@ -92,7 +92,7 @@ If you passed **`--output-dir DIR`** to run, use **`--checkpoint DIR/checkpoint`
 **Serving for agents (Ollama API):** To let tools and agents use the abliterated model over the same API as Ollama (correct tokenization, no garbled output), run a small server that loads the checkpoint with the HF tokenizer and exposes Ollama-compatible endpoints:
 
 ```bash
-uv run ollama-tools abliterate serve --name my-abliterated --port 11435
+uv run ollama-forge abliterate serve --name my-abliterated --port 11435
 ```
 
 The server listens on `http://127.0.0.1:11435` (default port 11435 so it doesn’t clash with Ollama on 11434). It implements **GET /api/tags**, **POST /api/chat**, and **POST /api/generate** with the same request/response shape as Ollama. **Tools / function calling** are supported when the model’s chat template supports them: send a `tools` array in **POST /api/chat** (same format as Ollama). The server passes tools to the Hugging Face tokenizer and parses the model output for tool calls (JSON with `name` and `arguments`); if found, the response includes `message.tool_calls`. Point agents at this server when using the abliterated model:
@@ -145,7 +145,7 @@ Serve implements all Ollama endpoints that apply to a single in-memory model; pu
 | **think** | Reasoning / thinking (`<think>` or similar) | Yes |
 | **logprobs** | Token log probabilities (non-stream) | Yes |
 
-**Why *self-converted* models could show garbled output:** When you run **ollama-tools abliterate run** we use the community [llama.cpp](https://github.com/ggml-org/llama.cpp) script `convert_hf_to_gguf.py` to produce a GGUF. The script identifies the BPE pre-tokenizer by hashing the tokenizer; if the hash is not in the upstream list it used to raise and abort. We changed it so **unrecognized BPE tokenizers** no longer fail: the script now falls back to **`default`** (conversion completes; quality may vary). For **Gemma 3** BPE we additionally force **`llama-bpe`** when the hash is unknown, so the GGUF tokenizes correctly with Ollama. If you still see garbled output (e.g. other model families or SentencePiece checkpoints), use **`abliterate chat`** or **`abliterate serve`** (HF tokenizer).
+**Why *self-converted* models could show garbled output:** When you run **ollama-forge abliterate run** we use the community [llama.cpp](https://github.com/ggml-org/llama.cpp) script `convert_hf_to_gguf.py` to produce a GGUF. The script identifies the BPE pre-tokenizer by hashing the tokenizer; if the hash is not in the upstream list it used to raise and abort. We changed it so **unrecognized BPE tokenizers** no longer fail: the script now falls back to **`default`** (conversion completes; quality may vary). For **Gemma 3** BPE we additionally force **`llama-bpe`** when the hash is unknown, so the GGUF tokenizes correctly with Ollama. If you still see garbled output (e.g. other model families or SentencePiece checkpoints), use **`abliterate chat`** or **`abliterate serve`** (HF tokenizer).
 
 **Is there one pre-tokenizer that works for all models?** No. llama.cpp (and thus GGUF) only supports a fixed set of pre-tokenizer types (e.g. `default`, `llama-bpe`, `deepseek-llm`, `qwen2`). There is no generic “load any Hugging Face tokenizer” mode in the runtime. So the **universal** way to get correct tokenization for **any** abliterated model is to use the Hugging Face tokenizer at inference: **`abliterate serve`** or **`abliterate chat`**. They load the checkpoint and its tokenizer; no GGUF tokenizer is used, so output is correct regardless of model family.
 
@@ -162,10 +162,10 @@ So for the abliterated model to support tools, **pull the source model in Ollama
 
 ```bash
 ollama pull openai/gpt-oss-20b
-uv run ollama-tools abliterate run --model openai/gpt-oss-20b --name openai/gpt-oss-20b-abliterated
+uv run ollama-forge abliterate run --model openai/gpt-oss-20b --name openai/gpt-oss-20b-abliterated
 ```
 
-If the source isn’t in Ollama, you’ll see a note and the created model may not support tools. You can pass `--template-from OLLAMA_MODEL` to use a different Ollama model’s template, or fix later with `ollama-tools refresh-template --name <abliterated> --base <original> --template-only`. When you use a **local HF path** as `--model`, the pipeline does not use it as template source; pass `--template-from <ollama_model>` if you want the abliterated model to support tools.
+If the source isn’t in Ollama, you’ll see a note and the created model may not support tools. You can pass `--template-from OLLAMA_MODEL` to use a different Ollama model’s template, or fix later with `ollama-forge refresh-template --name <abliterated> --base <original> --template-only`. When you use a **local HF path** as `--model`, the pipeline does not use it as template source; pass `--template-from <ollama_model>` if you want the abliterated model to support tools.
 
 ---
 
@@ -174,6 +174,6 @@ If the source isn’t in Ollama, you’ll see a note and the created model may n
 Use Sumandora's `inference.py` (or your script) with the `.pt` file. If you get an abliterated checkpoint, convert to GGUF (llama.cpp) then:
 
 ```bash
-ollama-tools convert --gguf /path/to/abliterated.gguf --name my-abliterated
+ollama-forge convert --gguf /path/to/abliterated.gguf --name my-abliterated
 ollama run my-abliterated
 ```
