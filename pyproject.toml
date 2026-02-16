@@ -29,6 +29,7 @@ packages = ["src/ollama_tools"]
 dev-dependencies = [
     "pytest>=7",
     "ruff>=0.4",
+    "twine>=6.2.0",
 ]
 
 [tool.pytest.ini_options]
