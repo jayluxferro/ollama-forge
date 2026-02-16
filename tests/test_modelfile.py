@@ -1,6 +1,6 @@
 """Modelfile generation tests."""
 
-from ollama_tools.modelfile import build_modelfile
+from ollama_forge.modelfile import build_modelfile
 
 
 def test_build_modelfile_minimal() -> None:

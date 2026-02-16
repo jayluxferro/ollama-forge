@@ -10,7 +10,7 @@ from socketserver import ThreadingMixIn
 from threading import Thread
 from typing import Any
 
-from ollama_tools.abliterate import _load_model_with_gguf_version_workaround
+from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
 
 
 def _load_model_and_tokenizer(checkpoint_dir: str | bytes, device: str | None = None):
@@ -57,7 +57,7 @@ def _normalize_message_for_template(m: dict) -> dict:
     return out
 
 
-def _ollama_tools_to_hf(tools: list[dict] | None) -> list[dict] | None:
+def _ollama_forge_to_hf(tools: list[dict] | None) -> list[dict] | None:
     """Convert Ollama tools to format HF apply_chat_template expects
     (type, function with name, description, parameters)."""
     if not tools:
@@ -225,7 +225,7 @@ def _messages_to_input_ids(
 
     use_chat_template = getattr(tokenizer, "chat_template", None) is not None
     conv = [_normalize_message_for_template(m) for m in messages]
-    hf_tools = _ollama_tools_to_hf(tools)
+    hf_tools = _ollama_forge_to_hf(tools)
     encoded = None
     if use_chat_template:
         try:

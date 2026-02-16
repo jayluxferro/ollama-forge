@@ -16,14 +16,14 @@ abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25", "gguf>=0.1
 security-eval-ui = ["streamlit>=1.28", "pandas>=2.0", "plotly>=5.18"]
 
 [project.scripts]
-ollama-forge = "ollama_tools.cli:main"
+ollama-forge = "ollama_forge.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ollama_tools"]
+packages = ["src/ollama_forge"]
 
 [tool.uv]
 dev-dependencies = [

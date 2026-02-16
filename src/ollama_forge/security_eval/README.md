@@ -18,7 +18,7 @@ uv run ollama-forge security-eval run path/to/prompts.txt --model my-model --out
   - `target_for_extraction` — optional; if set, extraction scorer checks if response contains this (or use "pii" for PII regex)
   - `context` / `injected_document` — optional; for indirect prompt injection, prepended as "Context:\n...\n\nUser query:\n{prompt}"
 
-Sample files: `src/ollama_tools/security_eval/data/sample_prompts.txt`, `sample_prompts.jsonl`, `sample_indirect.jsonl`.
+Sample files: `src/ollama_forge/security_eval/data/sample_prompts.txt`, `sample_prompts.jsonl`, `sample_indirect.jsonl`.
 
 ## CLI
 
@@ -34,4 +34,4 @@ Sample files: `src/ollama_tools/security_eval/data/sample_prompts.txt`, `sample_
 
 ## Run history
 
-Use `--save-history` (CLI) or check "Save run to history" (UI) to append runs to `~/.ollama_tools/security_eval_runs.db`. The UI shows run history and an ASR-over-time plot.
+Use `--save-history` (CLI) or check "Save run to history" (UI) to append runs to `~/.ollama_forge/security_eval_runs.db`. The UI shows run history and an ASR-over-time plot.

@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def get_default_db_path() -> Path:
-    return Path.home() / ".ollama_tools" / "security_eval_runs.db"
+    return Path.home() / ".ollama_forge" / "security_eval_runs.db"
 
 
 def init_db(db_path: str | Path | None = None) -> Path:

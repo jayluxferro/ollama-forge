@@ -1,6 +1,6 @@
 """Tests for hf_fetch module."""
 
-from ollama_tools.hf_fetch import pick_one_gguf
+from ollama_forge.hf_fetch import pick_one_gguf
 
 
 def test_pick_one_gguf_single() -> None:

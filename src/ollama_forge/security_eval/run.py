@@ -8,10 +8,10 @@ import sys
 import time
 from pathlib import Path
 
-from ollama_tools.security_eval.client import query_model
-from ollama_tools.security_eval.history import save_run as history_save_run
-from ollama_tools.security_eval.loader import load_prompt_set
-from ollama_tools.security_eval.scorers import score_extraction, score_refusal
+from ollama_forge.security_eval.client import query_model
+from ollama_forge.security_eval.history import save_run as history_save_run
+from ollama_forge.security_eval.loader import load_prompt_set
+from ollama_forge.security_eval.scorers import score_extraction, score_refusal
 
 
 def run_eval(
@@ -162,7 +162,7 @@ def run_eval(
         try:
             history_save_run(run_meta)
             if verbose:
-                print("Saved to run history (~/.ollama_tools/security_eval_runs.db)", file=sys.stderr)
+                print("Saved to run history (~/.ollama_forge/security_eval_runs.db)", file=sys.stderr)
         except Exception as e:
             if verbose:
                 print(f"Warning: could not save to history: {e}", file=sys.stderr)

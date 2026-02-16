@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ollama_tools.recipe import load_recipe
+from ollama_forge.recipe import load_recipe
 
 
 def test_load_recipe_json_minimal() -> None:

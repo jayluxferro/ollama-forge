@@ -8,7 +8,7 @@ import sys
 def test_cli_help() -> None:
     """ollama-forge --help exits 0 and prints usage."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "--help"],
         capture_output=True,
         text=True,
     )
@@ -19,7 +19,7 @@ def test_cli_help() -> None:
 def test_cli_prog_name() -> None:
     """Help mentions the program name."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "--help"],
         capture_output=True,
         text=True,
     )
@@ -30,7 +30,7 @@ def test_cli_prog_name() -> None:
 def test_create_from_base_help() -> None:
     """create-from-base --help lists required args."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "create-from-base", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "create-from-base", "--help"],
         capture_output=True,
         text=True,
     )
@@ -42,7 +42,7 @@ def test_create_from_base_help() -> None:
 def test_convert_help() -> None:
     """convert --help lists --gguf and --name."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "convert", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "convert", "--help"],
         capture_output=True,
         text=True,
     )
@@ -54,7 +54,7 @@ def test_convert_help() -> None:
 def test_fetch_help() -> None:
     """fetch --help lists repo_id, --name, --gguf-file."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "fetch", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "fetch", "--help"],
         capture_output=True,
         text=True,
     )
@@ -68,7 +68,7 @@ def test_fetch_help() -> None:
 def test_quickstart_help() -> None:
     """quickstart --help lists beginner defaults and common options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "quickstart", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "quickstart", "--help"],
         capture_output=True,
         text=True,
     )
@@ -82,7 +82,7 @@ def test_quickstart_help() -> None:
 def test_start_help() -> None:
     """start --help lists alias options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "start", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "start", "--help"],
         capture_output=True,
         text=True,
     )
@@ -94,7 +94,7 @@ def test_start_help() -> None:
 def test_plan_help() -> None:
     """plan --help lists plan subcommands."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "plan", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "plan", "--help"],
         capture_output=True,
         text=True,
     )
@@ -106,7 +106,7 @@ def test_plan_help() -> None:
 def test_plan_quickstart_runs() -> None:
     """plan quickstart prints quickstart plan and exits 0."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "plan", "quickstart", "--name", "m"],
+        [sys.executable, "-m", "ollama_forge.cli", "plan", "quickstart", "--name", "m"],
         capture_output=True,
         text=True,
     )
@@ -120,7 +120,7 @@ def test_plan_quickstart_json() -> None:
         [
             sys.executable,
             "-m",
-            "ollama_tools.cli",
+            "ollama_forge.cli",
             "plan",
             "quickstart",
             "--name",
@@ -139,7 +139,7 @@ def test_plan_quickstart_json() -> None:
 def test_plan_doctor_fix_runs() -> None:
     """plan doctor-fix prints fix plan and exits 0."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "plan", "doctor-fix"],
+        [sys.executable, "-m", "ollama_forge.cli", "plan", "doctor-fix"],
         capture_output=True,
         text=True,
     )
@@ -153,7 +153,7 @@ def test_plan_doctor_fix_json() -> None:
         [
             sys.executable,
             "-m",
-            "ollama_tools.cli",
+            "ollama_forge.cli",
             "plan",
             "doctor-fix",
             "--json",
@@ -170,7 +170,7 @@ def test_plan_doctor_fix_json() -> None:
 def test_auto_help() -> None:
     """auto --help lists source and routing options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "auto", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "auto", "--help"],
         capture_output=True,
         text=True,
     )
@@ -185,7 +185,7 @@ def test_auto_help() -> None:
 def test_auto_recipe_nonexistent_fails_fast() -> None:
     """auto with .yaml source routes to build and fails with file-not-found."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "auto", "/nonexistent/recipe.yaml"],
+        [sys.executable, "-m", "ollama_forge.cli", "auto", "/nonexistent/recipe.yaml"],
         capture_output=True,
         text=True,
     )
@@ -196,7 +196,7 @@ def test_auto_recipe_nonexistent_fails_fast() -> None:
 def test_auto_gguf_nonexistent_fails_fast() -> None:
     """auto with .gguf source routes to convert and fails with file-not-found."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "auto", "/nonexistent/model.gguf"],
+        [sys.executable, "-m", "ollama_forge.cli", "auto", "/nonexistent/model.gguf"],
         capture_output=True,
         text=True,
     )
@@ -210,7 +210,7 @@ def test_auto_plan_does_not_execute() -> None:
         [
             sys.executable,
             "-m",
-            "ollama_tools.cli",
+            "ollama_forge.cli",
             "auto",
             "/nonexistent/model.gguf",
             "--plan",
@@ -226,7 +226,7 @@ def test_auto_plan_does_not_execute() -> None:
 def test_fetch_adapter_help() -> None:
     """fetch-adapter --help lists repo_id, --base, --name."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "fetch-adapter", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "fetch-adapter", "--help"],
         capture_output=True,
         text=True,
     )
@@ -238,7 +238,7 @@ def test_fetch_adapter_help() -> None:
 def test_adapters_search_help() -> None:
     """adapters search --help lists query and limit."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "adapters", "search", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "adapters", "search", "--help"],
         capture_output=True,
         text=True,
     )
@@ -249,7 +249,7 @@ def test_adapters_search_help() -> None:
 def test_adapters_recommend_help() -> None:
     """adapters recommend --help lists base/query/apply options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "adapters", "recommend", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "adapters", "recommend", "--help"],
         capture_output=True,
         text=True,
     )
@@ -262,7 +262,7 @@ def test_adapters_recommend_help() -> None:
 def test_validate_training_data_help() -> None:
     """validate-training-data --help lists data argument."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "validate-training-data", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "validate-training-data", "--help"],
         capture_output=True,
         text=True,
     )
@@ -273,7 +273,7 @@ def test_validate_training_data_help() -> None:
 def test_retrain_help() -> None:
     """retrain --help lists --base, --adapter, --name."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "retrain", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "retrain", "--help"],
         capture_output=True,
         text=True,
     )
@@ -285,7 +285,7 @@ def test_retrain_help() -> None:
 def test_abliterate_help() -> None:
     """abliterate --help lists compute-dir."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "abliterate", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "--help"],
         capture_output=True,
         text=True,
     )
@@ -296,7 +296,7 @@ def test_abliterate_help() -> None:
 def test_abliterate_compute_dir_help() -> None:
     """abliterate compute-dir --help lists --model, --output, and harmful/harmless options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "abliterate", "compute-dir", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "compute-dir", "--help"],
         capture_output=True,
         text=True,
     )
@@ -308,7 +308,7 @@ def test_abliterate_compute_dir_help() -> None:
 def test_check_runs() -> None:
     """check command runs and prints ollama and huggingface status."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "check"],
+        [sys.executable, "-m", "ollama_forge.cli", "check"],
         capture_output=True,
         text=True,
     )
@@ -320,7 +320,7 @@ def test_check_runs() -> None:
 def test_doctor_help() -> None:
     """doctor --help lists --fix options."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "doctor", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "doctor", "--help"],
         capture_output=True,
         text=True,
     )
@@ -332,7 +332,7 @@ def test_doctor_help() -> None:
 def test_doctor_runs() -> None:
     """doctor command runs and prints report."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "doctor"],
+        [sys.executable, "-m", "ollama_forge.cli", "doctor"],
         capture_output=True,
         text=True,
     )
@@ -343,7 +343,7 @@ def test_doctor_runs() -> None:
 def test_doctor_fix_plan_runs() -> None:
     """doctor --fix --plan prints plan and exits 0."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "doctor", "--fix", "--plan"],
+        [sys.executable, "-m", "ollama_forge.cli", "doctor", "--fix", "--plan"],
         capture_output=True,
         text=True,
     )
@@ -354,7 +354,7 @@ def test_doctor_fix_plan_runs() -> None:
 def test_setup_llama_cpp_help() -> None:
     """setup-llama-cpp --help lists --dir."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "setup-llama-cpp", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "setup-llama-cpp", "--help"],
         capture_output=True,
         text=True,
     )
@@ -365,7 +365,7 @@ def test_setup_llama_cpp_help() -> None:
 def test_downsize_prints_pipeline() -> None:
     """downsize (no subcommand) prints pipeline steps."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "downsize"],
+        [sys.executable, "-m", "ollama_forge.cli", "downsize"],
         capture_output=True,
         text=True,
     )
@@ -376,7 +376,7 @@ def test_downsize_prints_pipeline() -> None:
 def test_downsize_pipeline_subcommand() -> None:
     """downsize pipeline prints pipeline steps."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "downsize", "pipeline"],
+        [sys.executable, "-m", "ollama_forge.cli", "downsize", "pipeline"],
         capture_output=True,
         text=True,
     )
@@ -387,7 +387,7 @@ def test_downsize_pipeline_subcommand() -> None:
 def test_build_help() -> None:
     """build --help lists recipe and --out-modelfile."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "build", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "build", "--help"],
         capture_output=True,
         text=True,
     )
@@ -398,7 +398,7 @@ def test_build_help() -> None:
 def test_build_nonexistent_recipe_fails() -> None:
     """build with nonexistent recipe file exits non-zero."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "build", "/nonexistent/recipe.json"],
+        [sys.executable, "-m", "ollama_forge.cli", "build", "/nonexistent/recipe.json"],
         capture_output=True,
         text=True,
     )
@@ -409,7 +409,7 @@ def test_build_nonexistent_recipe_fails() -> None:
 def test_prepare_training_data_help() -> None:
     """prepare-training-data --help lists data, output, format."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "prepare-training-data", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "prepare-training-data", "--help"],
         capture_output=True,
         text=True,
     )
@@ -420,7 +420,7 @@ def test_prepare_training_data_help() -> None:
 def test_train_help() -> None:
     """train --help lists --data, --base, --name."""
     result = subprocess.run(
-        [sys.executable, "-m", "ollama_tools.cli", "train", "--help"],
+        [sys.executable, "-m", "ollama_forge.cli", "train", "--help"],
         capture_output=True,
         text=True,
     )

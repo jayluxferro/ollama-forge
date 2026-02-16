@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from ollama_tools.security_eval.loader import load_prompt_set
-from ollama_tools.security_eval.scorers import score_extraction, score_refusal
+from ollama_forge.security_eval.loader import load_prompt_set
+from ollama_forge.security_eval.scorers import score_extraction, score_refusal
 
 
 def test_load_prompt_set_txt() -> None:
@@ -97,12 +97,12 @@ def test_run_eval_mocked() -> None:
         f.write("I cannot do that.\n")
         path = f.name
     try:
-        with patch("ollama_tools.security_eval.run.query_model") as mock_query:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
             mock_query.side_effect = [
                 ("The answer is 4.", 0.1),  # long enough not to be refusal-by-length
                 ("I cannot assist with that.", 0.2),
             ]
-            from ollama_tools.security_eval.run import run_eval
+            from ollama_forge.security_eval.run import run_eval
 
             run_meta = run_eval(path, base_url="http://localhost:9999", model="test", verbose=False)
         kpis = run_meta["kpis"]

@@ -12,10 +12,10 @@ from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
-from ollama_tools.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
-from ollama_tools.modelfile import build_modelfile, merge_modelfile_with_reference_template
-from ollama_tools.recipe import load_recipe
-from ollama_tools.run_helpers import (
+from ollama_forge.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
+from ollama_forge.modelfile import build_modelfile, merge_modelfile_with_reference_template
+from ollama_forge.recipe import load_recipe
+from ollama_forge.run_helpers import (
     check_item,
     get_jsonl_paths_or_exit,
     print_actionable_error,
@@ -25,7 +25,7 @@ from ollama_tools.run_helpers import (
     run_ollama_show_modelfile,
     write_temp_text_file,
 )
-from ollama_tools.training_data import (
+from ollama_forge.training_data import (
     convert_jsonl_to_plain_text,
     validate_training_data_paths,
 )
@@ -1336,7 +1336,7 @@ def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Run security eval: load prompt set, query model, score, print KPIs and optionally write CSV/JSON."""
     try:
-        from ollama_tools.security_eval.run import run_eval
+        from ollama_forge.security_eval.run import run_eval
     except ImportError as e:
         print(f"Error: security-eval failed to import: {e}", file=sys.stderr)
         return 1
@@ -1482,7 +1482,7 @@ def _collect_instructions_from_path(path: str | Path) -> list[str]:
 
 def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, list[Path]]:
     """Resolve harmful/harmless to two file paths. Returns (harmful_path, harmless_path, temp_files)."""  # noqa: E501
-    from ollama_tools.abliterate_defaults import HARMFUL_DEFAULT, HARMLESS_DEFAULT
+    from ollama_forge.abliterate_defaults import HARMFUL_DEFAULT, HARMLESS_DEFAULT
 
     data_dir = Path(__file__).parent / "data"
     default_harmful_file = data_dir / "abliterate_harmful_default.txt"
@@ -1669,8 +1669,8 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
     """Interactive chat with abliterated checkpoint (HF tokenizer). If serve is running with same
     model, chat connects to it instead of loading checkpoint. Use --no-serve to always load locally."""
     try:
-        from ollama_tools.abliterate import run_chat
-        from ollama_tools.abliterate_serve import chat_via_serve
+        from ollama_forge.abliterate import run_chat
+        from ollama_forge.abliterate_serve import chat_via_serve
     except ImportError:
         print(
             "Error: abliterate chat requires optional deps. Run: uv sync --extra abliterate",
@@ -1730,7 +1730,7 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
 def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Start Ollama-API-compatible server for abliterated model (HF tokenizer)."""
     try:
-        from ollama_tools.abliterate_serve import serve_abliterated
+        from ollama_forge.abliterate_serve import serve_abliterated
     except ImportError:
         print(
             "Error: abliterate serve requires optional deps. Run: uv sync --extra abliterate",
@@ -1792,7 +1792,7 @@ def _abliterate_resolve_model(model_id: str) -> str:
 def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Compute refusal direction for abliteration (requires: uv sync --extra abliterate)."""
     try:
-        from ollama_tools.abliterate import compute_refusal_dir
+        from ollama_forge.abliterate import compute_refusal_dir
     except ImportError as e:
         print(
             "Error: abliterate requires optional deps. Run: uv sync --extra abliterate",
@@ -1834,7 +1834,7 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
     try:
-        from ollama_tools.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
+        from ollama_forge.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
     except ImportError:
         print(
             "Error: abliterate run requires optional deps. Run: uv sync --extra abliterate",
@@ -2975,7 +2975,7 @@ def main() -> int:
     p_se_run.add_argument(
         "--save-history",
         action="store_true",
-        help="Append run to SQLite history (~/.ollama_tools/security_eval_runs.db) for plots over time",
+        help="Append run to SQLite history (~/.ollama_forge/security_eval_runs.db) for plots over time",
     )
     p_se_run.add_argument(
         "--system",

@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from ollama_tools.training_data import (
+from ollama_forge.training_data import (
     collect_jsonl_paths,
     convert_jsonl_to_plain_text,
     validate_line,

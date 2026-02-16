@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from ollama_tools.training_data import collect_jsonl_paths
+from ollama_forge.training_data import collect_jsonl_paths
 
 OLLAMA_MISSING_MSG = "Error: ollama not found. Install Ollama and ensure it is on PATH."
 
