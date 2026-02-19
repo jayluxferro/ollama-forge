@@ -15,6 +15,7 @@ from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
 
 def _load_model_and_tokenizer(checkpoint_dir: str | bytes, device: str | None = None):
     """Load model and tokenizer from abliterated checkpoint. Returns (model, tokenizer)."""
+    import tempfile
     from pathlib import Path
 
     import torch
@@ -33,6 +34,9 @@ def _load_model_and_tokenizer(checkpoint_dir: str | bytes, device: str | None = 
         "device_map": "auto" if device is None else device,
         "low_cpu_mem_usage": True,
     }
+    # MoE / pytorch_model.bin checkpoints need offload_folder when device_map offloads to disk.
+    if load_kw["device_map"] == "auto":
+        load_kw["offload_folder"] = tempfile.mkdtemp(prefix="ollama_forge_offload_")
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
     return model, tokenizer
 

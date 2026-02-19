@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,12 @@ from urllib.request import urlopen
 from dotenv import load_dotenv
 
 from ollama_forge.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
-from ollama_forge.modelfile import build_modelfile, merge_modelfile_with_reference_template
+from ollama_forge.modelfile import (
+    build_modelfile,
+    merge_modelfile_with_reference_template,
+    modelfile_append_template,
+    template_from_hf_checkpoint,
+)
 from ollama_forge.recipe import load_recipe
 from ollama_forge.run_helpers import (
     check_item,
@@ -1717,12 +1723,16 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         run_chat(
             checkpoint,
             max_new_tokens=getattr(args, "max_new_tokens", None),
+            device="cpu" if getattr(args, "device", None) == "cpu" else None,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        msg = str(e).strip()
+        print(f"Error: {msg}", file=sys.stderr)
+        if "histogram_mps" in msg or "not implemented" in msg.lower():
+            print("Try: ollama-forge abliterate chat --name <name> --device cpu", file=sys.stderr)
         return 1
     return 0
 
@@ -1766,14 +1776,49 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
             model_name=model_name,
             host=getattr(args, "host", "127.0.0.1"),
             port=getattr(args, "port", 11435),
+            device="cpu" if getattr(args, "device", None) == "cpu" else None,
         )
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        msg = str(e).strip()
+        print(f"Error: {msg}", file=sys.stderr)
+        if "histogram_mps" in msg or "not implemented" in msg.lower():
+            print("Try: ollama-forge abliterate serve --name <name> --device cpu", file=sys.stderr)
         return 1
     return 0
+
+
+def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Update an existing Ollama abliterated model's chat template from the checkpoint (fix garbled ollama run)."""
+    name = getattr(args, "name", None)
+    if not name:
+        print("Error: --name <ollama_model> is required (e.g. openai/gpt-oss-20b-abliterated)", file=sys.stderr)
+        return 1
+    checkpoint_arg = getattr(args, "checkpoint", None)
+    if checkpoint_arg:
+        checkpoint_dir = Path(checkpoint_arg).resolve()
+    else:
+        checkpoint_dir = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
+    if not checkpoint_dir.is_dir():
+        print(
+            f"Error: checkpoint not found at {checkpoint_dir}",
+            file=sys.stderr,
+        )
+        print("  Run abliterate run first with that --name, or use --checkpoint DIR.", file=sys.stderr)
+        return 1
+    template_body = template_from_hf_checkpoint(str(checkpoint_dir))
+    if not template_body:
+        print("Error: could not derive chat template from checkpoint tokenizer.", file=sys.stderr)
+        return 1
+    content = run_ollama_show_modelfile(name)
+    if not content:
+        print(f"Error: Ollama model {name!r} not found. Pull or create it first.", file=sys.stderr)
+        return 1
+    content = modelfile_append_template(content, template_body)
+    print("Updating Ollama model with chat template derived from checkpoint...", file=sys.stderr)
+    return run_ollama_create(name, content)
 
 
 def _abliterate_resolve_model(model_id: str) -> str:
@@ -1992,6 +2037,12 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             "Note: using local HF path; pass --template-from <ollama_model> for tool support.",
             file=sys.stderr,
         )
+    # If we still have no TEMPLATE, derive from the checkpoint's HF tokenizer so Ollama uses the same format.
+    if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
+        hf_template = template_from_hf_checkpoint(checkpoint_dir)
+        if hf_template:
+            content = modelfile_append_template(content, hf_template)
+            print("Using chat template derived from checkpoint (HF format) for Ollama.", file=sys.stderr)
     if not getattr(args, "output_dir", None):
         print(
             f"To chat with correct tokenization (HF tokenizer): ollama-forge abliterate chat --name {name}",
@@ -2801,6 +2852,12 @@ def main() -> int:
         action="store_true",
         help="Do not try an existing serve; always load the checkpoint locally",
     )
+    p_chat.add_argument(
+        "--device",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon (e.g. histogram_mps).",
+    )
     p_chat.set_defaults(handler=_cmd_abliterate_chat)
 
     p_serve = abliterate_sub.add_parser(
@@ -2828,7 +2885,30 @@ def main() -> int:
         default=11435,
         help="Bind port (default: 11435; use a different port if Ollama runs on 11434)",
     )
+    p_serve.add_argument(
+        "--device",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon.",
+    )
     p_serve.set_defaults(handler=_cmd_abliterate_serve)
+
+    p_fix_template = abliterate_sub.add_parser(
+        "fix-ollama-template",
+        help="Update an existing Ollama abliterated model's chat template from checkpoint (fix garbled ollama run)",
+    )
+    p_fix_template.add_argument(
+        "--name",
+        metavar="NAME",
+        required=True,
+        help="Ollama model name (e.g. openai/gpt-oss-20b-abliterated)",
+    )
+    p_fix_template.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Checkpoint dir (default: abliterate-<name>/checkpoint)",
+    )
+    p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
 
     # adapters (search Hugging Face for adapters)
     p_adapters = subparsers.add_parser(

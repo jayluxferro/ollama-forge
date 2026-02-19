@@ -456,6 +456,8 @@ def run_chat(
     original model. If max_new_tokens is None, uses the model config max_position_embeddings
     (capped at 8192), else 2048.
     """
+    import tempfile
+
     import torch
     from transformers import AutoTokenizer
 
@@ -470,6 +472,9 @@ def run_chat(
         "device_map": "auto" if device is None else device,
         "low_cpu_mem_usage": True,
     }
+    # MoE / pytorch_model.bin checkpoints need offload_folder when device_map offloads to disk.
+    if load_kw["device_map"] == "auto":
+        load_kw["offload_folder"] = tempfile.mkdtemp(prefix="ollama_forge_offload_")
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
     if max_new_tokens is None:
         max_new_tokens = _model_max_position_embeddings(model)
