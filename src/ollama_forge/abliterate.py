@@ -170,15 +170,33 @@ def compute_refusal_dir(
         "low_cpu_mem_usage": True,
         **load_from_gguf_kw,
     }
+    # Don't pass BitsAndBytesConfig if the model already has another quantization (e.g. MXFP4).
     if load_in_8bit and not gguf_path_str:
         try:
-            from transformers import BitsAndBytesConfig
-        except ImportError:
-            raise ImportError(
-                "load_in_8bit requires bitsandbytes and transformers support. Install with: pip install bitsandbytes"
-            ) from None
-        load_kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-    elif not gguf_path_str:
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            qconfig = getattr(config, "quantization_config", None)
+            if qconfig is not None:
+                # Config may be a dict (from JSON) or an object; detect non-BitsAndBytes quant.
+                is_bnb = False
+                if isinstance(qconfig, dict):
+                    qstr = str(qconfig).lower()
+                    is_bnb = "load_in_8bit" in qconfig or "bitsandbytes" in qstr
+                else:
+                    is_bnb = "BitsAndBytes" in type(qconfig).__name__
+                if not is_bnb:
+                    load_in_8bit = False
+        except Exception:
+            pass
+        if load_in_8bit:
+            try:
+                from transformers import BitsAndBytesConfig
+            except ImportError:
+                raise ImportError(
+                    "load_in_8bit requires bitsandbytes. Install with: pip install bitsandbytes"
+                ) from None
+            load_kw["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    if not load_kw.get("quantization_config") and not gguf_path_str:
         load_kw["dtype"] = torch.bfloat16
     offload_folder: str | None = None
     if load_kw["device_map"] == "auto" and not load_in_8bit and not gguf_path_str:

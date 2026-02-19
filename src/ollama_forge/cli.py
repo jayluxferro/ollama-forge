@@ -1890,6 +1890,15 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load_run,
             )
+            # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
             print("Baking ablation into weights and saving checkpoint...", file=sys.stderr)
             apply_refusal_dir_and_save(
                 model_id,

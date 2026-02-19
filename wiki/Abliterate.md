@@ -81,6 +81,8 @@ uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --skip-
 
 Keep `--strength 1` (default) for full ablation strength. Use `--strength 0.7` or similar only if quality degrades.
 
+**Memory (large models):** The pipeline loads the model **twice** (once to compute the refusal direction, once to apply and save). For large models (e.g. 20B params), ensure enough RAM (roughly 2× model size in bf16, e.g. ~80GB+ for 20B). If you run out of memory or the process halts during "Baking ablation into weights and saving checkpoint", try: (1) use a machine with more RAM, (2) reduce memory for the first load with **`--load-in-8bit`** (compute step only; requires `bitsandbytes`), or (3) use a smaller model.
+
 The checkpoint is saved by default under **`./abliterate-<name>/checkpoint`**. To chat using the **Hugging Face tokenizer** (correct tokenization; use when the GGUF/Ollama model produces garbled output, e.g. some Gemma 3 exports), run:
 
 ```bash

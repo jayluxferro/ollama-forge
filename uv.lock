@@ -1192,6 +1192,7 @@ dependencies = [
 abliterate = [
     { name = "accelerate" },
     { name = "gguf" },
+    { name = "protobuf" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -1216,6 +1217,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "pandas", marker = "extra == 'security-eval-ui'", specifier = ">=2.0" },
     { name = "plotly", marker = "extra == 'security-eval-ui'", specifier = ">=5.18" },
+    { name = "protobuf", marker = "extra == 'abliterate'", specifier = ">=3.20" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "streamlit", marker = "extra == 'security-eval-ui'", specifier = ">=1.28" },
