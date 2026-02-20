@@ -16,9 +16,14 @@ from dotenv import load_dotenv
 from ollama_forge.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
 from ollama_forge.modelfile import (
     build_modelfile,
+    get_stop_tokens_from_checkpoint,
     merge_modelfile_with_reference_template,
+    modelfile_append_num_predict,
+    modelfile_append_stop_parameters,
     modelfile_append_template,
+    template_body_from_modelfile,
     template_from_hf_checkpoint,
+    template_from_hf_checkpoint_with_reason,
 )
 from ollama_forge.recipe import load_recipe
 from ollama_forge.run_helpers import (
@@ -1491,6 +1496,8 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
     from ollama_forge.abliterate_defaults import HARMFUL_DEFAULT, HARMLESS_DEFAULT
 
     data_dir = Path(__file__).parent / "data"
+    curated_harmful_file = data_dir / "abliterate_harmful_curated.txt"
+    curated_harmless_file = data_dir / "abliterate_harmless_curated.txt"
     default_harmful_file = data_dir / "abliterate_harmful_default.txt"
     default_harmless_file = data_dir / "abliterate_harmless_default.txt"
 
@@ -1509,6 +1516,25 @@ def _resolve_abliterate_inputs(args: argparse.Namespace) -> tuple[Path, Path, li
     elif getattr(args, "harmful", None) and getattr(args, "harmless", None):
         harmful_path = Path(args.harmful)
         harmless_path = Path(args.harmless)
+    elif curated_harmful_file.is_file() and curated_harmless_file.is_file():
+        # Merge curated (first) with bundled merged list; dedupe so curated takes precedence.
+        curated_h = _collect_instructions_from_path(curated_harmful_file)
+        curated_l = _collect_instructions_from_path(curated_harmless_file)
+        default_h = _collect_instructions_from_path(default_harmful_file) if default_harmful_file.is_file() else []
+        default_l = _collect_instructions_from_path(default_harmless_file) if default_harmless_file.is_file() else []
+        seen_h = frozenset(curated_h)
+        seen_l = frozenset(curated_l)
+        harmful_lines = curated_h + [x for x in default_h if x not in seen_h]
+        harmless_lines = curated_l + [x for x in default_l if x not in seen_l]
+        harmful_path = write_temp_text_file("\n".join(harmful_lines) + "\n", suffix=".txt", prefix="ollama-harmful-")
+        harmless_path = write_temp_text_file("\n".join(harmless_lines) + "\n", suffix=".txt", prefix="ollama-harmless-")
+        temp_files = [harmful_path, harmless_path]
+        n_h, n_l = len(harmful_lines), len(harmless_lines)
+        print(
+            f"Using curated + merged harmful/harmless lists ({n_h} harmful, {n_l} harmless). "
+            "Pass --harmful/--harmless for custom lists.",
+            file=sys.stderr,
+        )
     elif default_harmful_file.is_file() and default_harmless_file.is_file():
         harmful_path = default_harmful_file
         harmless_path = default_harmless_file
@@ -1808,15 +1834,36 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
         )
         print("  Run abliterate run first with that --name, or use --checkpoint DIR.", file=sys.stderr)
         return 1
-    template_body = template_from_hf_checkpoint(str(checkpoint_dir))
-    if not template_body:
-        print("Error: could not derive chat template from checkpoint tokenizer.", file=sys.stderr)
-        return 1
+    template_from = getattr(args, "template_from", None)
+    if template_from:
+        ref_content = run_ollama_show_modelfile(template_from)
+        if ref_content:
+            template_body = template_body_from_modelfile(ref_content)
+        else:
+            template_body = None
+        if not template_body:
+            print(
+                f"Error: could not get template from Ollama model {template_from!r} (pull it first?).",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Using chat template from Ollama model {template_from!r}.", file=sys.stderr)
+    else:
+        template_body, reason = template_from_hf_checkpoint_with_reason(str(checkpoint_dir))
+        if not template_body:
+            print("Error: could not derive chat template from checkpoint tokenizer.", file=sys.stderr)
+            if reason:
+                print(f"  {reason}", file=sys.stderr)
+            return 1
     content = run_ollama_show_modelfile(name)
     if not content:
         print(f"Error: Ollama model {name!r} not found. Pull or create it first.", file=sys.stderr)
         return 1
     content = modelfile_append_template(content, template_body)
+    stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
+    if stop_tokens:
+        content = modelfile_append_stop_parameters(content, stop_tokens)
+    content = modelfile_append_num_predict(content, 2048)
     print("Updating Ollama model with chat template derived from checkpoint...", file=sys.stderr)
     return run_ollama_create(name, content)
 
@@ -2042,6 +2089,10 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         hf_template = template_from_hf_checkpoint(checkpoint_dir)
         if hf_template:
             content = modelfile_append_template(content, hf_template)
+            stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
+            if stop_tokens:
+                content = modelfile_append_stop_parameters(content, stop_tokens)
+            content = modelfile_append_num_predict(content, 2048)
             print("Using chat template derived from checkpoint (HF format) for Ollama.", file=sys.stderr)
     if not getattr(args, "output_dir", None):
         print(
@@ -2907,6 +2958,11 @@ def main() -> int:
         "--checkpoint",
         metavar="DIR",
         help="Checkpoint dir (default: abliterate-<name>/checkpoint)",
+    )
+    p_fix_template.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Use template from this Ollama model (e.g. gemma3:270m) instead of deriving from checkpoint",
     )
     p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
 

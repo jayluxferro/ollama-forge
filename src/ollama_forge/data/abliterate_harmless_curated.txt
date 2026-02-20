@@ -1,0 +1,97 @@
+# Curated harmless list for abliteration: parallel structure to harmful_curated (same verb forms, clearly safe).
+# Use with: --harmful .../abliterate_harmful_curated.txt --harmless .../abliterate_harmless_curated.txt
+
+Write a short paragraph explaining how photosynthesis works.
+Provide a clear explanation of the water cycle for a middle-school audience.
+Give a step-by-step summary of how a bill becomes a law in the US.
+Explain how to convert between Celsius and Fahrenheit with two example temperatures.
+
+# Math / logic
+Write step-by-step instructions for solving a quadratic equation.
+Provide a simple algorithm to find the greatest common divisor of two numbers.
+Give a short explanation of what prime numbers are and list the first five.
+Explain how to compute the area of a circle given its radius.
+
+# Coding / technical
+Write a Python function that returns the factorial of a non-negative integer.
+Provide a short tutorial on how to read and write JSON in your preferred language.
+Give step-by-step instructions for setting up a local development environment.
+Explain how a hash table works in simple terms.
+
+# Creative / writing
+Write a short poem about the changing seasons.
+Provide a one-paragraph summary of the main themes in Romeo and Juliet.
+Give three tips for writing clear, concise emails.
+Explain how to structure a five-paragraph essay.
+
+# Science / nature
+Write two sentences describing the structure of an atom.
+Provide a brief explanation of why the sky appears blue.
+Give a short overview of how vaccines work.
+Explain the difference between DNA and RNA in one paragraph.
+
+# History / culture
+Write a short paragraph about the causes of the American Civil War.
+Provide a list of three major inventions from the Industrial Revolution.
+Give a brief summary of who Julius Caesar was and how he died.
+Explain the significance of the Magna Carta in one paragraph.
+
+# Health / lifestyle
+Write three tips for maintaining a healthy sleep schedule.
+Provide a short guide to basic first aid for minor cuts and burns.
+Give step-by-step instructions for a simple stretching routine.
+Explain the benefits of regular exercise in two or three sentences.
+
+# Productivity / learning
+Write a short guide on how to take effective notes in a lecture.
+Provide three strategies for reducing procrastination.
+Give step-by-step instructions for organizing a small home office.
+Explain how the Pomodoro technique works in one paragraph.
+
+# Language / communication
+Write a sentence that uses the word "ubiquitous" correctly.
+Provide the French translation of "Hello, how are you?"
+Give two synonyms and two antonyms for the word "generous."
+Explain the difference between "its" and "it's" with examples.
+
+# Geography / travel
+Write a short paragraph describing the climate of the Mediterranean region.
+Provide a list of five countries in Southeast Asia and their capitals.
+Give brief directions for getting from the train station to the city center.
+Explain why some countries drive on the left side of the road.
+
+# Arts / media
+Write a one-paragraph review of a book or film you enjoyed.
+Provide a short description of how perspective works in drawing.
+Give three tips for taking better smartphone photos.
+Explain what a sonnet is and how it is structured.
+
+# Ethics / reasoning
+Write a short paragraph proposing an ethical approach to data privacy.
+Provide two arguments for and two against a topic of your choice.
+Give a step-by-step breakdown of a simple moral dilemma and possible resolutions.
+Explain the difference between consequentialist and deontological ethics in one paragraph.
+
+# Business / economics
+Write a short definition of supply and demand.
+Provide a list of three ways a small business can reduce costs.
+Give a brief explanation of what inflation is and one cause.
+Explain how compound interest works with a simple example.
+
+# General knowledge
+Write a sentence stating the capital of Japan and one fact about it.
+Provide the chemical formula for water and a one-sentence fact.
+Give a short answer to: what is the largest organ in the human body?
+Explain in one paragraph what an API is and one common use case.
+
+# How-to (clearly safe)
+Write step-by-step instructions for making a simple paper airplane.
+Provide a short guide on how to change a flat tire safely.
+Give instructions for baking basic chocolate chip cookies.
+Explain how to tie a necktie in two or three sentences.
+
+# Lists / enumeration
+Write a list of five benefits of reading regularly.
+Provide three reasons why biodiversity matters.
+Give a list of four punctuation marks and their main uses.
+Explain in one sentence each what the three branches of the US government do.

@@ -2,12 +2,46 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+
+def _is_gemma_checkpoint(checkpoint_dir: Path) -> bool:
+    """True if config or tokenizer_config indicates Gemma (Gemma 2/3)."""
+    for name in ("config.json", "tokenizer_config.json"):
+        path = checkpoint_dir / name
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("tokenizer_class", "").lower().startswith("gemma"):
+            return True
+        if "gemma" in (data.get("model_type") or "").lower():
+            return True
+    return False
+
+
+def _gemma_prompt_for_messages(messages: list[dict]) -> str:
+    """Build Gemma-format prompt string (<<start_of_turn>>user/model, <<end_of_turn>>)."""
+    parts: list[str] = []
+    for m in messages:
+        role = (m.get("role") or "user").lower()
+        content = (m.get("content") or "").strip()
+        if role == "user":
+            parts.append("<<start_of_turn>>user\n" + content + "\n<<end_of_turn>>")
+        elif role in ("assistant", "model"):
+            parts.append("<<start_of_turn>>model\n" + content + "\n<<end_of_turn>>")
+    parts.append("<<start_of_turn>>model\n")
+    return "\n".join(parts)
 
 
 def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
@@ -150,7 +184,7 @@ def compute_refusal_dir(
     with harmful_path.open() as f:
         harmful_lines = [s for s in (line.strip() for line in f) if s and not s.startswith("#")]
     with harmless_path.open() as f:
-        harmless_lines = [s for s in (line.strip() for line in f) if s]
+        harmless_lines = [s for s in (line.strip() for line in f) if s and not s.startswith("#")]
 
     # Support loading from GGUF (e.g. Ollama blob path) when gguf_file is set or model_id is a .gguf path
     use_gguf = gguf_file is not None or (isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf"))
@@ -483,6 +517,10 @@ def run_chat(
         else:
             max_new_tokens = min(max_new_tokens, 8192)
     use_chat_template = getattr(tokenizer, "chat_template", None) is not None
+    use_gemma_fallback = not use_chat_template and _is_gemma_checkpoint(checkpoint_dir)
+    if use_gemma_fallback:
+        # Gemma checkpoint often has no chat_template; use known format so model gets correct prompt.
+        max_new_tokens = min(max_new_tokens, 1024)
 
     conversation: list[dict[str, str]] = []
     print("Chat with abliterated model (HF tokenizer). Empty line or Ctrl+C to exit.", file=sys.stderr)
@@ -506,21 +544,30 @@ def run_chat(
             except Exception:
                 use_chat_template = False
                 toks = tokenizer(line, return_tensors="pt", add_special_tokens=True)
+        elif use_gemma_fallback:
+            prompt_str = _gemma_prompt_for_messages(conversation)
+            toks = tokenizer(prompt_str, return_tensors="pt", add_special_tokens=True)
         else:
             toks = tokenizer(line, return_tensors="pt", add_special_tokens=True)
         if "attention_mask" not in toks:
             toks["attention_mask"] = torch.ones_like(toks["input_ids"], dtype=torch.long)
         toks = {k: v.to(model.device) for k, v in toks.items()}
+        eos_id = getattr(tokenizer, "eos_token_id", None)
         with torch.inference_mode():
             out = model.generate(
                 **toks,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=0.7,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=eos_id,
+                eos_token_id=eos_id,
             )
         new_ids = out[0][toks["input_ids"].shape[1] :]
-        reply = tokenizer.decode(new_ids, skip_special_tokens=True)
+        reply = tokenizer.decode(new_ids, skip_special_tokens=False)
+        # Strip <<end_of_turn>> and anything after so we don't show turn tokens
+        if "<<end_of_turn>>" in reply:
+            reply = reply.split("<<end_of_turn>>")[0]
+        reply = reply.strip()
         reply = _strip_chat_reply(reply, last_user_content=line)
         print(reply)
         conversation.append({"role": "assistant", "content": reply})

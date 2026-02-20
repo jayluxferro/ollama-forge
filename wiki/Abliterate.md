@@ -16,7 +16,7 @@ For large or MXFP4-quantized models, use **`--load-in-8bit`** to avoid "Invalid 
 
 ## Built-in lists (no files needed)
 
-The tool ships with default harmful/harmless lists. **Harmful:** [Sumandora](https://github.com/Sumandora/remove-refusals-with-transformers) (AdvBench), [HarmBench](https://github.com/centerforaisafety/HarmBench), [JailbreakBench](https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors), [AdvBench](https://github.com/llm-attacks/llm-attacks), [refusal_direction](https://github.com/andyrdt/refusal_direction) (Arditi et al.) (~1.4k instructions). **Harmless:** Sumandora + JBB benign + refusal_direction (~33k). It samples up to 32 pairs for the refusal direction.
+By default the tool uses **curated + merged** lists: curated lists (~80 each, parallel structure) in `src/ollama_forge/data/` are merged with the large bundled lists (curated first, duplicates dropped). If either curated file is missing, only the large merged lists are used. **Large lists:** **Harmful:** [Sumandora](https://github.com/Sumandora/remove-refusals-with-transformers) (AdvBench), [HarmBench](https://github.com/centerforaisafety/HarmBench), [JailbreakBench](https://huggingface.co/datasets/JailbreakBench/JBB-Behaviors), [AdvBench](https://github.com/llm-attacks/llm-attacks), [refusal_direction](https://github.com/andyrdt/refusal_direction) (Arditi et al.) (~1.4k instructions). **Harmless:** Sumandora + JBB benign + refusal_direction (~33k). It samples up to 32 pairs for the refusal direction.
 
 **Defaults (complete abliteration, all on by default):** (1) **Direction selection** – tries layer fractions 0.4, 0.5, 0.6 and uses the layer with largest harmful–harmless gap. (2) **Multi-direction** – optional `--num-directions 2` or `3` uses SVD for multiple refusal directions (default 1). (3) **Skip first/last layer** – does not modify the first and last transformer layer. (4) **Norm-preserving** projection to limit quality loss. (5) **Verification** – one forward pass after ablation to check loss is finite (`--no-verify` to skip). (6) Same lists and requantization as above.
 
@@ -41,12 +41,16 @@ Use a Hugging Face model id or a local path (HF dir or .gguf file).
 
 ## Your own lists
 
-- **Single files:** `--harmful harmful.txt --harmless harmless.txt` (one instruction per line; lines starting with `#` are skipped).
+- **Single files:** `--harmful harmful.txt --harmless harmless.txt` (one instruction per line; lines starting with `#` are skipped in both files).
 - **Directories:** `--harmful-dir ./harmful/ --harmless-dir ./harmless/` to use all `.txt` files in those directories.
 
 ```bash
 uv run ollama-forge abliterate compute-dir --model <hf_id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt
 ```
+
+### Curated "excellent" lists (optional)
+
+Smaller, high-quality lists with **parallel structure** (matching verb forms and length) for a cleaner refusal-direction contrast: `src/ollama_forge/data/abliterate_harmful_curated.txt` (~80 harmful) and `src/ollama_forge/data/abliterate_harmless_curated.txt` (~80 harmless). See `src/ollama_forge/data/README.md`. Example: `--harmful src/ollama_forge/data/abliterate_harmful_curated.txt --harmless src/ollama_forge/data/abliterate_harmless_curated.txt --num-instructions 64`.
 
 ### Download lists (online, “mark everything allowed” style)
 
