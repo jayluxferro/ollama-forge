@@ -108,17 +108,82 @@ def _convert_tools_to_hf(tools: list[dict] | None) -> list[dict] | None:
     return out if out else None
 
 
+def _extract_json_object(text: str, start: int = 0) -> str | None:
+    """Extract a balanced JSON object starting at position start."""
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _parse_tool_calls(text: str) -> list[dict] | None:
     """Extract tool calls from model output. Returns list of Ollama-format tool_calls or None."""
     tool_calls = []
-    patterns = [
-        r'<tool_call>\s*(\{.*?\})\s*</tool_call>',
-        r'<function_call>\s*(\{.*?\})\s*</function_call>',
-        r'\[TOOL_CALL\]\s*(\{.*?\})',
-        r'```json\s*(\{[^`]*"name"[^`]*"arguments"[^`]*\})\s*```',
-        r'```\s*(\{[^`]*"name"[^`]*"arguments"[^`]*\})\s*```',
+    # Patterns that identify tool call markers (we'll extract JSON separately)
+    marker_patterns = [
+        (r'<tool_call>\s*', r'\s*</tool_call>'),
+        (r'<function_call>\s*', r'\s*</function_call>'),
+        (r'\[TOOL_CALL\]\s*', r''),
+        (r'```json\s*', r'\s*```'),
+        (r'```\s*', r'\s*```'),
     ]
-    for pattern in patterns:
+    
+    # Try marker-based extraction with balanced brace parsing
+    for start_pattern, end_pattern in marker_patterns:
+        for match in re.finditer(start_pattern, text, re.IGNORECASE):
+            json_start = match.end()
+            if json_start < len(text) and text[json_start] == "{":
+                json_str = _extract_json_object(text, json_start)
+                if json_str:
+                    try:
+                        data = json.loads(json_str)
+                        if isinstance(data, dict) and "name" in data:
+                            name = data["name"]
+                            args = data.get("arguments") or data.get("parameters") or {}
+                            if isinstance(args, str):
+                                try:
+                                    args = json.loads(args)
+                                except json.JSONDecodeError:
+                                    pass
+                            tool_calls.append({
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": args if isinstance(args, dict) else {},
+                                },
+                            })
+                    except json.JSONDecodeError:
+                        continue
+    
+    if tool_calls:
+        return tool_calls
+    
+    # Fallback: try legacy regex patterns for simpler cases
+    legacy_patterns = [
+        r'<tool_call>\s*(\{[^}]*\})\s*</tool_call>',
+        r'<function_call>\s*(\{[^}]*\})\s*</function_call>',
+    ]
+    for pattern in legacy_patterns:
         for match in re.finditer(pattern, text, re.DOTALL | re.IGNORECASE):
             try:
                 data = json.loads(match.group(1))
