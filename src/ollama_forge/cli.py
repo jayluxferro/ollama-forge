@@ -1763,6 +1763,56 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
     return 0
 
 
+def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Start lightweight prompt proxy (HF tokenizer -> Ollama /api/generate)."""
+    try:
+        from ollama_forge.abliterate_proxy import run_proxy
+    except ImportError:
+        print(
+            "Error: abliterate proxy requires transformers. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        return 1
+    name = getattr(args, "name", None)
+    checkpoint_arg = getattr(args, "checkpoint", None)
+    if name and checkpoint_arg:
+        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        return 1
+    if name:
+        checkpoint = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
+        model_name = name
+    elif checkpoint_arg:
+        checkpoint = Path(checkpoint_arg)
+        model_name = (
+            checkpoint.name
+            if checkpoint.name != "checkpoint"
+            else (checkpoint.parent.name if checkpoint.parent else "abliterated")
+        )
+    else:
+        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        return 1
+    if not checkpoint.is_dir():
+        print(f"Error: checkpoint dir not found: {checkpoint}", file=sys.stderr)
+        if name:
+            print("  Run abliterate run first with that --name.", file=sys.stderr)
+        return 1
+    try:
+        run_proxy(
+            checkpoint_dir=str(checkpoint.resolve()),
+            model_name=model_name,
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 11436),
+            ollama_target=getattr(args, "ollama_target", None),
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Start Ollama-API-compatible server for abliterated model (HF tokenizer)."""
     try:
@@ -1814,6 +1864,70 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
             print("Try: ollama-forge abliterate serve --name <name> --device cpu", file=sys.stderr)
         return 1
     return 0
+
+
+def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run harmful prompts through abliterated checkpoint and count refusals."""
+    try:
+        from ollama_forge.abliterate import evaluate_abliteration
+    except ImportError:
+        print(
+            "Error: abliterate evaluate requires optional deps. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        metrics = evaluate_abliteration(
+            args.checkpoint,
+            args.harmful,
+            refusal_markers_path=getattr(args, "refusal_markers", None),
+            num_prompts=getattr(args, "num_prompts", 50),
+            max_new_tokens=getattr(args, "max_new_tokens", 256),
+        )
+        print(f"Refusals: {metrics['refusal_count']} / {metrics['total']} ({metrics['refusal_rate']:.1%})")
+        return 0
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Optuna search over ablation params to minimize refusal rate."""
+    try:
+        from ollama_forge.abliterate import optimize_abliteration
+    except ImportError as e:
+        print(
+            "Error: abliterate optimize requires optional deps. Run: uv sync --extra abliterate",
+            file=sys.stderr,
+        )
+        print(str(e), file=sys.stderr)
+        return 1
+    model_id = _abliterate_resolve_model(args.model)
+    gguf_file = str(model_id) if str(model_id).lower().endswith(".gguf") else None
+    try:
+        best = optimize_abliteration(
+            model_id,
+            args.refusal_pt,
+            args.harmful,
+            Path(args.output_dir),
+            harmless_path=getattr(args, "harmless", None),
+            n_trials=getattr(args, "n_trials", 20),
+            num_eval_prompts=getattr(args, "num_eval_prompts", 30),
+            refusal_markers_path=getattr(args, "refusal_markers", None),
+            gguf_file=gguf_file,
+        )
+        print(f"Best refusal_rate: {best['refusal_rate']:.2%}", file=sys.stderr)
+        print("Best params:", best)
+        return 0
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
 
 def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -1909,6 +2023,7 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
                 n_directions=getattr(args, "num_directions", 1),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load,
+                per_layer_directions=getattr(args, "per_layer_directions", False),
             )
             print(f"Saved refusal direction to {args.output}")
             return 0
@@ -1981,6 +2096,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 n_directions=getattr(args, "num_directions", 1),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load_run,
+                per_layer_directions=getattr(args, "per_layer_directions", False),
             )
             # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
             import gc
@@ -1999,6 +2115,12 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 verify=not getattr(args, "no_verify", False),
                 gguf_file=gguf_file_for_load_run,
                 strength=getattr(args, "strength", 1.0),
+                atten_strength=getattr(args, "atten_strength", None),
+                mlp_strength=getattr(args, "mlp_strength", None),
+                direction_index=getattr(args, "direction_index", None),
+                strength_kernel=getattr(args, "strength_kernel", "constant"),
+                kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
+                kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
                 skip_begin_layers=getattr(args, "skip_begin_layers", 0),
                 skip_end_layers=getattr(args, "skip_end_layers", 0),
             )
@@ -2084,6 +2206,15 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             "Note: using local HF path; pass --template-from <ollama_model> for tool support.",
             file=sys.stderr,
         )
+    # Detect model family for better diagnostics and template selection
+    try:
+        from ollama_forge.model_family import get_family_name
+        family_name = get_family_name(checkpoint_dir)
+        if family_name:
+            print(f"Detected model family: {family_name}", file=sys.stderr)
+    except ImportError:
+        family_name = None
+
     # If we still have no TEMPLATE, derive from the checkpoint's HF tokenizer so Ollama uses the same format.
     if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
         hf_template = template_from_hf_checkpoint(checkpoint_dir)
@@ -2099,10 +2230,19 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             f"To chat with correct tokenization (HF tokenizer): ollama-forge abliterate chat --name {name}",
             file=sys.stderr,
         )
+        print(
+            f"For agents with tool support: ollama-forge abliterate proxy --name {name}",
+            file=sys.stderr,
+        )
     else:
         print(
             "To chat with correct tokenization (HF tokenizer): "
             f"ollama-forge abliterate chat --checkpoint {output_dir / 'checkpoint'}",
+            file=sys.stderr,
+        )
+        print(
+            "For agents with tool support: "
+            f"ollama-forge abliterate proxy --checkpoint {output_dir / 'checkpoint'}",
             file=sys.stderr,
         )
     return run_ollama_create(name, content)
@@ -2768,6 +2908,11 @@ def main() -> int:
         action="store_true",
         help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
     )
+    p_compute.add_argument(
+        "--per-layer-directions",
+        action="store_true",
+        help="Compute one refusal direction per layer (Heretic-style); save format usable with --direction-index",
+    )
     p_compute.set_defaults(handler=_cmd_abliterate_compute_dir)
 
     p_run = abliterate_sub.add_parser(
@@ -2813,6 +2958,11 @@ def main() -> int:
         help="Number of refusal directions from SVD (default: 1)",
     )
     p_run.add_argument(
+        "--per-layer-directions",
+        action="store_true",
+        help="Compute one refusal direction per layer (Heretic-style); use with --direction-index on apply",
+    )
+    p_run.add_argument(
         "--load-in-8bit",
         action="store_true",
         help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
@@ -2830,6 +2980,20 @@ def main() -> int:
         help="Ablation strength 0 < ALPHA <= 1 (default: 1.0). Use 0.5–0.7 on small models to reduce coherence loss.",
     )
     p_run.add_argument(
+        "--atten-strength",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="Strength for attention layers only (default: same as --strength). Heretic-style: can set lower --mlp-strength to preserve quality.",
+    )
+    p_run.add_argument(
+        "--mlp-strength",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",
+    )
+    p_run.add_argument(
         "--skip-begin-layers",
         type=int,
         default=0,
@@ -2842,6 +3006,33 @@ def main() -> int:
         default=0,
         metavar="N",
         help="Number of layers to skip at the end (default: 0 for full abliteration).",
+    )
+    p_run.add_argument(
+        "--direction-index",
+        type=float,
+        default=None,
+        metavar="IDX",
+        help="With per-layer directions: layer index (int) or blend (float) to use one effective direction for all layers.",
+    )
+    p_run.add_argument(
+        "--strength-kernel",
+        choices=("constant", "linear_peak", "gaussian"),
+        default="constant",
+        help="Layer-dependent strength: constant (default), linear_peak (peak at center), gaussian.",
+    )
+    p_run.add_argument(
+        "--kernel-center-frac",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help="Center of strength kernel as layer fraction (default: 0.5).",
+    )
+    p_run.add_argument(
+        "--kernel-width-frac",
+        type=float,
+        default=0.4,
+        metavar="F",
+        help="Width of strength kernel (default: 0.4).",
     )
     p_run.add_argument(
         "--no-requantize",
@@ -2944,6 +3135,99 @@ def main() -> int:
     )
     p_serve.set_defaults(handler=_cmd_abliterate_serve)
 
+    p_evaluate = abliterate_sub.add_parser(
+        "evaluate",
+        help="Run harmful prompts through abliterated checkpoint and count refusals (refusal_markers)",
+    )
+    p_evaluate.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        required=True,
+        help="Path to abliterated checkpoint directory",
+    )
+    p_evaluate.add_argument(
+        "--harmful",
+        metavar="FILE",
+        required=True,
+        help="Path to file with harmful prompts (one per line)",
+    )
+    p_evaluate.add_argument(
+        "--refusal-markers",
+        metavar="FILE",
+        default=None,
+        help="Path to file with refusal marker substrings (default: bundled list)",
+    )
+    p_evaluate.add_argument(
+        "--num-prompts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max number of harmful prompts to run (default: 50)",
+    )
+    p_evaluate.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=256,
+        metavar="N",
+        help="Max new tokens per response (default: 256)",
+    )
+    p_evaluate.set_defaults(handler=_cmd_abliterate_evaluate)
+
+    p_optimize = abliterate_sub.add_parser(
+        "optimize",
+        help="Optuna search over ablation params to minimize refusal rate (requires optuna)",
+    )
+    p_optimize.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id or path (same as used for compute-dir)",
+    )
+    p_optimize.add_argument(
+        "--refusal-pt",
+        required=True,
+        metavar="FILE",
+        help="Path to refusal direction .pt (from compute-dir)",
+    )
+    p_optimize.add_argument(
+        "--harmful",
+        required=True,
+        metavar="FILE",
+        help="Path to harmful prompts for evaluation",
+    )
+    p_optimize.add_argument(
+        "--harmless",
+        default=None,
+        metavar="FILE",
+        help="Path to harmless prompts (optional; only needed if re-computing direction)",
+    )
+    p_optimize.add_argument(
+        "--output-dir",
+        default=".",
+        metavar="DIR",
+        help="Directory to write best params JSON (default: current dir)",
+    )
+    p_optimize.add_argument(
+        "--n-trials",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Number of Optuna trials (default: 20)",
+    )
+    p_optimize.add_argument(
+        "--num-eval-prompts",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Number of prompts per evaluation (default: 30)",
+    )
+    p_optimize.add_argument(
+        "--refusal-markers",
+        default=None,
+        metavar="FILE",
+        help="Path to refusal markers file (default: bundled)",
+    )
+    p_optimize.set_defaults(handler=_cmd_abliterate_optimize)
+
     p_fix_template = abliterate_sub.add_parser(
         "fix-ollama-template",
         help="Update an existing Ollama abliterated model's chat template from checkpoint (fix garbled ollama run)",
@@ -2965,6 +3249,38 @@ def main() -> int:
         help="Use template from this Ollama model (e.g. gemma3:270m) instead of deriving from checkpoint",
     )
     p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
+
+    p_proxy = abliterate_sub.add_parser(
+        "proxy",
+        help="Lightweight prompt proxy: formats with HF tokenizer, forwards to Ollama (supports tools)",
+    )
+    p_proxy.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Model name from abliterate run (uses abliterate-<name>/checkpoint)",
+    )
+    p_proxy.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Direct path to abliterated checkpoint (HF format)",
+    )
+    p_proxy.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1)",
+    )
+    p_proxy.add_argument(
+        "--port",
+        type=int,
+        default=11436,
+        help="Proxy port (default: 11436, Ollama runs on 11434)",
+    )
+    p_proxy.add_argument(
+        "--ollama-target",
+        metavar="URL",
+        help="Ollama URL to forward to (default: OLLAMA_HOST or http://127.0.0.1:11434)",
+    )
+    p_proxy.set_defaults(handler=_cmd_abliterate_proxy)
 
     # adapters (search Hugging Face for adapters)
     p_adapters = subparsers.add_parser(

@@ -293,8 +293,10 @@ _GEMMA_STOP_SEQUENCES = (
 def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
     """
     Get stop sequences from the checkpoint tokenizer (eos_token, pad_token, common end-of-turn).
-    For Gemma checkpoints, prepends known stop sequences so generation always has a ceiling.
+    Uses model family detection to include family-specific stop tokens.
     """
+    from ollama_forge.model_family import get_family_stop_tokens
+
     checkpoint_dir = Path(checkpoint_dir)
     if not (checkpoint_dir / "config.json").is_file():
         return []
@@ -307,11 +309,12 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
         seen.add(s)
         out.append(s)
 
-    # Gemma: add known stops first so we never rely only on tokenizer (which may have empty eos)
+    # Add family-specific stop tokens first (Gemma, Llama3, Mistral, etc.)
+    for s in get_family_stop_tokens(checkpoint_dir):
+        add(s)
+
+    # Gemma: also read eos/pad from tokenizer_config so we add exact tokens from config
     if _is_gemma_checkpoint(checkpoint_dir):
-        for s in _GEMMA_STOP_SEQUENCES:
-            add(s)
-        # Also read eos/pad from tokenizer_config so we add exact tokens from config
         cfg_path = checkpoint_dir / "tokenizer_config.json"
         if cfg_path.is_file():
             try:

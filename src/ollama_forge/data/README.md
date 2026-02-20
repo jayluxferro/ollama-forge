@@ -1,5 +1,9 @@
 # Abliteration instruction lists
 
+Instruction files for **abliterate** (refusal-direction computation). For full abliterate usage and Heretic-style options, see the wiki: [Abliterate](wiki/Abliterate), [Heretic integration](wiki/Heretic-Integration).
+
+---
+
 ## Default lists (bundled)
 
 | File | Approx. size | Sources |

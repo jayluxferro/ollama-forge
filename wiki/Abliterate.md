@@ -4,6 +4,20 @@ Strip refusal behavior by computing a "refusal direction" and applying ablation.
 
 ---
 
+## On this page
+
+- [Optional dependency](#optional-dependency)
+- [Built-in lists](#built-in-lists-no-files-needed)
+- [Model source](#model-source)
+- [Your own lists](#your-own-lists)
+- [Output size and requantization](#output-size-and-requantization)
+- [Chat, proxy, and serve](#checkpoint-chat-and-serve)
+- [Tool / function-calling support](#tool--function-calling-support)
+- [Prior art: Heretic](#prior-art-heretic-uncensored-ai)
+- [After computing](#after-computing)
+
+---
+
 ## Optional dependency
 
 ```bash
@@ -85,6 +99,10 @@ uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --skip-
 
 Keep `--strength 1` (default) for full ablation strength. Use `--strength 0.7` or similar only if quality degrades.
 
+**Attention vs MLP strength (Heretic-style):** The pipeline ablates both **attention** (q, k, v, o) and **MLP** (gate, up, down projections). You can set different strengths with **`--atten-strength`** and **`--mlp-strength`**; if unset, both use `--strength`. Softer MLP ablation can preserve coherence while still reducing refusals, e.g. `--strength 1 --mlp-strength 0.5`.
+
+**Advanced options (Heretic integration):** Per-layer refusal directions (`--per-layer-directions`, `--direction-index`), layer-dependent strength kernel (`--strength-kernel`, `--kernel-center-frac`, `--kernel-width-frac`), refusal-rate evaluation (`abliterate evaluate`), and Optuna-based parameter search (`abliterate optimize`) are documented in [Heretic integration](Heretic-Integration).
+
 **Memory (large models):** The pipeline loads the model **twice** (once to compute the refusal direction, once to apply and save). For large models (e.g. 20B params), ensure enough RAM (roughly 2× model size in bf16, e.g. ~80GB+ for 20B). If you run out of memory or the process halts during "Baking ablation into weights and saving checkpoint", try: (1) use a machine with more RAM, (2) reduce memory for the first load with **`--load-in-8bit`** (compute step only; requires `bitsandbytes`), or (3) use a smaller model.
 
 The checkpoint is saved by default under **`./abliterate-<name>/checkpoint`**. To chat using the **Hugging Face tokenizer** (correct tokenization; use when the GGUF/Ollama model produces garbled output, e.g. some Gemma 3 exports), run:
@@ -95,7 +113,21 @@ uv run ollama-forge abliterate chat --name my-abliterated
 
 If you passed **`--output-dir DIR`** to run, use **`--checkpoint DIR/checkpoint`** instead of `--name`.
 
-**Serving for agents (Ollama API):** To let tools and agents use the abliterated model over the same API as Ollama (correct tokenization, no garbled output), run a small server that loads the checkpoint with the HF tokenizer and exposes Ollama-compatible endpoints:
+**Proxy for agents (recommended):** The **lightweight prompt proxy** is the recommended way to use abliterated models with agents. It only loads the tokenizer (not the model), formats prompts with the HF tokenizer, and forwards inference to Ollama:
+
+```bash
+uv run ollama-forge abliterate proxy --name my-abliterated --port 11436
+```
+
+The proxy listens on `http://127.0.0.1:11436` (default). Point agents at this URL:
+
+- **Environment:** `OLLAMA_HOST=http://127.0.0.1:11436`
+- **How it works:** Intercepts `/api/chat`, formats prompts with HF tokenizer, forwards to Ollama `/api/generate` with `raw: true`, parses tool calls from responses.
+- **Why proxy:** Lightweight (tokenizer only), fast startup, works with any agent expecting Ollama API, supports tool/function calling.
+
+See [Heretic Integration § Prompt proxy](Heretic-Integration#prompt-proxy-hybrid-approach) for more details.
+
+**Serve (full model):** If you want to run inference without Ollama (e.g., for testing or when Ollama doesn't have the model), use `abliterate serve` which loads the checkpoint with the HF tokenizer:
 
 ```bash
 uv run ollama-forge abliterate serve --name my-abliterated --port 11435
@@ -172,6 +204,35 @@ uv run ollama-forge abliterate run --model openai/gpt-oss-20b --name openai/gpt-
 ```
 
 If the source isn’t in Ollama, you’ll see a note and the created model may not support tools. You can pass `--template-from OLLAMA_MODEL` to use a different Ollama model’s template, or fix later with `ollama-forge refresh-template --name <abliterated> --base <original> --template-only`. When you use a **local HF path** as `--model`, the pipeline does not use it as template source; pass `--template-from <ollama_model>` if you want the abliterated model to support tools.
+
+**API 400 "does not support tools":** If you get `registry.ollama.ai/... does not support tools` (or similar), the abliterated model was created with a derived template that has no tool-calling format. Apply the **base model's** template:
+
+```bash
+ollama pull openai/gpt-oss-20b
+uv run ollama-forge abliterate fix-ollama-template --name openai/gpt-oss-20b-abliterated --template-from openai/gpt-oss-20b
+```
+
+Use your abliterated model name and the matching base Ollama model for `--template-from`. Alternatively use **`abliterate serve`**; it supports tools with the HF tokenizer without changing the Ollama model.
+
+---
+
+## Prior art: Heretic (Uncensored-AI)
+
+[Heretic](https://github.com/0xSojalSec/Uncensored-AI) (Uncensored-AI / p-e-w/heretic) is a **fully automatic** censorship-removal tool that combines directional ablation with **parameter optimization** (TPE/Optuna). It co-minimizes refusal count and KL divergence from the original model, often yielding lower KL at the same refusal rate (e.g. [benchmark table](https://github.com/0xSojalSec/Uncensored-AI#readme) for Gemma 3 12B). Relevant ideas we can learn from:
+
+| Aspect | Heretic | Ollama-forge (current) |
+|--------|--------|------------------------|
+| **Direction** | Per-layer refusal directions (difference-of-means of first-token **residuals**); optional float index = interpolate between two layer directions | Single direction from one chosen layer (best of 0.4 / 0.5 / 0.6 layer_frac), or multi-direction SVD |
+| **Ablation shape** | **Layer-dependent weights**: kernel over layers (max_weight, max_weight_position, min_weight, min_weight_distance); separate params for attention vs MLP (MLP often weaker to reduce damage) | Constant strength (e.g. 1.0) for all layers; same for attention and MLP; skip first/last N layers |
+| **Optimization** | **Automatic**: Optuna TPE, ~200 trials; optimizes refusal count + KL; no hand-tuning | Manual: user runs compute-dir then apply; no search over params |
+| **Data** | HF datasets (e.g. mlabonne/harmless_alpaca, mlabonne/harmful_behaviors); 400 train for directions, 100 test for eval | Curated + merged text files; sample up to `--num-instructions` (default 32) |
+| **Eval** | Built-in: refusal count on harmful prompts, KL on harmless prompts | None in pipeline |
+| **Refusal detection** | Configurable list of `refusal_markers` (substrings in model output) | Not used (we only compute/apply direction) |
+| **Norm / robustness** | Optional orthogonalize_direction, row_normalization; winsorization for “massive activations” | Norm-preserving projection (I − strength·DDᵀ); optional multi-direction |
+
+**Implemented in ollama-forge:** Per-layer directions, layer-dependent strength, separate attn/MLP strength, refusal evaluation, and Optuna optimization are integrated; see [Heretic integration](Heretic-Integration) for CLI and behavior. Remaining differences: we use hidden states (not residual stream) at one position; KL-on-harmless is not in the pipeline.
+
+Heretic is AGPL-3.0; we do not reuse its code. This section is for comparison and inspiration only.
 
 ---
 

@@ -11,6 +11,7 @@
 - [Training Data](Training-Data)
 - [Retrain Pipeline](Retrain-Pipeline)
 - [Abliterate](Abliterate)
+- [Heretic integration](Heretic-Integration)
 - [Security Eval](Security-Eval)
 - [Downsizing](Downsizing)
 - [Hugging Face without GGUF](Hugging-Face-Without-GGUF)
