@@ -149,7 +149,7 @@ def test_validate_line_messages_format() -> None:
 
 def test_validate_line_messages_format_with_system() -> None:
     """Messages format with system message is valid."""
-    line = '{"messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi?"}, {"role": "assistant", "content": "Hello!"}]}'
+    line = '{"messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi?"}, {"role": "assistant", "content": "Hello!"}]}'  # noqa: E501
     assert validate_line(line, 1) == []
 
 

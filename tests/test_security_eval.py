@@ -1,5 +1,6 @@
 """Tests for security_eval: loader, scorers, run (with mocked client)."""
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -225,6 +226,153 @@ def test_history_init_db_and_load_runs(tmp_path: Path) -> None:
     assert db_path.is_file()
     runs = load_runs(db_path=db_path)
     assert runs == []
+
+
+def test_run_eval_expected_refusal_accuracy_mocked() -> None:
+    """run_eval computes expected_refusal_accuracy_pct and benign_refusal_rate_pct when expected_refusal in JSONL."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        f.write('{"prompt": "Benign?", "category": "benign", "expected_refusal": false}\n')
+        f.write('{"prompt": "Jailbreak", "category": "jailbreak", "expected_refusal": true}\n')
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
+            # First: comply (no refusal) -> correct for benign. Second: refuse -> correct for jailbreak.
+            mock_query.side_effect = [("Sure, here is the answer.", 0.1), ("I cannot do that.", 0.2)]
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(path, base_url="http://localhost:9999", model="test", verbose=False)
+        kpis = run_meta["kpis"]
+        assert kpis["expected_refusal_accuracy_pct"] == 100.0  # both matched
+        assert kpis["benign_refusal_rate_pct"] == 0.0  # one benign, did not refuse
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_run_eval_avg_latency_and_error_counts() -> None:
+    """run_eval includes avg_latency_sec and error_counts in KPIs."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write("Hi\n")
+        f.write("Bye\n")
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
+            mock_query.side_effect = [("Hello", 1.5), ("Bye", 0.5)]
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(path, base_url="http://localhost:9999", model="test", verbose=False)
+        kpis = run_meta["kpis"]
+        assert kpis["avg_latency_sec"] == 1.0  # (1.5 + 0.5) / 2
+        assert kpis.get("error_counts") == {}
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_run_eval_custom_refusal_keywords_mocked(tmp_path: Path) -> None:
+    """run_eval uses custom refusal keywords from file when provided."""
+    kw_path = tmp_path / "keywords.txt"
+    kw_path.write_text("# comment\ncustom_refuse\n", encoding="utf-8")
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write("Ask me\n")
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
+            mock_query.return_value = ("I would custom_refuse to do that.", 0.1)  # matches custom keyword
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(
+                path, base_url="http://localhost:9999", model="test", verbose=False, refusal_keywords_path=kw_path
+            )
+        assert run_meta["results"][0]["refusal"] is True
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_run_eval_multi_turn_mocked() -> None:
+    """run_eval with JSONL 'turns' uses multi-turn chat and scores last response."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        f.write(
+            '{"turns": [{"role": "user", "content": "Hi."}, {"role": "assistant", "content": "Hello."}, '
+            '{"role": "user", "content": "Say only OK."}], "category": "multi"}\n'
+        )
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model_multi_turn") as mock_multi:
+            mock_multi.return_value = ("OK", 0.1)
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(
+                path,
+                base_url="http://localhost:9999",
+                model="test",
+                verbose=False,
+                use_iterative_multi_turn=False,
+            )
+        assert run_meta["kpis"]["total"] == 1
+        assert run_meta["results"][0]["response_full"] == "OK"
+        mock_multi.assert_called_once()
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_run_eval_prompt_set_version_in_metadata() -> None:
+    """run_meta includes prompt_set_version (hash of file when not provided)."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write("Hi\n")
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
+            mock_query.return_value = ("Hello", 0.1)
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(path, base_url="http://localhost:9999", model="test", verbose=False)
+        assert "prompt_set_version" in run_meta
+        assert run_meta["prompt_set_version"] is not None
+        assert isinstance(run_meta["prompt_set_version"], str)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_run_eval_progress_callback() -> None:
+    """run_eval calls progress_callback after each prompt."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write("A\nB\n")
+        path = f.name
+    try:
+        with patch("ollama_forge.security_eval.run.query_model") as mock_query:
+            mock_query.side_effect = [("x", 0.1), ("y", 0.1)]
+            from ollama_forge.security_eval.run import run_eval
+
+            calls = []
+
+            def cb(current: int, total: int, results: list) -> None:
+                calls.append((current, total, len(results)))
+
+            run_eval(path, base_url="http://localhost:9999", model="test", verbose=False, progress_callback=cb)
+        assert len(calls) == 2
+        assert calls[0] == (1, 2, 1)
+        assert calls[1] == (2, 2, 2)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_security_eval_compare_cli(tmp_path: Path) -> None:
+    """security-eval compare prints side-by-side KPIs for two run JSONs."""
+    import subprocess
+    import sys
+
+    run_a = {"model": "A", "timestamp_iso": "2025-01-01T12:00:00", "kpis": {"total": 10, "asr_pct": 50.0}}
+    run_b = {"model": "B", "timestamp_iso": "2025-01-01T13:00:00", "kpis": {"total": 10, "asr_pct": 80.0}}
+    path_a = tmp_path / "a.json"
+    path_b = tmp_path / "b.json"
+    path_a.write_text(json.dumps(run_a), encoding="utf-8")
+    path_b.write_text(json.dumps(run_b), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "security-eval", "compare", str(path_a), str(path_b)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "Compare" in result.stderr or "ASR" in result.stderr
 
 
 def test_history_save_and_load_run(tmp_path: Path) -> None:

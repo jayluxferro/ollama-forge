@@ -98,7 +98,7 @@ def validate_line(line: str, line_no: int) -> list[str]:
             return errors
         if normalize_record(obj) is None:
             errors.append(
-                f"Line {line_no}: 'messages' must include at least one user and one assistant message with string content"
+                f"Line {line_no}: 'messages' must include at least one user and one assistant message with string content"  # noqa: E501
             )
         return errors
     errors.append(

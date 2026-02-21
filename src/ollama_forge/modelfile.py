@@ -143,7 +143,7 @@ def _ensure_chat_template(tokenizer: object, checkpoint_dir: Path) -> bool:
 
 
 # Built-in Ollama template for Gemma 2/3 when the checkpoint has no chat_template saved.
-# BOS at start (Gemma expects it once); then <<start_of_turn>>user\n{prompt}<<end_of_turn>>\n<<start_of_turn>>model\n{response}
+# BOS at start (Gemma expects it once); then <<start_of_turn>>user\n{prompt}<<end_of_turn>>\n<<start_of_turn>>model\n{response}  # noqa: E501
 _GEMMA_OLLAMA_TEMPLATE = """<bos>{{ if .System }}{{ .System }}
 
 {{ end }}<<start_of_turn>>user
@@ -241,7 +241,7 @@ def template_from_hf_checkpoint(checkpoint_dir: str | Path) -> str | None:
     """
     Derive an Ollama TEMPLATE string from the checkpoint's Hugging Face tokenizer chat template.
     Returns the template content or None if not possible. For a failure reason use template_from_hf_checkpoint_with_reason.
-    """
+    """  # noqa: E501
     template, _ = template_from_hf_checkpoint_with_reason(checkpoint_dir)
     return template
 
@@ -324,7 +324,7 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
             add(tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False))
     if getattr(tokenizer, "pad_token", None) and tokenizer.pad_token != getattr(tokenizer, "eos_token", None):
         add(tokenizer.pad_token)
-    elif getattr(tokenizer, "pad_token_id", None) is not None and tokenizer.pad_token_id != getattr(tokenizer, "eos_token_id", None):
+    elif getattr(tokenizer, "pad_token_id", None) is not None and tokenizer.pad_token_id != getattr(tokenizer, "eos_token_id", None):  # noqa: E501
         with contextlib.suppress(Exception):
             add(tokenizer.decode([tokenizer.pad_token_id], skip_special_tokens=False))
 

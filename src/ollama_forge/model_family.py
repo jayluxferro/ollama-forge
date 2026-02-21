@@ -27,7 +27,7 @@ _MODEL_FAMILIES: tuple[ModelFamily, ...] = (
         name="gemma",
         model_types=("gemma", "gemma2", "gemma3"),
         tokenizer_classes=("gemmatokenizer", "gemma2tokenizer"),
-        architectures=("gemmaforsequenceclassification", "gemma2forsequenceclassification", "gemmaforquestionanswering"),
+        architectures=("gemmaforsequenceclassification", "gemma2forsequenceclassification", "gemmaforquestionanswering"),  # noqa: E501
         template_override="""<bos>{{ if .System }}{{ .System }}
 
 {{ end }}<<start_of_turn>>user

@@ -26,8 +26,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ollama_forge"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7",
     "pytest-cov>=4.0",
     "ruff>=0.4",
@@ -45,4 +45,4 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "C4", "SIM"]
-ignore = ["E501"]  # line length; many long help strings / literals
+ignore = []  # E501: long lines fixed or noqa'd per line

@@ -1009,7 +1009,7 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
                     "finetune failed",
                     next_steps=[
                         "Check --base-gguf and training data",
-                        "Run finetune manually and then: ollama-forge retrain --base <base> --adapter <dir> --name <name>",
+                        "Run finetune manually and then: ollama-forge retrain --base <base> --adapter <dir> --name <name>",  # noqa: E501
                     ],
                 )
                 return 1
@@ -1695,26 +1695,28 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
             timeout=timeout,
             verbose=verbose,
             retries=getattr(args, "retries", 2),
+            max_prompts=getattr(args, "max_prompts", None),
+            refusal_keywords_path=getattr(args, "refusal_keywords", None),
         )
     except FileNotFoundError as e:
         print_actionable_error(
             "prompt set file not found",
             cause=str(e),
-            next_steps=["Check the path to your .txt or .jsonl prompt set", "Run: ollama-forge security-eval run <path> --help"],
+            next_steps=["Check the path to your .txt or .jsonl prompt set", "Run: ollama-forge security-eval run <path> --help"],  # noqa: E501
         )
         return 1
     except ValueError as e:
         print_actionable_error(
             "invalid prompt set or options",
             cause=str(e),
-            next_steps=["Check prompt set format (one prompt per line or JSONL)", "Run: ollama-forge security-eval run --help"],
+            next_steps=["Check prompt set format (one prompt per line or JSONL)", "Run: ollama-forge security-eval run --help"],  # noqa: E501
         )
         return 1
     except Exception as e:
         print_actionable_error(
             "security-eval run failed",
             cause=str(e),
-            next_steps=["Ensure Ollama is running (ollama serve) or set --base-url", "Run: ollama-forge security-eval run --help"],
+            next_steps=["Ensure Ollama is running (ollama serve) or set --base-url", "Run: ollama-forge security-eval run --help"],  # noqa: E501
         )
         return 1
     kpis = run_meta.get("kpis") or {}
@@ -1724,6 +1726,16 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
     print(f"  Refusal %:    {kpis.get('refusal_rate_pct', 0):.1f}", file=sys.stderr)
     print(f"  Extraction %: {kpis.get('extraction_rate_pct', 0):.1f}", file=sys.stderr)
     print(f"  Errors:       {kpis.get('errors', 0)}", file=sys.stderr)
+    if kpis.get("avg_latency_sec") is not None:
+        print(f"  Avg latency:  {kpis['avg_latency_sec']:.2f}s", file=sys.stderr)
+    if kpis.get("expected_refusal_accuracy_pct") is not None:
+        print(f"  Expected-refusal accuracy: {kpis['expected_refusal_accuracy_pct']:.1f}%", file=sys.stderr)
+    if kpis.get("benign_refusal_rate_pct") is not None:
+        print(f"  Benign refusal rate: {kpis['benign_refusal_rate_pct']:.1f}%", file=sys.stderr)
+    if kpis.get("error_counts"):
+        print("  Error breakdown:", file=sys.stderr)
+        for msg, count in sorted(kpis["error_counts"].items(), key=lambda x: -x[1])[:5]:
+            print(f"    {count}x {msg}", file=sys.stderr)
     by_cat = kpis.get("by_category") or {}
     if by_cat:
         print("  By category:", file=sys.stderr)
@@ -1762,6 +1774,47 @@ def _cmd_security_eval_ui(parser: argparse.ArgumentParser, args: argparse.Namesp
             ],
         )
         return 1
+    return 0
+
+
+def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Compare two security-eval run JSON files side-by-side."""
+    path_a = Path(getattr(args, "run_a", ""))
+    path_b = Path(getattr(args, "run_b", ""))
+    if not path_a.is_file():
+        print_actionable_error("Run A file not found", cause=str(path_a), next_steps=["Use path from security-eval run --output-json"])  # noqa: E501
+        return 1
+    if not path_b.is_file():
+        print_actionable_error("Run B file not found", cause=str(path_b), next_steps=["Use path from security-eval run --output-json"])  # noqa: E501
+        return 1
+    try:
+        run_a = json.loads(path_a.read_text(encoding="utf-8"))
+        run_b = json.loads(path_b.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print_actionable_error("Failed to load run JSON", cause=str(e), next_steps=["Ensure files are valid JSON from security-eval run --output-json"])  # noqa: E501
+        return 1
+    kpis_a = run_a.get("kpis") or {}
+    kpis_b = run_b.get("kpis") or {}
+    label_a = run_a.get("model", "A") + " @ " + (run_a.get("timestamp_iso", "")[:10] or "?")
+    label_b = run_b.get("model", "B") + " @ " + (run_b.get("timestamp_iso", "")[:10] or "?")
+    print("\n--- Compare ---", file=sys.stderr)
+    print(f"  {'KPI':<28} {label_a[:24]:<24} {label_b[:24]:<24}", file=sys.stderr)
+    print("  " + "-" * 76, file=sys.stderr)
+    for key, name in [
+        ("total", "Total"),
+        ("asr_pct", "ASR %"),
+        ("refusal_rate_pct", "Refusal %"),
+        ("extraction_rate_pct", "Extraction %"),
+        ("errors", "Errors"),
+        ("avg_latency_sec", "Avg latency (s)"),
+        ("expected_refusal_accuracy_pct", "Expected-refusal acc %"),
+        ("benign_refusal_rate_pct", "Benign refusal %"),
+    ]:
+        va = kpis_a.get(key)
+        vb = kpis_b.get(key)
+        sa = f"{va:.1f}" if isinstance(va, (int, float)) and key.endswith("_pct") else (f"{va:.2f}" if isinstance(va, float) else str(va) if va is not None else "—")  # noqa: E501
+        sb = f"{vb:.1f}" if isinstance(vb, (int, float)) and key.endswith("_pct") else (f"{vb:.2f}" if isinstance(vb, float) else str(vb) if vb is not None else "—")  # noqa: E501
+        print(f"  {name:<28} {sa:<24} {sb:<24}", file=sys.stderr)
     return 0
 
 
@@ -2137,12 +2190,12 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate chat --checkpoint <dir>"],
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate chat --checkpoint <dir>"],  # noqa: E501
         )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        next_steps = ["Run: ollama-forge abliterate chat --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]
+        next_steps = ["Run: ollama-forge abliterate chat --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]  # noqa: E501
         print_actionable_error("abliterate chat failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
@@ -2177,7 +2230,7 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         if not config_path.is_file():
             print_actionable_error(
                 f"Config file not found: {config_path}",
-                next_steps=["Use a YAML file with 'models: [{name: <name>, checkpoint: <path>}, ...]'", "Run: ollama-forge abliterate proxy --help"],
+                next_steps=["Use a YAML file with 'models: [{name: <name>, checkpoint: <path>}, ...]'", "Run: ollama-forge abliterate proxy --help"],  # noqa: E501
             )
             return 1
         try:
@@ -2319,7 +2372,7 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             f"checkpoint dir not found: {checkpoint}",
             next_steps=(
-                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]
+                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
             ),
         )
         return 1
@@ -2348,7 +2401,7 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate proxy --checkpoint <dir>"],
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate proxy --checkpoint <dir>"],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2402,7 +2455,7 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             f"checkpoint dir not found: {checkpoint}",
             next_steps=(
-                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]
+                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
             ),
         )
         return 1
@@ -2418,12 +2471,12 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate serve --checkpoint <dir>"],
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate serve --checkpoint <dir>"],  # noqa: E501
         )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        next_steps = ["Run: ollama-forge abliterate serve --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]
+        next_steps = ["Run: ollama-forge abliterate serve --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]  # noqa: E501
         print_actionable_error("abliterate serve failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
@@ -2436,7 +2489,7 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
     except ImportError:
         print_actionable_error(
             "abliterate evaluate requires optional deps",
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate evaluate --checkpoint <dir> --harmful <path> --harmless <path>"],
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate evaluate --checkpoint <dir> --harmful <path> --harmless <path>"],  # noqa: E501
         )
         return 1
     try:
@@ -2453,7 +2506,7 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
         print_actionable_error(
             "checkpoint or prompt file not found",
             cause=str(e),
-            next_steps=["Check --checkpoint, --harmful, and --harmless paths", "Run: ollama-forge abliterate evaluate --help"],
+            next_steps=["Check --checkpoint, --harmful, and --harmless paths", "Run: ollama-forge abliterate evaluate --help"],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2473,7 +2526,7 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         print_actionable_error(
             "abliterate optimize requires optional deps",
             cause=str(e),
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate optimize --model <id> --harmful <path> --harmless <path>"],
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate optimize --model <id> --harmful <path> --harmless <path>"],  # noqa: E501
         )
         return 1
     model_id = _abliterate_resolve_model(args.model)
@@ -2492,12 +2545,32 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         )
         print(f"Best refusal_rate: {best['refusal_rate']:.2%}", file=sys.stderr)
         print("Best params:", best)
+        eval_set = getattr(args, "eval_prompt_set", None)
+        if eval_set and Path(eval_set).exists():
+            try:
+                from ollama_forge.security_eval.run import run_eval
+                eval_base = getattr(args, "eval_base_url", None) or "http://127.0.0.1:11434"
+                print("Running security eval (ensure serve has best model loaded)...", file=sys.stderr)
+                run_meta = run_eval(
+                    eval_set,
+                    base_url=eval_base,
+                    model=getattr(args, "eval_model", None) or "abliterated",
+                    max_prompts=getattr(args, "eval_max_prompts", 50),
+                    verbose=True,
+                )
+                k = run_meta.get("kpis") or {}
+                print(
+                    f"Eval ASR: {k.get('asr_pct', 0):.1f}% Refusal: {k.get('refusal_rate_pct', 0):.1f}%",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                print(f"Security eval failed: {e}", file=sys.stderr)
         return 0
     except FileNotFoundError as e:
         print_actionable_error(
             "refusal_pt, harmful, harmless, or output path not found",
             cause=str(e),
-            next_steps=["Check --refusal_pt, --harmful, --harmless, and --output-dir", "Run: ollama-forge abliterate optimize --help"],
+            next_steps=["Check --refusal_pt, --harmful, --harmless, and --output-dir", "Run: ollama-forge abliterate optimize --help"],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2542,7 +2615,7 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
         if not template_body:
             print_actionable_error(
                 f"could not get template from Ollama model {template_from!r}",
-                next_steps=["Pull or create that model first: ollama pull " + template_from.split("/")[-1], "Then re-run fix-ollama-template"],
+                next_steps=["Pull or create that model first: ollama pull " + template_from.split("/")[-1], "Then re-run fix-ollama-template"],  # noqa: E501
             )
             return 1
         print(f"Using chat template from Ollama model {template_from!r}.", file=sys.stderr)
@@ -2552,14 +2625,14 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
             print_actionable_error(
                 "could not derive chat template from checkpoint tokenizer",
                 cause=reason or "Unknown",
-                next_steps=["Use --template-from <ollama_model> to copy template from another model", "Run: ollama-forge abliterate fix-ollama-template --help"],
+                next_steps=["Use --template-from <ollama_model> to copy template from another model", "Run: ollama-forge abliterate fix-ollama-template --help"],  # noqa: E501
             )
             return 1
     content = run_ollama_show_modelfile(name)
     if not content:
         print_actionable_error(
             f"Ollama model {name!r} not found",
-            next_steps=["Pull or create the model first: ollama pull <model> or ollama create <name>", "Then run: ollama-forge abliterate fix-ollama-template --name " + name],
+            next_steps=["Pull or create the model first: ollama pull <model> or ollama create <name>", "Then run: ollama-forge abliterate fix-ollama-template --name " + name],  # noqa: E501
         )
         return 1
     content = modelfile_append_template(content, template_body)
@@ -2592,7 +2665,7 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
         print_actionable_error(
             "abliterate compute-dir requires optional deps",
             cause=str(e),
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate compute-dir --model <id> --output <dir>"],
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate compute-dir --model <id> --output <dir>"],  # noqa: E501
         )
         return 1
     model_id = _abliterate_resolve_model(args.model)
@@ -2623,14 +2696,14 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
         print_actionable_error(
             "model, harmful, harmless, or output path not found",
             cause=str(e),
-            next_steps=["Check --model, --harmful, --harmless, and --output paths", "Run: ollama-forge abliterate compute-dir --help"],
+            next_steps=["Check --model, --harmful, --harmless, and --output paths", "Run: ollama-forge abliterate compute-dir --help"],  # noqa: E501
         )
         return 1
     except Exception as e:
         print_actionable_error(
             "abliterate compute-dir failed",
             cause=str(e),
-            next_steps=["Ensure optional deps are installed: uv sync --extra abliterate", "Run: ollama-forge abliterate compute-dir --help"],
+            next_steps=["Ensure optional deps are installed: uv sync --extra abliterate", "Run: ollama-forge abliterate compute-dir --help"],  # noqa: E501
         )
         return 1
 
@@ -2642,7 +2715,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     if not name:
         print_actionable_error(
             "--name is required",
-            next_steps=["Run: ollama-forge abliterate run --model <id> --name <name> or --from-checkpoint <dir> --name <name>"],
+            next_steps=["Run: ollama-forge abliterate run --model <id> --name <name> or --from-checkpoint <dir> --name <name>"],  # noqa: E501
         )
         return 1
     if from_checkpoint_dir:
@@ -2650,13 +2723,13 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         if not checkpoint_dir.is_dir():
             print_actionable_error(
                 f"--from-checkpoint path is not a directory: {checkpoint_dir}",
-                next_steps=["Point --from-checkpoint to an existing abliterate checkpoint directory (e.g. ./abliterate-<name>/checkpoint)"],
+                next_steps=["Point --from-checkpoint to an existing abliterate checkpoint directory (e.g. ./abliterate-<name>/checkpoint)"],  # noqa: E501
             )
             return 1
         if not (checkpoint_dir / "config.json").is_file():
             print_actionable_error(
                 f"Checkpoint directory has no config.json: {checkpoint_dir}",
-                next_steps=["Use a directory produced by abliterate run (compute + apply) or abliterate compute-dir + apply"],
+                next_steps=["Use a directory produced by abliterate run (compute + apply) or abliterate compute-dir + apply"],  # noqa: E501
             )
             return 1
         output_dir = checkpoint_dir.parent
@@ -2668,7 +2741,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         except ImportError:
             print_actionable_error(
                 "abliterate run requires optional deps",
-                next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate run --model <id> --name <name>"],
+                next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate run --model <id> --name <name>"],  # noqa: E501
             )
             return 1
         model_id = getattr(args, "model", None)
@@ -3600,9 +3673,9 @@ def main() -> int:
     p_train_run.add_argument("--data", required=True, nargs="+", help="Training data: .jsonl file(s) or directory")
     p_train_run.add_argument("--base", required=True, help="Base model name for retrain (e.g. llama3.2)")
     p_train_run.add_argument("--name", required=True, help="Name for the new Ollama model")
-    p_train_run.add_argument("--base-gguf", help="Path to base GGUF; if set and finetune on PATH, run finetune then retrain")
-    p_train_run.add_argument("--prepared-output", default=None, help="Output path for prepared text (default: train_prepared.txt)")
-    p_train_run.add_argument("--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)")
+    p_train_run.add_argument("--base-gguf", help="Path to base GGUF; if set and finetune on PATH, run finetune then retrain")  # noqa: E501
+    p_train_run.add_argument("--prepared-output", default=None, help="Output path for prepared text (default: train_prepared.txt)")  # noqa: E501
+    p_train_run.add_argument("--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)")  # noqa: E501
     p_train_run.add_argument("--format", default="llama.cpp", help="Prepare format (default: llama.cpp)")
     p_train_run.add_argument("--system", help="System message for final model")
     p_train_run.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
@@ -3753,14 +3826,14 @@ def main() -> int:
         type=float,
         default=None,
         metavar="ALPHA",
-        help="Strength for attention layers only (default: same as --strength). Heretic-style: can set lower --mlp-strength to preserve quality.",
+        help="Strength for attention layers only (default: same as --strength). Heretic-style: can set lower --mlp-strength to preserve quality.",  # noqa: E501
     )
     p_run.add_argument(
         "--mlp-strength",
         type=float,
         default=None,
         metavar="ALPHA",
-        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",
+        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",  # noqa: E501
     )
     p_run.add_argument(
         "--skip-begin-layers",
@@ -3781,7 +3854,7 @@ def main() -> int:
         type=float,
         default=None,
         metavar="IDX",
-        help="With per-layer directions: layer index (int) or blend (float) to use one effective direction for all layers.",
+        help="With per-layer directions: layer index (int) or blend (float) to use one effective direction for all layers.",  # noqa: E501
     )
     p_run.add_argument(
         "--strength-kernel",
@@ -3995,6 +4068,31 @@ def main() -> int:
         metavar="FILE",
         help="Path to refusal markers file (default: bundled)",
     )
+    p_optimize.add_argument(
+        "--eval-prompt-set",
+        default=None,
+        metavar="PATH",
+        help="After optimize, run security-eval with this prompt set (serve must have best model)",
+    )
+    p_optimize.add_argument(
+        "--eval-base-url",
+        default="http://127.0.0.1:11434",
+        metavar="URL",
+        help="Base URL for post-optimize security eval (default: 127.0.0.1:11434)",
+    )
+    p_optimize.add_argument(
+        "--eval-model",
+        default=None,
+        metavar="NAME",
+        help="Model name for post-optimize eval (default: abliterated)",
+    )
+    p_optimize.add_argument(
+        "--eval-max-prompts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max prompts for post-optimize security eval (default: 50)",
+    )
     p_optimize.set_defaults(handler=_cmd_abliterate_optimize)
 
     p_fix_template = abliterate_sub.add_parser(
@@ -4057,7 +4155,7 @@ def main() -> int:
     p_proxy.add_argument(
         "--config",
         metavar="FILE",
-        help="YAML config file listing models (e.g. models: [{name: my-model, checkpoint: /path}]); cannot use with --name/--checkpoint",
+        help="YAML config file listing models (e.g. models: [{name: my-model, checkpoint: /path}]); cannot use with --name/--checkpoint",  # noqa: E501
     )
     p_proxy.add_argument(
         "--add-model",
@@ -4255,11 +4353,38 @@ def main() -> int:
         action="store_true",
         help="Less progress output",
     )
+    p_se_run.add_argument(
+        "--max-prompts",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Run only the first N prompts (for quick smoke runs)",
+    )
+    p_se_run.add_argument(
+        "--refusal-keywords",
+        metavar="PATH",
+        help="Path to file with custom refusal keywords (one per line, # comments). Default: built-in list.",
+    )
     p_se_run.set_defaults(handler=_cmd_security_eval_run)
     p_se_ui = se_sub.add_parser(
         "ui", help="Launch Streamlit UI for security evaluation (requires: uv sync --extra security-eval-ui)"
     )
     p_se_ui.set_defaults(handler=_cmd_security_eval_ui)
+    p_se_compare = se_sub.add_parser(
+        "compare",
+        help="Compare two security-eval run JSON files side-by-side (KPIs)",
+    )
+    p_se_compare.add_argument(
+        "run_a",
+        metavar="RUN_A.json",
+        help="Path to first run JSON (from security-eval run --output-json)",
+    )
+    p_se_compare.add_argument(
+        "run_b",
+        metavar="RUN_B.json",
+        help="Path to second run JSON",
+    )
+    p_se_compare.set_defaults(handler=_cmd_security_eval_compare)
 
     # downsize (distillation: large → small model)
     p_downsize = subparsers.add_parser(

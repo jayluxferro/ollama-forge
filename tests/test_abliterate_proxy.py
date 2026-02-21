@@ -294,7 +294,7 @@ class TestProxyUnknownModel:
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/chat",
-                    data=json.dumps({"model": "unknown-model", "messages": [{"role": "user", "content": "Hi"}]}).encode(),
+                    data=json.dumps({"model": "unknown-model", "messages": [{"role": "user", "content": "Hi"}]}).encode(),  # noqa: E501
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
