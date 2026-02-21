@@ -133,6 +133,7 @@ def main() -> None:
             return
         try:
             from ollama_forge.security_eval.loader import load_prompt_set
+
             preview = load_prompt_set(effective_prompt_set_path)
             cats = ", ".join(sorted({p.get("category", "default") for p in preview}))
             st.info(f"Loaded {len(preview)} prompts. Categories: {cats}.")
@@ -147,8 +148,11 @@ def main() -> None:
             progress_bar.progress(current / total if total else 0, text=f"Running prompt {current}/{total}...")
             if results_so_far:
                 import pandas as pd
+
                 df = pd.DataFrame(results_so_far)
-                cols = [c for c in ["index", "category", "refusal", "compliance", "extraction", "error"] if c in df.columns]  # noqa: E501
+                cols = [
+                    c for c in ["index", "category", "refusal", "compliance", "extraction", "error"] if c in df.columns
+                ]  # noqa: E501
                 if cols:
                     results_placeholder.dataframe(df[cols], use_container_width=True)
 
@@ -157,7 +161,9 @@ def main() -> None:
         try:
             for mi, m in enumerate(models_to_run):
                 if run_multi and len(models_to_run) > 1:
-                    progress_bar.progress((mi + 0.5) / len(models_to_run), text=f"Model {mi + 1}/{len(models_to_run)}: {m}...")  # noqa: E501
+                    progress_bar.progress(
+                        (mi + 0.5) / len(models_to_run), text=f"Model {mi + 1}/{len(models_to_run)}: {m}..."
+                    )  # noqa: E501
                 run_meta = run_eval(
                     effective_prompt_set_path,
                     base_url=base,
@@ -194,6 +200,7 @@ def main() -> None:
         multi_metas = st.session_state.get("multi_run_metas") or []
         if len(multi_metas) > 1:
             import pandas as pd
+
             comp = [
                 {
                     "model": m.get("model", ""),
@@ -210,6 +217,7 @@ def main() -> None:
             st.dataframe(pd.DataFrame(comp), use_container_width=True)
             try:
                 import plotly.express as px
+
                 df_c = pd.DataFrame(comp)
                 if not df_c.empty and "ASR %" in df_c.columns:
                     fig = px.bar(df_c, x="model", y="ASR %", title="ASR % by model")
@@ -227,7 +235,11 @@ def main() -> None:
             st.metric("Tool misuse %", f"{kpis.get('tool_misuse_rate_pct', 0):.1f}")
         if kpis.get("avg_turns_to_success") is not None:
             st.metric("Avg turns to success", f"{kpis.get('avg_turns_to_success', 0):.1f}")
-        if kpis.get("avg_latency_sec") is not None or kpis.get("expected_refusal_accuracy_pct") is not None or kpis.get("benign_refusal_rate_pct") is not None:  # noqa: E501
+        if (
+            kpis.get("avg_latency_sec") is not None
+            or kpis.get("expected_refusal_accuracy_pct") is not None
+            or kpis.get("benign_refusal_rate_pct") is not None
+        ):  # noqa: E501
             c6, c7, c8, c9, c10 = st.columns(5)
             if kpis.get("avg_latency_sec") is not None:
                 c6.metric("Avg latency", f"{kpis['avg_latency_sec']:.2f}s")
@@ -270,13 +282,17 @@ def main() -> None:
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 fig_refusal = px.bar(
-                    df_cat, x="category", y="Refusal %",
+                    df_cat,
+                    x="category",
+                    y="Refusal %",
                     title="Refusal % by category",
                 )
                 st.plotly_chart(fig_refusal, use_container_width=True)
                 if "extraction_rate_pct" in df_cat.columns:
                     fig_ext = px.bar(
-                        df_cat, x="category", y="extraction_rate_pct",
+                        df_cat,
+                        x="category",
+                        y="extraction_rate_pct",
                         title="Extraction % by category",
                     )
                     st.plotly_chart(fig_ext, use_container_width=True)
@@ -286,9 +302,11 @@ def main() -> None:
             if durations:
                 try:
                     import plotly.express as px
+
                     df_dur = pd.DataFrame({"duration_sec": durations})
                     fig_hist = px.histogram(
-                        df_dur, x="duration_sec",
+                        df_dur,
+                        x="duration_sec",
                         title="Latency (s) distribution",
                         nbins=min(30, max(5, len(durations) // 3)),
                     )
@@ -307,7 +325,9 @@ def main() -> None:
             with filter_col:
                 filter_category = st.selectbox(
                     "Filter by category",
-                    options=["(all)"] + sorted(df["category"].dropna().unique().tolist()) if "category" in df.columns else ["(all)"],  # noqa: E501
+                    options=["(all)"] + sorted(df["category"].dropna().unique().tolist())
+                    if "category" in df.columns
+                    else ["(all)"],  # noqa: E501
                 )
                 filter_refusal = st.selectbox("Filter by refusal", options=["(all)", "Refusal", "Compliance"])
                 filter_error = st.selectbox("Filter by error", options=["(all)", "Has error", "No error"])
@@ -331,8 +351,12 @@ def main() -> None:
                 idx = row_options.index(view_row)
                 row = results[idx]
                 with st.expander("Full prompt and response", expanded=True):
-                    st.text_area("Prompt", value=row.get("prompt_full", row.get("prompt", "")), height=120, disabled=True)  # noqa: E501
-                    st.text_area("Response", value=row.get("response_full", row.get("response", "")), height=120, disabled=True)  # noqa: E501
+                    st.text_area(
+                        "Prompt", value=row.get("prompt_full", row.get("prompt", "")), height=120, disabled=True
+                    )  # noqa: E501
+                    st.text_area(
+                        "Response", value=row.get("response_full", row.get("response", "")), height=120, disabled=True
+                    )  # noqa: E501
                     if row.get("duration_sec") is not None:
                         st.caption(f"Duration: {row['duration_sec']:.2f}s")
                     if row.get("error"):

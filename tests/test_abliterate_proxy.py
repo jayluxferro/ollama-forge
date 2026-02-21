@@ -36,16 +36,18 @@ class TestNormalizeMessage:
 
     def test_assistant_with_tool_calls(self) -> None:
         """Assistant message with tool_calls converts arguments to JSON string."""
-        msg = _normalize_message({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {"name": "get_weather", "arguments": {"city": "NYC"}},
-                }
-            ],
-        })
+        msg = _normalize_message(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": {"city": "NYC"}},
+                    }
+                ],
+            }
+        )
         assert msg["role"] == "assistant"
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["function"]["name"] == "get_weather"
@@ -53,26 +55,30 @@ class TestNormalizeMessage:
 
     def test_assistant_tool_calls_string_args(self) -> None:
         """Tool call with string arguments passes through."""
-        msg = _normalize_message({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {"name": "test", "arguments": '{"x": 1}'},
-                }
-            ],
-        })
+        msg = _normalize_message(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "test", "arguments": '{"x": 1}'},
+                    }
+                ],
+            }
+        )
         assert msg["tool_calls"][0]["function"]["arguments"] == '{"x": 1}'
 
     def test_tool_message(self) -> None:
         """Tool message includes name and tool_call_id."""
-        msg = _normalize_message({
-            "role": "tool",
-            "content": "result data",
-            "name": "get_weather",
-            "tool_call_id": "call_123",
-        })
+        msg = _normalize_message(
+            {
+                "role": "tool",
+                "content": "result data",
+                "name": "get_weather",
+                "tool_call_id": "call_123",
+            }
+        )
         assert msg["role"] == "tool"
         assert msg["name"] == "get_weather"
         assert msg["tool_call_id"] == "call_123"
@@ -97,14 +103,16 @@ class TestConvertToolsToHF:
 
     def test_basic_tool_conversion(self) -> None:
         """Basic tool converts correctly."""
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather for a city",
-                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-            },
-        }]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather for a city",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                },
+            }
+        ]
         result = ollama_tools_to_hf(tools)
         assert result is not None
         assert len(result) == 1
@@ -192,7 +200,7 @@ class TestParseToolCalls:
 
     def test_invalid_json_in_tags(self) -> None:
         """Invalid JSON in tags is skipped."""
-        text = '<tool_call>not valid json</tool_call>'
+        text = "<tool_call>not valid json</tool_call>"
         result = _parse_tool_calls(text)
         assert result is None
 
@@ -294,7 +302,9 @@ class TestProxyUnknownModel:
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/chat",
-                    data=json.dumps({"model": "unknown-model", "messages": [{"role": "user", "content": "Hi"}]}).encode(),  # noqa: E501
+                    data=json.dumps(
+                        {"model": "unknown-model", "messages": [{"role": "user", "content": "Hi"}]}
+                    ).encode(),  # noqa: E501
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )

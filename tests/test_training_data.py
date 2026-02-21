@@ -71,10 +71,7 @@ def test_validate_training_data_invalid_line() -> None:
         ok, errors, count = validate_training_data(path)
         assert not ok
         assert count == 1
-        assert any(
-            "missing" in e.lower() or "required" in e.lower() or "expected" in e.lower()
-            for e in errors
-        )
+        assert any("missing" in e.lower() or "required" in e.lower() or "expected" in e.lower() for e in errors)
     finally:
         Path(path).unlink(missing_ok=True)
 

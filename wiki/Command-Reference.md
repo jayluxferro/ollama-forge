@@ -24,9 +24,12 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **validate-training-data** | Validate JSONL training data (file(s) or directory); accepts Alpaca or messages format |
 | **prepare-training-data** | Convert JSONL to plain text for trainers (e.g. llama.cpp); accepts both formats |
 | **convert-training-data-format** | Convert JSONL to Alpaca-style (e.g. from TeichAI/datagen) — input file, `-o` output |
-| **train** | Generate a training script (data path → runnable pipeline) |
+| **train-data** | Training data helpers: **init** — create directory with README + sample.jsonl |
+| **train-resolve-base** | Suggest how to get a base GGUF for finetune/train-run (e.g. train-resolve-base llama3.2) |
+| **train** | Generate a training script (to run pipeline in one go, use **finetune** or **train-run**) |
 | **train-run** | E2E pipeline: validate → prepare → finetune (if --base-gguf) → retrain |
-| **retrain** | Create an Ollama model from base + adapter (after training) |
+| **finetune** | Alias for train-run (same args): one command to run the full training pipeline |
+| **retrain** | Create an Ollama model from base + adapter (adapter: dir or .bin/.gguf file) |
 | **abliterate** | Refusal removal: compute-dir, run, chat, serve, **proxy** (lightweight tokenizer proxy for agents), evaluate, optimize, fix-ollama-template, download-lists |
 | **adapters** | Find and use adapters (search, recommend) |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
@@ -49,10 +52,12 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | Adapter recommendations (optional auto-apply) | `adapters recommend [--base llama3.2] [--apply]` |
 | Get adapter from HF | `fetch-adapter <repo_id> --base <base> --name <name>` |
 | Customize model (prompt, params, adapter) | `create-from-base`, `retrain`, or `build recipe.yaml` |
+| Scaffold training data dir | `train-data init -o ./data` |
 | Validate training data | `validate-training-data <file(s) or dir>` |
 | JSONL → trainer format | `prepare-training-data <file(s) or dir> -o out.txt` |
 | Messages JSONL → Alpaca | `convert-training-data-format dataset.jsonl -o alpaca.jsonl` |
-| Run full training pipeline | `train-run --data <path> --base <base> --name <name> [--base-gguf <path>]` |
+| Run full training pipeline | `finetune` or `train-run --data <path> --base <base> --name <name> [--base-gguf <path>]` |
+| Get base GGUF suggestions | `train-resolve-base <base_name>` (e.g. llama3.2) |
 | Generate training pipeline script | `train --data <path> --base <base> --name <name> --write-script train.sh` |
 | Check environment | `check` |
 | Diagnose / auto-fix | `doctor [--fix] [--plan] [--fix-llama-cpp]` |

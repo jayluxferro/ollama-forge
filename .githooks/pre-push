@@ -1,0 +1,17 @@
+#!/bin/sh
+# Before push: run ruff check and pytest. Run scripts/lint-fix.sh to fix lint first.
+
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "Pre-push: ruff check..."
+if ! uv run ruff check src tests; then
+  echo "Ruff check failed. Run: ./scripts/lint-fix.sh"
+  exit 1
+fi
+echo "Pre-push: pytest..."
+if ! uv run pytest tests/ -q --tb=short; then
+  echo "Tests failed. Fix and try again."
+  exit 1
+fi
+exit 0

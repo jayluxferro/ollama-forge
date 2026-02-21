@@ -129,9 +129,7 @@ def test_load_recipe_not_dict() -> None:
 
 def test_load_recipe_yaml_minimal() -> None:
     """Load minimal YAML recipe with base and optional keys."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
         f.write("name: my-model\nbase: llama3.2\ntemperature: 0.6\n")
         path = f.name
     try:
@@ -145,9 +143,7 @@ def test_load_recipe_yaml_minimal() -> None:
 
 def test_load_recipe_yaml_hf_repo() -> None:
     """Load YAML recipe with hf_repo and quant."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yml", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False, encoding="utf-8") as f:
         f.write("name: from-hf\nhf_repo: TheBloke/Llama-2-7B-GGUF\nquant: Q4_K_M\n")
         path = f.name
     try:

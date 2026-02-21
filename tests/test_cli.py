@@ -450,9 +450,7 @@ def test_build_missing_recipe_error_ux() -> None:
 
 def test_build_invalid_recipe_error_ux() -> None:
     """build with invalid recipe (no name) prints Next: and Run: ollama-forge in stderr."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
         f.write('{"base": "llama3.2"}')
         path = f.name
     try:
@@ -470,9 +468,7 @@ def test_build_invalid_recipe_error_ux() -> None:
 
 def test_build_validate_only_success() -> None:
     """build --validate-only with valid recipe exits 0 and prints summary."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
         f.write('{"name": "my-model", "base": "llama3.2"}')
         path = f.name
     try:
@@ -491,9 +487,7 @@ def test_build_validate_only_success() -> None:
 
 def test_build_validate_only_invalid_recipe_fails() -> None:
     """build --validate-only with invalid recipe (no name) exits non-zero."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
         f.write('{"base": "llama3.2"}')
         path = f.name
     try:
@@ -540,8 +534,13 @@ def test_convert_training_data_format_runs() -> None:
     try:
         result = subprocess.run(
             [
-                sys.executable, "-m", "ollama_forge.cli",
-                "convert-training-data-format", in_path, "-o", out_path,
+                sys.executable,
+                "-m",
+                "ollama_forge.cli",
+                "convert-training-data-format",
+                in_path,
+                "-o",
+                out_path,
             ],
             capture_output=True,
             text=True,

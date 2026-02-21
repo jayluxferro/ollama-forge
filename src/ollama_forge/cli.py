@@ -111,39 +111,96 @@ _QUICKSTART_TASK_SYSTEMS: dict[str, str] = {
 }
 
 
-def _verify_adapter_and_base(adapter: str | None, base: str) -> tuple[str | None, list[str] | None]:
-    """Verify adapter dir and base exist; return (error_summary, next_steps) on failure, (None, None) on success."""
+# Adapter file extensions Ollama accepts (GGUF or llama.cpp LoRA .bin)
+_ADAPTER_FILE_SUFFIXES = (".bin", ".gguf")
+
+
+def _resolve_adapter_path(adapter: str) -> str | None:
+    """
+    Resolve adapter path to the value to pass to Modelfile ADAPTER.
+    - If path is a file with .bin or .gguf: return that path.
+    - If path is a directory: PEFT (adapter_config.json or adapter_model.*) → return dir;
+      else if exactly one .bin or .gguf in dir → return that file path (llama.cpp style).
+    Returns None if path does not exist or is invalid.
+    """
+    ad = Path(adapter).resolve()
+    if not ad.exists():
+        return None
+    if ad.is_file():
+        return str(ad) if ad.suffix.lower() in _ADAPTER_FILE_SUFFIXES else None
+    # Directory
+    has_config = (ad / "adapter_config.json").is_file()
+    has_peft_weights = (ad / "adapter_model.safetensors").is_file() or (ad / "adapter_model.bin").is_file()
+    if has_config or has_peft_weights:
+        return str(ad)
+    # llama.cpp style: single .bin or .gguf in directory
+    lora_files = [f for f in ad.iterdir() if f.is_file() and f.suffix.lower() in _ADAPTER_FILE_SUFFIXES]
+    if len(lora_files) == 1:
+        return str(lora_files[0])
+    return None
+
+
+def _verify_adapter_and_base(
+    adapter: str | None,
+    base: str,
+) -> tuple[str | None, str | None, list[str] | None]:
+    """
+    Verify adapter and base. Returns (resolved_adapter_path, error, next_steps).
+    On success: (resolved_path, None, None). On failure: (None, error_msg, next_steps).
+    """
+    resolved = None
     if adapter:
         ad = Path(adapter).resolve()
-        if not ad.is_dir():
+        if not ad.exists():
             return (
-                f"Adapter path is not a directory: {ad}",
+                None,
+                f"Adapter path does not exist: {ad}",
                 [
                     "Check the adapter path (e.g. from fetch-adapter or training output)",
-                    "Run: ollama-forge create-from-base --base <base> --name <name> --adapter <path>",
+                    "Run: ollama-forge retrain --base <base> --adapter <path> --name <name>",
                 ],
             )
-        has_config = (ad / "adapter_config.json").is_file()
-        has_weights = (ad / "adapter_model.safetensors").is_file() or (ad / "adapter_model.bin").is_file()
-        if not has_config and not has_weights:
-            return (
-                f"Adapter directory has no adapter_config.json or adapter_model.*: {ad}",
-                [
-                    "Use a LoRA/PEFT adapter directory (e.g. from fetch-adapter or ollama-forge retrain)",
-                    "Run: ollama-forge fetch-adapter <repo_id> --base <base> --name <name>",
-                ],
-            )
+        if ad.is_file():
+            if ad.suffix.lower() not in _ADAPTER_FILE_SUFFIXES:
+                return (
+                    None,
+                    f"Adapter file must be .bin or .gguf: {ad}",
+                    [
+                        "Use a LoRA adapter file (e.g. from llama.cpp finetune --lora-out)",
+                        "Or use a directory with adapter_config.json (PEFT) or a single .bin/.gguf",
+                    ],
+                )
+            resolved = str(ad)
+        else:
+            has_config = (ad / "adapter_config.json").is_file()
+            has_weights = (ad / "adapter_model.safetensors").is_file() or (ad / "adapter_model.bin").is_file()
+            if has_config or has_weights:
+                resolved = str(ad)
+            else:
+                lora_files = [f for f in ad.iterdir() if f.is_file() and f.suffix.lower() in _ADAPTER_FILE_SUFFIXES]
+                if len(lora_files) == 1:
+                    resolved = str(lora_files[0])
+                else:
+                    return (
+                        None,
+                        f"Adapter directory has no PEFT files or single LoRA file: {ad}",
+                        [
+                            "Use a LoRA/PEFT adapter directory (adapter_config.json + adapter_model.*)",
+                            "Or a directory with exactly one .bin/.gguf (llama.cpp finetune output)",
+                            "Or pass the .bin/.gguf file path directly",
+                        ],
+                    )
     base_path = Path(base)
-    if "/" in base or "\\" in base:
-        if not base_path.exists():
-            return (
-                f"Base path does not exist: {base_path.resolve()}",
-                [
-                    "Use an existing base model path or Ollama model name",
-                    "Run: ollama-forge create-from-base --base <path_or_name> --name <name>",
-                ],
-            )
-    return (None, None)
+    if ("/" in base or "\\" in base) and not base_path.exists():
+        return (
+            None,
+            f"Base path does not exist: {base_path.resolve()}",
+            [
+                "Use an existing base model path or Ollama model name",
+                "Run: ollama-forge retrain --base <path_or_name> --adapter <path> --name <name>",
+            ],
+        )
+    return (resolved, None, None)
 
 
 def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -151,8 +208,9 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
     if exit_code is not None:
         return exit_code
     adapter = getattr(args, "adapter", None)
+    resolved_adapter = None
     if adapter:
-        err, steps = _verify_adapter_and_base(adapter, args.base)
+        resolved_adapter, err, steps = _verify_adapter_and_base(adapter, args.base)
         if err:
             print_actionable_error(err, next_steps=steps)
             return 1
@@ -163,7 +221,7 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
         num_ctx=args.num_ctx,
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
-        adapter=adapter,
+        adapter=resolved_adapter,
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
@@ -827,7 +885,7 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
         return 1
     out = Path(args.output)
     try:
-        convert_jsonl_to_plain_text(paths, out, format_name=args.format)
+        n_samples = convert_jsonl_to_plain_text(paths, out, format_name=args.format)
     except OSError as e:
         print_actionable_error(
             "failed to write output file",
@@ -838,7 +896,7 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
             ],
         )
         return 1
-    print(f"Wrote {len(paths)} file(s) → {out} ({out.stat().st_size} bytes)")
+    print(f"Wrote {n_samples} sample(s) from {len(paths)} file(s) → {out} ({out.stat().st_size} bytes)")
     print(
         "Use with llama.cpp finetune: --train-data ... --sample-start '### Instruction'",
         file=sys.stderr,
@@ -846,9 +904,7 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
     return 0
 
 
-def _cmd_convert_training_data_format(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> int:
+def _cmd_convert_training_data_format(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Convert JSONL from messages format (e.g. TeichAI/datagen) to Alpaca-style instruction/output."""
     input_spec = args.input
     if isinstance(input_spec, list):
@@ -874,6 +930,53 @@ def _cmd_convert_training_data_format(
         )
         return 1
     print(f"Wrote {count} Alpaca-style record(s) to {path_out}")
+    return 0
+
+
+def _cmd_train_data_init(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Create a directory with README and sample.jsonl for training data."""
+    out_dir = Path(getattr(args, "out", "./data")).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    readme = """# Training data
+
+Use JSONL (one JSON object per line). Each line must have:
+
+- **Alpaca-style:** `instruction` (required), `output` (required), `input` (optional).
+- **Messages-style:** `messages`: array of `{role: "user"|"assistant"|"system", content: "..."}`.
+
+Validate: `ollama-forge validate-training-data ./data/`
+Prepare: `ollama-forge prepare-training-data ./data/ -o train_prepared.txt --format llama.cpp`
+"""
+    sample = """{"instruction": "What is 2+2?", "input": "", "output": "4."}
+{"instruction": "Say hello.", "output": "Hello! How can I help you?"}
+{"instruction": "Summarize in one sentence.", "input": "Long document text here...", "output": "Short summary."}
+"""
+    (out_dir / "README.md").write_text(readme, encoding="utf-8")
+    (out_dir / "sample.jsonl").write_text(sample, encoding="utf-8")
+    print(f"Created {out_dir}/README.md and {out_dir}/sample.jsonl")
+    print("Add your own .jsonl files, then run: ollama-forge validate-training-data", str(out_dir))
+    return 0
+
+
+def _cmd_train_resolve_base(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Suggest how to get a base GGUF for finetune/train-run (model name → GGUF path)."""
+    base_name = (getattr(args, "base_name", None) or "").strip()
+    if not base_name:
+        print("Usage: ollama-forge train-resolve-base <base_model_name>", file=sys.stderr)
+        print("Example: ollama-forge train-resolve-base llama3.2", file=sys.stderr)
+        return 1
+    print(f"For --base-gguf you need a GGUF file matching the base model '{base_name}'.")
+    print("")
+    print("Options:")
+    print("  1. Download from Hugging Face (creates an Ollama model; GGUF is in HF cache):")
+    print("     ollama-forge fetch <repo_id> --name <name>")
+    print("     Example: ollama-forge fetch bartowski/Llama-3.2-3B-Instruct-GGUF --name llama3.2-base")
+    print("     Then use the downloaded GGUF path from the HF cache, or re-export from Ollama.")
+    print("  2. Search Hugging Face for your model + 'GGUF' and download a .gguf file.")
+    print("     Pass that path to finetune/train-run: --base-gguf /path/to/model.gguf")
+    print("")
+    print("After you have a GGUF path:")
+    print(f"  ollama-forge finetune --data <path> --base {base_name} --name <out_name> --base-gguf /path/to/model.gguf")
     return 0
 
 
@@ -919,7 +1022,8 @@ echo "  Or re-run with --base-gguf <path> --run-trainer to run it automatically.
 """
     script = f"""#!/usr/bin/env bash
 # Training pipeline: data → adapter → Ollama model
-# Generated by ollama-forge train --data ... --base {base} --name {name}
+# Data: {data_spec}
+# Base: {base}  Name: {name}  Prepared: train_prepared.txt  Adapter out: ./adapter_out
 set -e
 DATA="{data_spec}"
 BASE="{base}"
@@ -972,7 +1076,6 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     data_spec = args.data[0] if isinstance(args.data, list) and args.data else args.data
     if isinstance(data_spec, list):
         data_spec = data_spec[0]
-    first_path = Path(data_spec).resolve()
     prepared_path = Path(getattr(args, "prepared_output", None) or "train_prepared.txt")
     adapter_dir = Path(getattr(args, "adapter_output", None) or "adapter_out")
     base = args.base
@@ -980,7 +1083,7 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     base_gguf = getattr(args, "base_gguf", None)
     # Step 2: prepare
     try:
-        convert_jsonl_to_plain_text(paths, prepared_path, format_name=getattr(args, "format", "llama.cpp"))
+        n_samples = convert_jsonl_to_plain_text(paths, prepared_path, format_name=getattr(args, "format", "llama.cpp"))
     except OSError as e:
         print_actionable_error(
             "failed to write prepared data",
@@ -988,7 +1091,11 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             next_steps=["Use --prepared-output <path> or fix permissions"],
         )
         return 1
-    print(f"Prepared data → {prepared_path}", file=sys.stderr)
+    print(f"Prepared {n_samples} sample(s) → {prepared_path}", file=sys.stderr)
+    print(
+        "Next: run your trainer (e.g. llama.cpp finetune) or use --base-gguf to run it automatically.",
+        file=sys.stderr,
+    )
     # Step 3: finetune (if base_gguf and finetune on PATH)
     ran_finetune = False
     if base_gguf and Path(base_gguf).is_file():
@@ -997,13 +1104,17 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             adapter_dir.mkdir(parents=True, exist_ok=True)
             cmd = [
                 finetune_bin,
-                "--train-data", str(prepared_path.resolve()),
-                "--sample-start", "### Instruction",
-                "--model-base", str(Path(base_gguf).resolve()),
-                "--lora-out", str(adapter_dir.resolve()),
+                "--train-data",
+                str(prepared_path.resolve()),
+                "--sample-start",
+                "### Instruction",
+                "--model-base",
+                str(Path(base_gguf).resolve()),
+                "--lora-out",
+                str(adapter_dir.resolve()),
             ]
-            print("Running finetune...", file=sys.stderr)
-            result = subprocess.run(cmd)
+            print("Running finetune (llama.cpp)...", file=sys.stderr)
+            result = subprocess.run(cmd)  # stdout/stderr inherited; progress visible
             if result.returncode != 0:
                 print_actionable_error(
                     "finetune failed",
@@ -1207,7 +1318,7 @@ def _cmd_check(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     check_item(
         "llama.cpp finetune",
         bool(finetune),
-        "for train/run-trainer, build llama.cpp and add finetune to PATH, or run: ollama-forge setup-llama-cpp",
+        "To run finetune/train-run with --base-gguf: ollama-forge setup-llama-cpp, then add build dir to PATH",
     )
     check_item(
         "llama.cpp quantize",
@@ -1282,7 +1393,7 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         check_item(
             "llama.cpp finetune",
             status["finetune"],
-            "run: ollama-forge setup-llama-cpp",
+            "For finetune/train-run with --base-gguf: ollama-forge setup-llama-cpp, then add build dir to PATH",
         )
         check_item(
             "llama.cpp quantize",
@@ -1702,21 +1813,30 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
         print_actionable_error(
             "prompt set file not found",
             cause=str(e),
-            next_steps=["Check the path to your .txt or .jsonl prompt set", "Run: ollama-forge security-eval run <path> --help"],  # noqa: E501
+            next_steps=[
+                "Check the path to your .txt or .jsonl prompt set",
+                "Run: ollama-forge security-eval run <path> --help",
+            ],  # noqa: E501
         )
         return 1
     except ValueError as e:
         print_actionable_error(
             "invalid prompt set or options",
             cause=str(e),
-            next_steps=["Check prompt set format (one prompt per line or JSONL)", "Run: ollama-forge security-eval run --help"],  # noqa: E501
+            next_steps=[
+                "Check prompt set format (one prompt per line or JSONL)",
+                "Run: ollama-forge security-eval run --help",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
         print_actionable_error(
             "security-eval run failed",
             cause=str(e),
-            next_steps=["Ensure Ollama is running (ollama serve) or set --base-url", "Run: ollama-forge security-eval run --help"],  # noqa: E501
+            next_steps=[
+                "Ensure Ollama is running (ollama serve) or set --base-url",
+                "Run: ollama-forge security-eval run --help",
+            ],  # noqa: E501
         )
         return 1
     kpis = run_meta.get("kpis") or {}
@@ -1782,16 +1902,24 @@ def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.N
     path_a = Path(getattr(args, "run_a", ""))
     path_b = Path(getattr(args, "run_b", ""))
     if not path_a.is_file():
-        print_actionable_error("Run A file not found", cause=str(path_a), next_steps=["Use path from security-eval run --output-json"])  # noqa: E501
+        print_actionable_error(
+            "Run A file not found", cause=str(path_a), next_steps=["Use path from security-eval run --output-json"]
+        )  # noqa: E501
         return 1
     if not path_b.is_file():
-        print_actionable_error("Run B file not found", cause=str(path_b), next_steps=["Use path from security-eval run --output-json"])  # noqa: E501
+        print_actionable_error(
+            "Run B file not found", cause=str(path_b), next_steps=["Use path from security-eval run --output-json"]
+        )  # noqa: E501
         return 1
     try:
         run_a = json.loads(path_a.read_text(encoding="utf-8"))
         run_b = json.loads(path_b.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        print_actionable_error("Failed to load run JSON", cause=str(e), next_steps=["Ensure files are valid JSON from security-eval run --output-json"])  # noqa: E501
+        print_actionable_error(
+            "Failed to load run JSON",
+            cause=str(e),
+            next_steps=["Ensure files are valid JSON from security-eval run --output-json"],
+        )  # noqa: E501
         return 1
     kpis_a = run_a.get("kpis") or {}
     kpis_b = run_b.get("kpis") or {}
@@ -1812,8 +1940,16 @@ def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.N
     ]:
         va = kpis_a.get(key)
         vb = kpis_b.get(key)
-        sa = f"{va:.1f}" if isinstance(va, (int, float)) and key.endswith("_pct") else (f"{va:.2f}" if isinstance(va, float) else str(va) if va is not None else "—")  # noqa: E501
-        sb = f"{vb:.1f}" if isinstance(vb, (int, float)) and key.endswith("_pct") else (f"{vb:.2f}" if isinstance(vb, float) else str(vb) if vb is not None else "—")  # noqa: E501
+        sa = (
+            f"{va:.1f}"
+            if isinstance(va, (int, float)) and key.endswith("_pct")
+            else (f"{va:.2f}" if isinstance(va, float) else str(va) if va is not None else "—")
+        )  # noqa: E501
+        sb = (
+            f"{vb:.1f}"
+            if isinstance(vb, (int, float)) and key.endswith("_pct")
+            else (f"{vb:.2f}" if isinstance(vb, float) else str(vb) if vb is not None else "—")
+        )  # noqa: E501
         print(f"  {name:<28} {sa:<24} {sb:<24}", file=sys.stderr)
     return 0
 
@@ -2190,12 +2326,19 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate chat --checkpoint <dir>"],  # noqa: E501
+            next_steps=[
+                "Check that the checkpoint directory is complete",
+                "Run: ollama-forge abliterate chat --checkpoint <dir>",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        next_steps = ["Run: ollama-forge abliterate chat --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]  # noqa: E501
+        next_steps = (
+            ["Run: ollama-forge abliterate chat --name <name> --device cpu"]
+            if ("histogram_mps" in msg or "not implemented" in msg.lower())
+            else ["Check the checkpoint path and try --device cpu"]
+        )  # noqa: E501
         print_actionable_error("abliterate chat failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
@@ -2230,11 +2373,15 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         if not config_path.is_file():
             print_actionable_error(
                 f"Config file not found: {config_path}",
-                next_steps=["Use a YAML file with 'models: [{name: <name>, checkpoint: <path>}, ...]'", "Run: ollama-forge abliterate proxy --help"],  # noqa: E501
+                next_steps=[
+                    "Use a YAML file with 'models: [{name: <name>, checkpoint: <path>}, ...]'",
+                    "Run: ollama-forge abliterate proxy --help",
+                ],  # noqa: E501
             )
             return 1
         try:
             import yaml
+
             data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception as e:
             print_actionable_error(
@@ -2256,7 +2403,9 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
             return 1
     if models_list:
         if not getattr(args, "no_check_ollama", False):
-            ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            ollama_target = (
+                getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            )
             if not ping_ollama(ollama_target):
                 print_actionable_error(
                     "Ollama is not reachable at " + ollama_target,
@@ -2308,7 +2457,9 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
                 return 1
             models_list.append((n, p))
         if not getattr(args, "no_check_ollama", False):
-            ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            ollama_target = (
+                getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            )
             if not ping_ollama(ollama_target):
                 print_actionable_error(
                     "Ollama is not reachable at " + ollama_target,
@@ -2372,13 +2523,17 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             f"checkpoint dir not found: {checkpoint}",
             next_steps=(
-                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
+                ["Run abliterate run first with that --name."]
+                if name
+                else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
             ),
         )
         return 1
     # Optional: fail fast if Ollama (proxy target) is not reachable
     if not getattr(args, "no_check_ollama", False):
-        ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        ollama_target = (
+            getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        )
         if not ping_ollama(ollama_target):
             print_actionable_error(
                 "Ollama is not reachable at " + ollama_target,
@@ -2401,7 +2556,10 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate proxy --checkpoint <dir>"],  # noqa: E501
+            next_steps=[
+                "Check that the checkpoint directory is complete",
+                "Run: ollama-forge abliterate proxy --checkpoint <dir>",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2455,7 +2613,9 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             f"checkpoint dir not found: {checkpoint}",
             next_steps=(
-                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
+                ["Run abliterate run first with that --name."]
+                if name
+                else ["Ensure --checkpoint points to the abliterated checkpoint directory."]  # noqa: E501
             ),
         )
         return 1
@@ -2471,12 +2631,19 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
         print_actionable_error(
             "checkpoint or resource not found",
             cause=str(e),
-            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate serve --checkpoint <dir>"],  # noqa: E501
+            next_steps=[
+                "Check that the checkpoint directory is complete",
+                "Run: ollama-forge abliterate serve --checkpoint <dir>",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        next_steps = ["Run: ollama-forge abliterate serve --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]  # noqa: E501
+        next_steps = (
+            ["Run: ollama-forge abliterate serve --name <name> --device cpu"]
+            if ("histogram_mps" in msg or "not implemented" in msg.lower())
+            else ["Check the checkpoint path and try --device cpu"]
+        )  # noqa: E501
         print_actionable_error("abliterate serve failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
@@ -2489,7 +2656,10 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
     except ImportError:
         print_actionable_error(
             "abliterate evaluate requires optional deps",
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate evaluate --checkpoint <dir> --harmful <path> --harmless <path>"],  # noqa: E501
+            next_steps=[
+                "Run: uv sync --extra abliterate",
+                "Then: ollama-forge abliterate evaluate --checkpoint <dir> --harmful <path> --harmless <path>",
+            ],  # noqa: E501
         )
         return 1
     try:
@@ -2506,7 +2676,10 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
         print_actionable_error(
             "checkpoint or prompt file not found",
             cause=str(e),
-            next_steps=["Check --checkpoint, --harmful, and --harmless paths", "Run: ollama-forge abliterate evaluate --help"],  # noqa: E501
+            next_steps=[
+                "Check --checkpoint, --harmful, and --harmless paths",
+                "Run: ollama-forge abliterate evaluate --help",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2526,7 +2699,10 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         print_actionable_error(
             "abliterate optimize requires optional deps",
             cause=str(e),
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate optimize --model <id> --harmful <path> --harmless <path>"],  # noqa: E501
+            next_steps=[
+                "Run: uv sync --extra abliterate",
+                "Then: ollama-forge abliterate optimize --model <id> --harmful <path> --harmless <path>",
+            ],  # noqa: E501
         )
         return 1
     model_id = _abliterate_resolve_model(args.model)
@@ -2549,6 +2725,7 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         if eval_set and Path(eval_set).exists():
             try:
                 from ollama_forge.security_eval.run import run_eval
+
                 eval_base = getattr(args, "eval_base_url", None) or "http://127.0.0.1:11434"
                 print("Running security eval (ensure serve has best model loaded)...", file=sys.stderr)
                 run_meta = run_eval(
@@ -2570,7 +2747,10 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         print_actionable_error(
             "refusal_pt, harmful, harmless, or output path not found",
             cause=str(e),
-            next_steps=["Check --refusal_pt, --harmful, --harmless, and --output-dir", "Run: ollama-forge abliterate optimize --help"],  # noqa: E501
+            next_steps=[
+                "Check --refusal_pt, --harmful, --harmless, and --output-dir",
+                "Run: ollama-forge abliterate optimize --help",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
@@ -2615,7 +2795,10 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
         if not template_body:
             print_actionable_error(
                 f"could not get template from Ollama model {template_from!r}",
-                next_steps=["Pull or create that model first: ollama pull " + template_from.split("/")[-1], "Then re-run fix-ollama-template"],  # noqa: E501
+                next_steps=[
+                    "Pull or create that model first: ollama pull " + template_from.split("/")[-1],
+                    "Then re-run fix-ollama-template",
+                ],  # noqa: E501
             )
             return 1
         print(f"Using chat template from Ollama model {template_from!r}.", file=sys.stderr)
@@ -2625,14 +2808,20 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
             print_actionable_error(
                 "could not derive chat template from checkpoint tokenizer",
                 cause=reason or "Unknown",
-                next_steps=["Use --template-from <ollama_model> to copy template from another model", "Run: ollama-forge abliterate fix-ollama-template --help"],  # noqa: E501
+                next_steps=[
+                    "Use --template-from <ollama_model> to copy template from another model",
+                    "Run: ollama-forge abliterate fix-ollama-template --help",
+                ],  # noqa: E501
             )
             return 1
     content = run_ollama_show_modelfile(name)
     if not content:
         print_actionable_error(
             f"Ollama model {name!r} not found",
-            next_steps=["Pull or create the model first: ollama pull <model> or ollama create <name>", "Then run: ollama-forge abliterate fix-ollama-template --name " + name],  # noqa: E501
+            next_steps=[
+                "Pull or create the model first: ollama pull <model> or ollama create <name>",
+                "Then run: ollama-forge abliterate fix-ollama-template --name " + name,
+            ],  # noqa: E501
         )
         return 1
     content = modelfile_append_template(content, template_body)
@@ -2665,7 +2854,10 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
         print_actionable_error(
             "abliterate compute-dir requires optional deps",
             cause=str(e),
-            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate compute-dir --model <id> --output <dir>"],  # noqa: E501
+            next_steps=[
+                "Run: uv sync --extra abliterate",
+                "Then: ollama-forge abliterate compute-dir --model <id> --output <dir>",
+            ],  # noqa: E501
         )
         return 1
     model_id = _abliterate_resolve_model(args.model)
@@ -2696,14 +2888,20 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
         print_actionable_error(
             "model, harmful, harmless, or output path not found",
             cause=str(e),
-            next_steps=["Check --model, --harmful, --harmless, and --output paths", "Run: ollama-forge abliterate compute-dir --help"],  # noqa: E501
+            next_steps=[
+                "Check --model, --harmful, --harmless, and --output paths",
+                "Run: ollama-forge abliterate compute-dir --help",
+            ],  # noqa: E501
         )
         return 1
     except Exception as e:
         print_actionable_error(
             "abliterate compute-dir failed",
             cause=str(e),
-            next_steps=["Ensure optional deps are installed: uv sync --extra abliterate", "Run: ollama-forge abliterate compute-dir --help"],  # noqa: E501
+            next_steps=[
+                "Ensure optional deps are installed: uv sync --extra abliterate",
+                "Run: ollama-forge abliterate compute-dir --help",
+            ],  # noqa: E501
         )
         return 1
 
@@ -2715,7 +2913,9 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     if not name:
         print_actionable_error(
             "--name is required",
-            next_steps=["Run: ollama-forge abliterate run --model <id> --name <name> or --from-checkpoint <dir> --name <name>"],  # noqa: E501
+            next_steps=[
+                "Run: ollama-forge abliterate run --model <id> --name <name> or --from-checkpoint <dir> --name <name>"
+            ],  # noqa: E501
         )
         return 1
     if from_checkpoint_dir:
@@ -2723,13 +2923,17 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         if not checkpoint_dir.is_dir():
             print_actionable_error(
                 f"--from-checkpoint path is not a directory: {checkpoint_dir}",
-                next_steps=["Point --from-checkpoint to an existing abliterate checkpoint directory (e.g. ./abliterate-<name>/checkpoint)"],  # noqa: E501
+                next_steps=[
+                    "Point --from-checkpoint to an abliterate checkpoint dir (e.g. ./abliterate-<name>/checkpoint)",
+                ],
             )
             return 1
         if not (checkpoint_dir / "config.json").is_file():
             print_actionable_error(
                 f"Checkpoint directory has no config.json: {checkpoint_dir}",
-                next_steps=["Use a directory produced by abliterate run (compute + apply) or abliterate compute-dir + apply"],  # noqa: E501
+                next_steps=[
+                    "Use a directory produced by abliterate run (compute + apply) or abliterate compute-dir + apply"
+                ],  # noqa: E501
             )
             return 1
         output_dir = checkpoint_dir.parent
@@ -2741,7 +2945,10 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         except ImportError:
             print_actionable_error(
                 "abliterate run requires optional deps",
-                next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate run --model <id> --name <name>"],  # noqa: E501
+                next_steps=[
+                    "Run: uv sync --extra abliterate",
+                    "Then: ollama-forge abliterate run --model <id> --name <name>",
+                ],  # noqa: E501
             )
             return 1
         model_id = getattr(args, "model", None)
@@ -2810,9 +3017,11 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 )
                 # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
                 import gc
+
                 gc.collect()
                 try:
                     import torch
+
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 except ImportError:
@@ -2968,6 +3177,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     # Detect model family for better diagnostics and template selection
     try:
         from ollama_forge.model_family import get_family_name
+
         family_name = get_family_name(checkpoint_dir)
         if family_name:
             print(f"Detected model family: {family_name}", file=sys.stderr)
@@ -3000,8 +3210,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             file=sys.stderr,
         )
         print(
-            "For agents with tool support: "
-            f"ollama-forge abliterate proxy --checkpoint {output_dir / 'checkpoint'}",
+            f"For agents with tool support: ollama-forge abliterate proxy --checkpoint {output_dir / 'checkpoint'}",
             file=sys.stderr,
         )
     return run_ollama_create(name, content)
@@ -3612,10 +3821,42 @@ def main() -> int:
     )
     p_convert_fmt.set_defaults(handler=_cmd_convert_training_data_format)
 
+    # train-data (init: scaffold directory with README + sample JSONL)
+    p_train_data = subparsers.add_parser(
+        "train-data",
+        help="Training data helpers (init: create sample directory)",
+    )
+    train_data_sub = p_train_data.add_subparsers(dest="train_data_cmd", required=True)
+    p_train_data_init = train_data_sub.add_parser(
+        "init",
+        help="Create a directory with README and sample.jsonl for training data",
+    )
+    p_train_data_init.add_argument(
+        "--out",
+        "-o",
+        default="./data",
+        metavar="DIR",
+        help="Output directory (default: ./data)",
+    )
+    p_train_data_init.set_defaults(handler=_cmd_train_data_init)
+
+    # train-resolve-base (suggest how to get base GGUF for a model name)
+    p_train_resolve_base = subparsers.add_parser(
+        "train-resolve-base",
+        help="Suggest how to get a base GGUF for finetune/train-run (e.g. llama3.2)",
+    )
+    p_train_resolve_base.add_argument(
+        "base_name",
+        nargs="?",
+        default="",
+        help="Base model name (e.g. llama3.2); omit to show usage",
+    )
+    p_train_resolve_base.set_defaults(handler=_cmd_train_resolve_base)
+
     # train (generate script: data → prepare → trainer → retrain)
     p_train = subparsers.add_parser(
         "train",
-        help="Generate a training script: pass your data path, get a runnable pipeline",
+        help="Generate a training script. To run the pipeline in one go, use 'finetune' or 'train-run' instead.",
     )
     p_train.add_argument(
         "--data",
@@ -3635,6 +3876,11 @@ def main() -> int:
         help="Generated script will run finetune if on PATH (requires --base-gguf)",
     )
     p_train.add_argument(
+        "--trainer",
+        default="llama.cpp",
+        help="Trainer backend (default: llama.cpp). Only llama.cpp is wired today.",
+    )
+    p_train.add_argument(
         "--write-script",
         metavar="PATH",
         help="Write the pipeline script to this file",
@@ -3650,7 +3896,7 @@ def main() -> int:
     p_retrain.add_argument(
         "--adapter",
         required=True,
-        help="Path to adapter directory (from llama.cpp finetune, Axolotl, etc.)",
+        help="Path to adapter: directory (PEFT or single .bin/.gguf) or .bin/.gguf file (e.g. llama.cpp finetune)",
     )
     p_retrain.add_argument("--name", required=True, help="Name for the new Ollama model")
     p_retrain.add_argument("--system", help="System message")
@@ -3673,10 +3919,17 @@ def main() -> int:
     p_train_run.add_argument("--data", required=True, nargs="+", help="Training data: .jsonl file(s) or directory")
     p_train_run.add_argument("--base", required=True, help="Base model name for retrain (e.g. llama3.2)")
     p_train_run.add_argument("--name", required=True, help="Name for the new Ollama model")
-    p_train_run.add_argument("--base-gguf", help="Path to base GGUF; if set and finetune on PATH, run finetune then retrain")  # noqa: E501
-    p_train_run.add_argument("--prepared-output", default=None, help="Output path for prepared text (default: train_prepared.txt)")  # noqa: E501
-    p_train_run.add_argument("--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)")  # noqa: E501
+    p_train_run.add_argument(
+        "--base-gguf", help="Path to base GGUF; if set and finetune on PATH, run finetune then retrain"
+    )  # noqa: E501
+    p_train_run.add_argument(
+        "--prepared-output", default=None, help="Output path for prepared text (default: train_prepared.txt)"
+    )  # noqa: E501
+    p_train_run.add_argument(
+        "--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)"
+    )  # noqa: E501
     p_train_run.add_argument("--format", default="llama.cpp", help="Prepare format (default: llama.cpp)")
+    p_train_run.add_argument("--trainer", default="llama.cpp", help="Trainer backend (default: llama.cpp)")
     p_train_run.add_argument("--system", help="System message for final model")
     p_train_run.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
     p_train_run.add_argument("--num-ctx", type=int, help="Context window size in tokens")
@@ -3684,6 +3937,27 @@ def main() -> int:
     p_train_run.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
     p_train_run.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_train_run.set_defaults(handler=_cmd_train_run)
+
+    # finetune (alias for train-run: one command to run the full pipeline)
+    p_finetune = subparsers.add_parser(
+        "finetune",
+        help="Same as train-run. Use train --write-script to generate a script instead.",
+    )
+    p_finetune.add_argument("--data", required=True, nargs="+", help="Training data: .jsonl file(s) or directory")
+    p_finetune.add_argument("--base", required=True, help="Base model name for retrain (e.g. llama3.2)")
+    p_finetune.add_argument("--name", required=True, help="Name for the new Ollama model")
+    p_finetune.add_argument("--base-gguf", help="Base GGUF path; with finetune on PATH, runs finetune then retrain")
+    p_finetune.add_argument("--prepared-output", default=None, help="Prepared text path (default: train_prepared.txt)")
+    p_finetune.add_argument("--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)")
+    p_finetune.add_argument("--format", default="llama.cpp", help="Prepare format (default: llama.cpp)")
+    p_finetune.add_argument("--trainer", default="llama.cpp", help="Trainer backend (default: llama.cpp)")
+    p_finetune.add_argument("--system", help="System message for final model")
+    p_finetune.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_finetune.add_argument("--num-ctx", type=int, help="Context window size in tokens")
+    p_finetune.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_finetune.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
+    p_finetune.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_finetune.set_defaults(handler=_cmd_train_run)
 
     # abliterate (refusal removal)
     p_abliterate = subparsers.add_parser(
@@ -4440,6 +4714,9 @@ def main() -> int:
         return 0
     if parsed.command == "security-eval" and not getattr(parsed, "security_eval_command", None):
         p_security_eval.print_help()
+        return 0
+    if parsed.command == "train-data" and not getattr(parsed, "train_data_cmd", None):
+        p_train_data.print_help()
         return 0
     handler = getattr(parsed, "handler", None)
     if handler is None:

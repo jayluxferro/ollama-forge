@@ -12,6 +12,7 @@ from typing import Any
 @dataclass
 class ModelFamily:
     """Configuration for a model family."""
+
     name: str
     model_types: tuple[str, ...]
     tokenizer_classes: tuple[str, ...]
@@ -27,7 +28,11 @@ _MODEL_FAMILIES: tuple[ModelFamily, ...] = (
         name="gemma",
         model_types=("gemma", "gemma2", "gemma3"),
         tokenizer_classes=("gemmatokenizer", "gemma2tokenizer"),
-        architectures=("gemmaforsequenceclassification", "gemma2forsequenceclassification", "gemmaforquestionanswering"),  # noqa: E501
+        architectures=(
+            "gemmaforsequenceclassification",
+            "gemma2forsequenceclassification",
+            "gemmaforquestionanswering",
+        ),  # noqa: E501
         template_override="""<bos>{{ if .System }}{{ .System }}
 
 {{ end }}<<start_of_turn>>user
@@ -106,41 +111,41 @@ def detect_model_family(checkpoint_dir: str | Path) -> ModelFamily | None:
     """
     Detect model family from checkpoint config.json/tokenizer_config.json.
     Returns ModelFamily or None if unknown.
-    
+
     Detection priority: model_type > architectures > tokenizer_class
     (model_type is most specific, tokenizer_class is most generic)
     """
     checkpoint_dir = Path(checkpoint_dir)
-    
+
     config_data: dict[str, Any] = {}
     tokenizer_data: dict[str, Any] = {}
-    
+
     config_path = checkpoint_dir / "config.json"
     if config_path.is_file():
         with contextlib.suppress(Exception):
             config_data = json.loads(config_path.read_text(encoding="utf-8"))
-    
+
     tokenizer_path = checkpoint_dir / "tokenizer_config.json"
     if tokenizer_path.is_file():
         with contextlib.suppress(Exception):
             tokenizer_data = json.loads(tokenizer_path.read_text(encoding="utf-8"))
-    
+
     model_type = _normalize(config_data.get("model_type"))
     tokenizer_class = _normalize(tokenizer_data.get("tokenizer_class"))
     architectures = [_normalize(a) for a in config_data.get("architectures", [])]
-    
+
     # Priority 1: Match by model_type (most specific)
     if model_type:
         for family in _MODEL_FAMILIES:
             if any(model_type == _normalize(mt) or model_type.startswith(_normalize(mt)) for mt in family.model_types):
                 return family
-    
+
     # Priority 2: Match by architecture
     if architectures:
         for family in _MODEL_FAMILIES:
             if any(any(_normalize(fa) == arch for fa in family.architectures) for arch in architectures):
                 return family
-    
+
     # Priority 3: Match by tokenizer_class (least specific, more prone to false positives)
     if tokenizer_class:
         for family in _MODEL_FAMILIES:
@@ -151,7 +156,7 @@ def detect_model_family(checkpoint_dir: str | Path) -> ModelFamily | None:
                 tc_norm = _normalize(tc)
                 if tokenizer_class == tc_norm or (family.name in tokenizer_class and tc_norm in tokenizer_class):
                     return family
-    
+
     return None
 
 

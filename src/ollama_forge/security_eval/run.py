@@ -231,10 +231,7 @@ def run_eval(
         extraction = score_extraction(response, target=target) if target else False
         compliance = not refusal
         tool_misuse = score_tool_misuse(tool_calls, dangerous_tool_names) if tool_calls else False
-        image_reveal = (
-            score_image_reveal(response, keywords=image_reveal_keywords)
-            if image_reveal_keywords else False
-        )
+        image_reveal = score_image_reveal(response, keywords=image_reveal_keywords) if image_reveal_keywords else False
         res = {
             "index": i + 1,
             "prompt": prompt[:80] + "..." if len(prompt) > 80 else prompt,
@@ -276,10 +273,7 @@ def run_eval(
     extraction_rate = (extractions / total * 100.0) if total else 0.0
     tool_misuse_rate = (tool_misuses / total * 100.0) if total else 0.0
     image_reveal_rate = (image_reveals / total * 100.0) if total else 0.0
-    avg_turns_to_success = (
-        sum(turns_to_success_vals) / len(turns_to_success_vals)
-        if turns_to_success_vals else None
-    )
+    avg_turns_to_success = sum(turns_to_success_vals) / len(turns_to_success_vals) if turns_to_success_vals else None
 
     # Avg latency (exclude errors)
     durations = [r.get("duration_sec") for r in results if r.get("duration_sec") is not None]
@@ -314,8 +308,12 @@ def run_eval(
         cat = r.get("category") or "default"
         if cat not in by_category:
             by_category[cat] = {
-                "total": 0, "refusal": 0, "compliance": 0, "extraction": 0,
-                "tool_misuse": 0, "image_reveal": 0,
+                "total": 0,
+                "refusal": 0,
+                "compliance": 0,
+                "extraction": 0,
+                "tool_misuse": 0,
+                "image_reveal": 0,
             }
         by_category[cat]["total"] += 1
         if r.get("refusal"):
@@ -371,9 +369,18 @@ def run_eval(
             w = csv.DictWriter(
                 f,
                 fieldnames=[
-                    "index", "category", "refusal", "compliance", "extraction",
-                    "tool_misuse", "image_reveal", "turns_count", "turns_to_success",
-                    "duration_sec", "error", "expected_refusal",
+                    "index",
+                    "category",
+                    "refusal",
+                    "compliance",
+                    "extraction",
+                    "tool_misuse",
+                    "image_reveal",
+                    "turns_count",
+                    "turns_to_success",
+                    "duration_sec",
+                    "error",
+                    "expected_refusal",
                 ],
             )
             w.writeheader()

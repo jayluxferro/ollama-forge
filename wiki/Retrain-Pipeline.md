@@ -26,11 +26,11 @@ With llama.cpp on PATH and a base GGUF, you can add `--base-gguf /path/to/base.g
 
 ## After training
 
-You have an adapter directory. Create the Ollama model:
+You have an adapter (directory or file). Create the Ollama model:
 
 ```bash
 uv run ollama-forge retrain --base llama3.2 --adapter /path/to/adapter --name my-finetuned
 ollama run my-finetuned
 ```
 
-See [Adapters](Adapters) for format and compatibility.
+**Adapter path:** Can be a **directory** (PEFT with `adapter_config.json` + weights, or a directory containing a single `.bin`/`.gguf` from llama.cpp finetune) or a **file** (`.bin` or `.gguf`). See [Adapters](Adapters) for format and compatibility.

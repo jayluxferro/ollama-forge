@@ -15,14 +15,16 @@ def test_ollama_tools_to_hf_empty() -> None:
 
 def test_ollama_tools_to_hf_basic() -> None:
     """Single function tool converts correctly."""
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get weather for a city",
-            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-        },
-    }]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a city",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
     result = ollama_tools_to_hf(tools)
     assert result is not None
     assert len(result) == 1

@@ -65,7 +65,7 @@ def test_template_body_from_modelfile() -> None:
     content = 'FROM x\nTEMPLATE """hello {{ .Prompt }}"""\nPARAMETER x 1'
     assert template_body_from_modelfile(content) == "hello {{ .Prompt }}"
     assert template_body_from_modelfile("FROM x") is None
-    assert template_body_from_modelfile("FROM x\nTEMPLATE \"\"\"\n\n\"\"\"") == ""
+    assert template_body_from_modelfile('FROM x\nTEMPLATE """\n\n"""') == ""
 
 
 def test_merge_modelfile_with_reference_template_no_ref_template() -> None:

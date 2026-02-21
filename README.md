@@ -54,7 +54,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
 - **Verify:** `ollama-forge check` — see what’s installed. `ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
 - **Optional extras:** `pip install ollama-forge[net]` adds `requests` for HTTP paths (proxy, security-eval, download-lists); `ollama-forge[abliterate]` for abliterate run/proxy (see [Abliterate](wiki/Abliterate.md)).
-- **Optional:** Run Ruff before each commit: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md).
+- **Optional:** Run Ruff and tests before commit/push: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md). To fix lint before pushing without hooks: `./scripts/lint-fix.sh`.
 
 ---
 

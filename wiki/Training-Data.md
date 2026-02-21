@@ -7,6 +7,17 @@ Use **JSONL** (one JSON object per line) for training data. ollama-forge accepts
 
 ---
 
+## Quick start (training)
+
+1. **Put data in JSONL** — `instruction` + `output` (and optional `input`), or `messages`. Use `train-data init -o ./data` to create a sample directory.
+2. **Validate** — `ollama-forge validate-training-data <path>`.
+3. **Run pipeline** — `ollama-forge finetune --data <path> --base <base> --name <name>` (or `train-run`). If you have a base GGUF and llama.cpp `finetune` on PATH, add `--base-gguf <path>` to run training and retrain in one go. Need a GGUF? Run `ollama-forge train-resolve-base <base>`.
+4. **Run model** — `ollama run <name>`.
+
+See [Retrain Pipeline](Retrain-Pipeline) for adapter → Ollama. Adapter can be a directory (PEFT or a single .bin/.gguf from llama.cpp) or a .bin/.gguf file path.
+
+---
+
 ## Validate
 
 Check one file, several files, or a whole directory:
@@ -83,3 +94,14 @@ See [docs/DATAGEN-ANALYSIS.md](../docs/DATAGEN-ANALYSIS.md) for details.
 ## Next step
 
 After training you get an adapter. Use [Retrain Pipeline](Retrain-Pipeline) to create an Ollama model: `retrain --base <base> --adapter <path> --name <name>`.
+
+---
+
+## Troubleshooting
+
+| Issue | What to do |
+|-------|------------|
+| **finetune not found** | You need llama.cpp's `finetune` on PATH to run training in one command. Run `ollama-forge setup-llama-cpp`, then add the build directory to your PATH. Or run the training steps manually (prepare → run finetune yourself → retrain). |
+| **Adapter directory invalid** | `retrain --adapter` accepts: (1) a **directory** with PEFT files (`adapter_config.json` + `adapter_model.safetensors` or `.bin`), or (2) a directory with **exactly one** `.bin` or `.gguf` file (llama.cpp output), or (3) a **file** path to a `.bin` or `.gguf` adapter. Pass the directory or file path directly. |
+| **No .jsonl files found** | Pass a **directory** that contains `.jsonl` files, or list the files explicitly: `--data file1.jsonl file2.jsonl`. Use `train-data init -o ./data` to create a sample directory. |
+| **Need a base GGUF** | Run `ollama-forge train-resolve-base <base_model_name>` (e.g. `llama3.2`) for suggestions on where to get a GGUF for `--base-gguf`. |

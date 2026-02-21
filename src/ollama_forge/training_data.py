@@ -15,11 +15,7 @@ def _message_content(msg: dict) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            p.get("text", p.get("content", ""))
-            if isinstance(p, dict) else str(p)
-            for p in content
-        )
+        return "".join(p.get("text", p.get("content", "")) if isinstance(p, dict) else str(p) for p in content)
     return ""
 
 
@@ -101,9 +97,7 @@ def validate_line(line: str, line_no: int) -> list[str]:
                 f"Line {line_no}: 'messages' must include at least one user and one assistant message with string content"  # noqa: E501
             )
         return errors
-    errors.append(
-        f"Line {line_no}: expected 'instruction' and 'output' (Alpaca) or 'messages' (e.g. datagen)"
-    )
+    errors.append(f"Line {line_no}: expected 'instruction' and 'output' (Alpaca) or 'messages' (e.g. datagen)")
     return errors
 
 
@@ -160,11 +154,12 @@ def convert_jsonl_to_plain_text(
     output: Path,
     *,
     format_name: str = "llama.cpp",
-) -> None:
+) -> int:
     """
     Convert instruction/input/output JSONL to plain text for trainers.
     Accepts Alpaca format (instruction, output) or messages format (e.g. TeichAI/datagen).
     llama.cpp: Alpaca-style blocks with ### Instruction / ### Input / ### Response.
+    Returns the number of samples written.
     """
     output = Path(output)
     lines_out: list[str] = []
@@ -197,6 +192,7 @@ def convert_jsonl_to_plain_text(
                     )
                     lines_out.append(block)
     output.write_text("\n".join(lines_out), encoding="utf-8")
+    return len(lines_out)
 
 
 def convert_messages_to_alpaca_jsonl(path_in: Path, path_out: Path) -> int:

@@ -88,6 +88,7 @@ def score_refusal_embedding(
     emb_resp = model.encode([response.strip()])
     emb_phrases = model.encode(phrases)
     import numpy as np
+
     sims = np.dot(emb_phrases, emb_resp.T).ravel() / (
         np.linalg.norm(emb_phrases, axis=1) * np.linalg.norm(emb_resp) + 1e-9
     )

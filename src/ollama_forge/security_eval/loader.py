@@ -20,6 +20,7 @@ def _resolve_image_to_base64(image_spec: str, base_dir: Path | None = None) -> s
     if s.startswith(("http://", "https://")):
         try:
             import urllib.request
+
             with urllib.request.urlopen(s, timeout=10) as resp:
                 raw = resp.read()
             return base64.b64encode(raw).decode("ascii")
@@ -87,8 +88,7 @@ def load_prompt_set(path: str | Path) -> list[dict]:
                     "dangerous_tool_names": dangerous_tool_names or [],
                     "image": image_b64,
                     "image_reveal_keywords": (
-                        list(kw) if isinstance((kw := obj.get("image_reveal_keywords")), list)
-                        else [kw] if kw else []
+                        list(kw) if isinstance((kw := obj.get("image_reveal_keywords")), list) else [kw] if kw else []
                     ),
                 }
                 rows.append(row)

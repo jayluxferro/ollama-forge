@@ -99,6 +99,7 @@ def _extract_template_from_config(data: dict) -> str | None:
             for sub in ("template", "content"):
                 if isinstance(first.get(sub), str) and first[sub].strip():
                     return first[sub]
+
     # Fallback: any string value in the config that looks like Jinja (e.g. Gemma or custom keys)
     def find_jinja(obj: object) -> str | None:
         if isinstance(obj, str) and obj.strip() and _looks_like_jinja(obj):
@@ -324,7 +325,9 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
             add(tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False))
     if getattr(tokenizer, "pad_token", None) and tokenizer.pad_token != getattr(tokenizer, "eos_token", None):
         add(tokenizer.pad_token)
-    elif getattr(tokenizer, "pad_token_id", None) is not None and tokenizer.pad_token_id != getattr(tokenizer, "eos_token_id", None):  # noqa: E501
+    elif getattr(tokenizer, "pad_token_id", None) is not None and tokenizer.pad_token_id != getattr(
+        tokenizer, "eos_token_id", None
+    ):  # noqa: E501
         with contextlib.suppress(Exception):
             add(tokenizer.decode([tokenizer.pad_token_id], skip_special_tokens=False))
 

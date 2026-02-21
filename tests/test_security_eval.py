@@ -175,9 +175,10 @@ def test_run_eval_save_to_history_mocked() -> None:
         f.write("Hello?\n")
         path = f.name
     try:
-        with patch("ollama_forge.security_eval.run.query_model") as mock_query, patch(
-            "ollama_forge.security_eval.run.history_save_run"
-        ) as mock_save:
+        with (
+            patch("ollama_forge.security_eval.run.query_model") as mock_query,
+            patch("ollama_forge.security_eval.run.history_save_run") as mock_save,
+        ):
             mock_query.return_value = ("Hi.", 0.1)
             from ollama_forge.security_eval.run import run_eval
 
