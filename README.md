@@ -4,7 +4,7 @@
 
 Get models from Hugging Face, convert them, add adapters, and run them in [Ollama](https://ollama.com) — without needing deep expertise. One place for fetch, convert, adapters, and recipes.
 
-**Install:** `pip install ollama-forge` or `uv tool install ollama-forge` — [PyPI](https://pypi.org/project/ollama-forge/).
+**Install:** `pip install ollama-forge` or `uv tool install ollama-forge` — [PyPI](https://pypi.org/project/ollama-forge/). From this repo: `uv sync` then `uv run ollama-forge`; or `uv tool install .` to use the CLI from anywhere.
 
 **Quick start:**
 ```bash
@@ -50,10 +50,10 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 
 ## Setup (one-time)
 
-- **Python 3.10+**. **Install from PyPI:** `pip install ollama-forge` or `uv tool install ollama-forge` ([PyPI](https://pypi.org/project/ollama-forge/)).
-- **From repo:** `uv sync` then `uv run ollama-forge` (or `uv tool install .` to use `ollama-forge` from anywhere).
+- **Python 3.10+**. **From PyPI:** `pip install ollama-forge` or `uv tool install ollama-forge` ([PyPI](https://pypi.org/project/ollama-forge/)). **From repo:** `uv sync` then `uv run ollama-forge`; use `uv tool install .` from the repo root to put `ollama-forge` on your PATH.
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
 - **Verify:** `ollama-forge check` — see what’s installed. `ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
+- **Optional extras:** `pip install ollama-forge[net]` adds `requests` for HTTP paths (proxy, security-eval, download-lists); `ollama-forge[abliterate]` for abliterate run/proxy (see [Abliterate](wiki/Abliterate.md)).
 - **Optional:** Run Ruff before each commit: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md).
 
 ---
@@ -98,11 +98,11 @@ See [Auto & Plan](wiki/Auto-and-Plan.md).
 uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model
 ollama run my-model
 ```
-Use `--quant Q4_K_M` to pick size. See [Fetch & Convert](wiki/Fetch-and-Convert.md).
+Use `--quant Q4_K_M` to pick size. For gated or private repos, set `HF_TOKEN` or run `huggingface-cli login`. See [Fetch & Convert](wiki/Fetch-and-Convert.md).
 
 **Local GGUF:** `uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model`. Optional `--quantize Q4_K_M` (needs llama.cpp on PATH). See [Quantization](wiki/Quantization.md).
 
-**Recipe (one file):** `uv run ollama-forge build recipe.yaml`. See [Recipes](wiki/Recipes.md) for format and examples.
+**Recipe (one file):** `uv run ollama-forge build recipe.yaml`. See [Recipes](wiki/Recipes.md) for format and examples. Sampling options (`temperature`, `top_p`, `repeat_penalty`) are available on fetch, convert, build, and create-from-base ([Modelfile](wiki/Modelfile.md), [Recipes](wiki/Recipes.md)).
 
 **Adapters:** `adapters search "llama lora"`, then `fetch-adapter <repo> --base <base> --name <name>`, or `retrain --base <base> --adapter <path> --name <name>`. See [Adapters](wiki/Adapters.md).
 
@@ -113,7 +113,7 @@ Use `--quant Q4_K_M` to pick size. See [Fetch & Convert](wiki/Fetch-and-Convert.
 ## Other topics
 
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
-- **Refusal removal (abliterate)** — `abliterate compute-dir`; optional deps: `uv sync --extra abliterate`. [Wiki](wiki/Abliterate.md).
+- **Refusal removal (abliterate)** — `abliterate compute-dir`; optional deps: `uv sync --extra abliterate`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).

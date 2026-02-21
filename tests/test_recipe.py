@@ -101,3 +101,59 @@ def test_load_recipe_file_not_found() -> None:
     """Missing file raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError, match="not found"):
         load_recipe("/nonexistent/recipe.json")
+
+
+def test_load_recipe_unsupported_suffix() -> None:
+    """Unsupported file suffix raises ValueError."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+        f.write("name: m\nbase: x\n")
+        path = f.name
+    try:
+        with pytest.raises(ValueError, match="Unsupported recipe format"):
+            load_recipe(path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_load_recipe_not_dict() -> None:
+    """Recipe that is not a JSON object (e.g. array or string) raises ValueError."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        f.write('[{"name": "m", "base": "x"}]')
+        path = f.name
+    try:
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            load_recipe(path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_load_recipe_yaml_minimal() -> None:
+    """Load minimal YAML recipe with base and optional keys."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("name: my-model\nbase: llama3.2\ntemperature: 0.6\n")
+        path = f.name
+    try:
+        r = load_recipe(path)
+        assert r["name"] == "my-model"
+        assert r["base"] == "llama3.2"
+        assert r["temperature"] == 0.6
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_load_recipe_yaml_hf_repo() -> None:
+    """Load YAML recipe with hf_repo and quant."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yml", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("name: from-hf\nhf_repo: TheBloke/Llama-2-7B-GGUF\nquant: Q4_K_M\n")
+        path = f.name
+    try:
+        r = load_recipe(path)
+        assert r["name"] == "from-hf"
+        assert r["hf_repo"] == "TheBloke/Llama-2-7B-GGUF"
+        assert r.get("quant") == "Q4_K_M"
+    finally:
+        Path(path).unlink(missing_ok=True)

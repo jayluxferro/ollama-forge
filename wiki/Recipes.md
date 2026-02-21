@@ -1,6 +1,6 @@
 # Recipes
 
-Build an Ollama model from a **single YAML or JSON file** with one command: `ollama-forge build recipe.yaml`.
+Build an Ollama model from a **single YAML or JSON file** with one command: `ollama-forge build recipe.yaml`. To check a recipe without building, use `ollama-forge build recipe.yaml --validate-only`.
 
 ---
 

@@ -6,6 +6,7 @@ Ollama does all inference; we only handle correct template formatting and tool s
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -19,16 +20,19 @@ from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any, Iterator
 
+# Tokenizer cache size (configurable via OLLAMA_PROXY_TOKENIZER_CACHE_SIZE for multi-model setups)
+_tokenizer_cache_maxsize = max(1, int(os.environ.get("OLLAMA_PROXY_TOKENIZER_CACHE_SIZE", "4")))
+
 
 def _get_ollama_base() -> str:
-    """Return Ollama base URL from OLLAMA_HOST or default."""
+    """Return Ollama base URL from OLLAMA_PROXY_TARGET / OLLAMA_HOST or default."""
+    from ollama_forge.http_util import normalize_base_url
+
     host = os.environ.get("OLLAMA_PROXY_TARGET") or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
-    if not host.startswith("http"):
-        host = f"http://{host}"
-    return host.rstrip("/")
+    return normalize_base_url(host)
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=_tokenizer_cache_maxsize)
 def _load_tokenizer(checkpoint_dir: str):
     """Load and cache HF tokenizer from checkpoint."""
     from transformers import AutoTokenizer
@@ -88,26 +92,6 @@ def _normalize_message(m: dict) -> dict:
     return out
 
 
-def _convert_tools_to_hf(tools: list[dict] | None) -> list[dict] | None:
-    """Convert Ollama tools format to HF format."""
-    if not tools:
-        return None
-    out = []
-    for t in tools:
-        if t.get("type") != "function":
-            continue
-        fn = t.get("function") or {}
-        out.append({
-            "type": "function",
-            "function": {
-                "name": fn.get("name") or "",
-                "description": fn.get("description") or "",
-                "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-            },
-        })
-    return out if out else None
-
-
 def _extract_json_object(text: str, start: int = 0) -> str | None:
     """Extract a balanced JSON object starting at position start."""
     if start >= len(text) or text[start] != "{":
@@ -149,7 +133,7 @@ def _parse_tool_calls(text: str) -> list[dict] | None:
     ]
     
     # Try marker-based extraction with balanced brace parsing
-    for start_pattern, end_pattern in marker_patterns:
+    for start_pattern, _end_pattern in marker_patterns:
         for match in re.finditer(start_pattern, text, re.IGNORECASE):
             json_start = match.end()
             if json_start < len(text) and text[json_start] == "{":
@@ -161,10 +145,8 @@ def _parse_tool_calls(text: str) -> list[dict] | None:
                             name = data["name"]
                             args = data.get("arguments") or data.get("parameters") or {}
                             if isinstance(args, str):
-                                try:
+                                with contextlib.suppress(json.JSONDecodeError):
                                     args = json.loads(args)
-                                except json.JSONDecodeError:
-                                    pass
                             tool_calls.append({
                                 "type": "function",
                                 "function": {
@@ -191,10 +173,8 @@ def _parse_tool_calls(text: str) -> list[dict] | None:
                     name = data["name"]
                     args = data.get("arguments") or data.get("parameters") or {}
                     if isinstance(args, str):
-                        try:
+                        with contextlib.suppress(json.JSONDecodeError):
                             args = json.loads(args)
-                        except json.JSONDecodeError:
-                            pass
                     tool_calls.append({
                         "type": "function",
                         "function": {
@@ -210,10 +190,8 @@ def _parse_tool_calls(text: str) -> list[dict] | None:
             if isinstance(data, dict) and "name" in data:
                 args = data.get("arguments") or data.get("parameters") or {}
                 if isinstance(args, str):
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError):
                         args = json.loads(args)
-                    except json.JSONDecodeError:
-                        pass
                 tool_calls.append({
                     "type": "function",
                     "function": {
@@ -236,7 +214,9 @@ def format_prompt_with_hf(
     _ensure_chat_template(tokenizer, Path(checkpoint_dir))
     
     hf_messages = [_normalize_message(m) for m in messages]
-    hf_tools = _convert_tools_to_hf(tools)
+    from ollama_forge.chat_util import ollama_tools_to_hf
+
+    hf_tools = ollama_tools_to_hf(tools)
     
     apply_kwargs: dict[str, Any] = {
         "tokenize": False,
@@ -394,7 +374,10 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
         
         checkpoint = _proxy_config.get_checkpoint(model)
         if not checkpoint:
-            self._send_json(400, {"error": f"No checkpoint registered for model {model!r}. Use --checkpoint or register with proxy."})
+            self._send_json(
+                400,
+                {"error": f"No checkpoint registered for model {model!r}. Use --checkpoint or register with proxy."},
+            )
             return
         
         start_time = time.time()
@@ -516,7 +499,7 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
     def _proxy_passthrough(self, method: str):
         """Forward request directly to Ollama."""
         body = self._read_body() if method in ("POST", "PUT", "PATCH") else None
-        headers = {k: v for k, v in self.headers.items()}
+        headers = dict(self.headers.items())
         
         status, resp_headers, resp_body = _forward_to_ollama(
             self.path,
@@ -544,6 +527,11 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
     
     def do_GET(self):
+        if self.path == "/" or self.path == "/api/tags":
+            # Health / tags: return 200 and list of registered models (no Ollama call)
+            models = [{"name": n} for n in _proxy_config.model_checkpoints]
+            self._send_json(200, {"models": models})
+            return
         self._proxy_passthrough("GET")
     
     def do_HEAD(self):
@@ -572,54 +560,65 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 def run_proxy(
-    checkpoint_dir: str,
+    checkpoint_dir: str | None = None,
     model_name: str | None = None,
     host: str = "127.0.0.1",
     port: int = 11436,
     ollama_target: str | None = None,
+    models: list[tuple[str, str]] | None = None,
 ) -> None:
     """
     Run the prompt proxy server.
-    
+
+    Register one model (checkpoint_dir + model_name) or multiple via models list.
+
     Args:
-        checkpoint_dir: Path to abliterated checkpoint (for HF tokenizer)
-        model_name: Model name to intercept (default: derived from checkpoint dir)
+        checkpoint_dir: Path to abliterated checkpoint (single-model mode)
+        model_name: Model name to intercept (single-model mode; default derived from checkpoint dir)
         host: Bind host
         port: Bind port (default 11436 to not conflict with Ollama on 11434)
         ollama_target: Ollama base URL to forward to (default: OLLAMA_HOST or localhost:11434)
+        models: Optional list of (model_name, checkpoint_dir) for multi-model; if set, checkpoint_dir/model_name ignored
     """
-    checkpoint_dir = str(Path(checkpoint_dir).resolve())
-    if not Path(checkpoint_dir).is_dir():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_dir}")
-    
-    if model_name is None:
-        cp = Path(checkpoint_dir)
-        if cp.name == "checkpoint":
-            model_name = cp.parent.name.replace("abliterate-", "")
-        else:
-            model_name = cp.name
-    
-    _proxy_config.add_model(model_name, checkpoint_dir)
-    
+    if models:
+        pairs = [(n, str(Path(p).resolve())) for n, p in models]
+    else:
+        if not checkpoint_dir:
+            raise ValueError("checkpoint_dir or models is required")
+        checkpoint_dir = str(Path(checkpoint_dir).resolve())
+        if not Path(checkpoint_dir).is_dir():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_dir}")
+        if model_name is None:
+            cp = Path(checkpoint_dir)
+            model_name = cp.parent.name.replace("abliterate-", "") if cp.name == "checkpoint" else cp.name
+        pairs = [(model_name, checkpoint_dir)]
+
+    for name, cdir in pairs:
+        if not Path(cdir).is_dir():
+            raise FileNotFoundError(f"Checkpoint not found: {cdir}")
+        _proxy_config.add_model(name, cdir)
+
     if ollama_target:
         os.environ["OLLAMA_PROXY_TARGET"] = ollama_target
-    
-    print(f"Loading tokenizer from {checkpoint_dir}...", file=sys.stderr)
-    try:
-        tokenizer = _load_tokenizer(checkpoint_dir)
-        print(f"Tokenizer loaded: {type(tokenizer).__name__}", file=sys.stderr)
-    except Exception as e:
-        print(f"Warning: Could not pre-load tokenizer: {e}", file=sys.stderr)
-    
+
+    for name, cdir in pairs:
+        print(f"Loading tokenizer for {name!r} from {cdir}...", file=sys.stderr)
+        try:
+            tokenizer = _load_tokenizer(cdir)
+            print(f"  {name}: {type(tokenizer).__name__}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not pre-load tokenizer for {name!r}: {e}", file=sys.stderr)
+
     server = ThreadedHTTPServer((host, port), PromptProxyHandler)
     target = _get_ollama_base()
-    
+
     print(f"Prompt proxy listening on http://{host}:{port}", file=sys.stderr)
-    print(f"  Model: {model_name} -> checkpoint: {checkpoint_dir}", file=sys.stderr)
+    for name, cdir in pairs:
+        print(f"  Model: {name!r} -> {cdir}", file=sys.stderr)
     print(f"  Forwarding to Ollama at: {target}", file=sys.stderr)
     print(f"  Set OLLAMA_HOST=http://{host}:{port} for agents", file=sys.stderr)
     print("", file=sys.stderr)
-    
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:

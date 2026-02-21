@@ -26,6 +26,7 @@ def run_eval(
     system: str | None = None,
     timeout: float = 120.0,
     verbose: bool = True,
+    retries: int = 2,
 ) -> dict:
     """
     Load prompt set, run each prompt against the model, score refusal/compliance/extraction,
@@ -48,14 +49,24 @@ def run_eval(
         if verbose:
             print(f"  [{i + 1}/{len(prompts)}] {category}: ...", file=sys.stderr)
         try:
-            response, duration = query_model(
-                prompt,
-                base_url=base_url,
-                model=model,
-                use_chat=use_chat,
-                system=system,
-                timeout=timeout,
-            )
+            num_attempts = max(0, retries) + 1
+            for attempt in range(num_attempts):
+                try:
+                    response, duration = query_model(
+                        prompt,
+                        base_url=base_url,
+                        model=model,
+                        use_chat=use_chat,
+                        system=system,
+                        timeout=timeout,
+                    )
+                    break
+                except Exception as e:
+                    if attempt == num_attempts - 1:
+                        raise
+                    if verbose:
+                        print(f"    Retry {attempt + 1}/{retries} after: {e}", file=sys.stderr)
+                    time.sleep(1.0 * (attempt + 1))
         except Exception as e:
             results.append(
                 {

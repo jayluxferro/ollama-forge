@@ -1,16 +1,19 @@
 """Tests for abliterate_proxy module (lightweight prompt proxy)."""
 
 import json
+import threading
 
 import pytest
 
 from ollama_forge.abliterate_proxy import (
+    PromptProxyHandler,
     ProxyConfig,
-    _convert_tools_to_hf,
+    ThreadedHTTPServer,
     _get_ollama_base,
     _normalize_message,
     _parse_tool_calls,
 )
+from ollama_forge.chat_util import ollama_tools_to_hf
 
 
 class TestNormalizeMessage:
@@ -82,15 +85,15 @@ class TestNormalizeMessage:
 
 
 class TestConvertToolsToHF:
-    """Tests for _convert_tools_to_hf function."""
+    """Tests for ollama_tools_to_hf (chat_util) used by proxy."""
 
     def test_none_returns_none(self) -> None:
         """None input returns None."""
-        assert _convert_tools_to_hf(None) is None
+        assert ollama_tools_to_hf(None) is None
 
     def test_empty_list_returns_none(self) -> None:
         """Empty list returns None."""
-        assert _convert_tools_to_hf([]) is None
+        assert ollama_tools_to_hf([]) is None
 
     def test_basic_tool_conversion(self) -> None:
         """Basic tool converts correctly."""
@@ -102,7 +105,7 @@ class TestConvertToolsToHF:
                 "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
             },
         }]
-        result = _convert_tools_to_hf(tools)
+        result = ollama_tools_to_hf(tools)
         assert result is not None
         assert len(result) == 1
         assert result[0]["function"]["name"] == "get_weather"
@@ -111,13 +114,13 @@ class TestConvertToolsToHF:
     def test_non_function_type_skipped(self) -> None:
         """Non-function types are skipped."""
         tools = [{"type": "other", "function": {"name": "test"}}]
-        result = _convert_tools_to_hf(tools)
+        result = ollama_tools_to_hf(tools)
         assert result is None
 
     def test_missing_fields_default(self) -> None:
         """Missing fields get defaults."""
         tools = [{"type": "function", "function": {}}]
-        result = _convert_tools_to_hf(tools)
+        result = ollama_tools_to_hf(tools)
         assert result[0]["function"]["name"] == ""
         assert result[0]["function"]["description"] == ""
         assert result[0]["function"]["parameters"] == {"type": "object", "properties": {}}
@@ -269,3 +272,71 @@ class TestGetOllamaBase:
         monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434/")
         monkeypatch.delenv("OLLAMA_PROXY_TARGET", raising=False)
         assert _get_ollama_base() == "http://localhost:11434"
+
+
+class TestProxyUnknownModel:
+    """Test proxy returns 400 when model is not registered."""
+
+    def test_chat_returns_400_for_unknown_model(self) -> None:
+        """POST /api/chat with unregistered model returns 400 and error message."""
+        import urllib.request
+
+        from ollama_forge import abliterate_proxy
+
+        empty_config = ProxyConfig()
+        original = abliterate_proxy._proxy_config
+        abliterate_proxy._proxy_config = empty_config
+        try:
+            server = ThreadedHTTPServer(("127.0.0.1", 0), PromptProxyHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            port = server.server_address[1]
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/chat",
+                    data=json.dumps({"model": "unknown-model", "messages": [{"role": "user", "content": "Hi"}]}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with pytest.raises(urllib.error.HTTPError) as exc_info:
+                    urllib.request.urlopen(req, timeout=2)
+                assert exc_info.value.code == 400
+                body = json.loads(exc_info.value.read().decode())
+                assert "error" in body
+                assert "No checkpoint registered" in body["error"] or "unknown-model" in body["error"]
+            finally:
+                server.shutdown()
+        finally:
+            abliterate_proxy._proxy_config = original
+
+
+class TestProxyHealthEndpoint:
+    """Test proxy GET / and GET /api/tags return 200 and list of registered models."""
+
+    def test_get_api_tags_returns_200_and_models_list(self) -> None:
+        """GET /api/tags returns 200 and JSON with models array."""
+        import urllib.request
+
+        from ollama_forge import abliterate_proxy
+
+        config = ProxyConfig()
+        config.add_model("my-model", "/fake/checkpoint")
+        original = abliterate_proxy._proxy_config
+        abliterate_proxy._proxy_config = config
+        try:
+            server = ThreadedHTTPServer(("127.0.0.1", 0), PromptProxyHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            port = server.server_address[1]
+            try:
+                for path in ("/", "/api/tags"):
+                    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="GET")
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        assert resp.status == 200
+                        body = json.loads(resp.read().decode())
+                        assert "models" in body
+                        assert body["models"] == [{"name": "my-model"}]
+            finally:
+                server.shutdown()
+        finally:
+            abliterate_proxy._proxy_config = original

@@ -1,6 +1,7 @@
 """CLI entrypoint for ollama-forge."""
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from ollama_forge.recipe import load_recipe
 from ollama_forge.run_helpers import (
     check_item,
     get_jsonl_paths_or_exit,
+    ping_ollama,
     print_actionable_error,
     require_ollama,
     run_cmd,
@@ -38,6 +40,7 @@ from ollama_forge.run_helpers import (
 )
 from ollama_forge.training_data import (
     convert_jsonl_to_plain_text,
+    convert_messages_to_alpaca_jsonl,
     validate_training_data_paths,
 )
 
@@ -45,6 +48,17 @@ from ollama_forge.training_data import (
 def _which_quantize() -> str | None:
     """Resolve llama.cpp quantize binary (quantize or llama-quantize)."""
     return shutil.which("quantize") or shutil.which("llama-quantize")
+
+
+def _prompt_for_value(prompt: str, default: str) -> str:
+    """When stdin is a TTY, prompt the user; return default if empty. When not TTY, return default."""
+    if not sys.stdin.isatty():
+        return default
+    try:
+        line = input(prompt).strip()
+        return line if line else default
+    except (EOFError, KeyboardInterrupt):
+        return default
 
 
 def _hf_token_available() -> bool:
@@ -97,10 +111,51 @@ _QUICKSTART_TASK_SYSTEMS: dict[str, str] = {
 }
 
 
+def _verify_adapter_and_base(adapter: str | None, base: str) -> tuple[str | None, list[str] | None]:
+    """Verify adapter dir and base exist; return (error_summary, next_steps) on failure, (None, None) on success."""
+    if adapter:
+        ad = Path(adapter).resolve()
+        if not ad.is_dir():
+            return (
+                f"Adapter path is not a directory: {ad}",
+                [
+                    "Check the adapter path (e.g. from fetch-adapter or training output)",
+                    "Run: ollama-forge create-from-base --base <base> --name <name> --adapter <path>",
+                ],
+            )
+        has_config = (ad / "adapter_config.json").is_file()
+        has_weights = (ad / "adapter_model.safetensors").is_file() or (ad / "adapter_model.bin").is_file()
+        if not has_config and not has_weights:
+            return (
+                f"Adapter directory has no adapter_config.json or adapter_model.*: {ad}",
+                [
+                    "Use a LoRA/PEFT adapter directory (e.g. from fetch-adapter or ollama-forge retrain)",
+                    "Run: ollama-forge fetch-adapter <repo_id> --base <base> --name <name>",
+                ],
+            )
+    base_path = Path(base)
+    if "/" in base or "\\" in base:
+        if not base_path.exists():
+            return (
+                f"Base path does not exist: {base_path.resolve()}",
+                [
+                    "Use an existing base model path or Ollama model name",
+                    "Run: ollama-forge create-from-base --base <path_or_name> --name <name>",
+                ],
+            )
+    return (None, None)
+
+
 def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
+    adapter = getattr(args, "adapter", None)
+    if adapter:
+        err, steps = _verify_adapter_and_base(adapter, args.base)
+        if err:
+            print_actionable_error(err, next_steps=steps)
+            return 1
     content = build_modelfile(
         args.base,
         system=args.system,
@@ -108,7 +163,7 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
         num_ctx=args.num_ctx,
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
-        adapter=args.adapter,
+        adapter=adapter,
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
@@ -148,6 +203,28 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
 
 def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Download a GGUF from Hugging Face and create an Ollama model (one command)."""
+    repo_id = getattr(args, "repo_id", None)
+    name = getattr(args, "name", None)
+    if repo_id is None or name is None:
+        if sys.stdin.isatty():
+            if repo_id is None:
+                repo_id = _prompt_for_value(
+                    "Repo ID [TheBloke/Llama-2-7B-GGUF]: ",
+                    "TheBloke/Llama-2-7B-GGUF",
+                )
+            if name is None:
+                name = _prompt_for_value("Model name [my-model]: ", "my-model")
+        if repo_id is None or name is None:
+            print_actionable_error(
+                "repo_id and --name are required",
+                next_steps=[
+                    "Run: ollama-forge fetch <repo_id> --name <name>",
+                    "Or run interactively (from a TTY) to be prompted for missing values",
+                ],
+            )
+            return 1
+        args.repo_id = repo_id
+        args.name = name
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
@@ -172,7 +249,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             chosen = pick_one_gguf(gguf_files, prefer_quant=getattr(args, "quant", None))
             if len(gguf_files) > 1:
                 print(
-                    f"Multiple .gguf files found; using {chosen!r}. Use --gguf-file <filename> to pick another.",
+                    f"We auto-picked {chosen!r}; use --gguf-file <filename> to override.",
                     file=sys.stderr,
                 )
             gguf_path = download_gguf(args.repo_id, chosen, revision=args.revision)
@@ -592,6 +669,29 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
 def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Download an adapter from Hugging Face and create an Ollama model (base + adapter)."""
+    repo_id = getattr(args, "repo_id", None)
+    base = getattr(args, "base", None)
+    name = getattr(args, "name", None)
+    if repo_id is None or base is None or name is None:
+        if sys.stdin.isatty():
+            if repo_id is None:
+                repo_id = _prompt_for_value("Adapter repo ID (e.g. user/my-lora): ", "")
+            if base is None:
+                base = _prompt_for_value("Base model name or path: ", "llama3.2")
+            if name is None:
+                name = _prompt_for_value("Output model name [my-adapter]: ", "my-adapter")
+        if not repo_id or not base or not name:
+            print_actionable_error(
+                "repo_id, --base, and --name are required",
+                next_steps=[
+                    "Run: ollama-forge fetch-adapter <repo_id> --base <base> --name <name>",
+                    "Or run interactively (from a TTY) to be prompted for missing values",
+                ],
+            )
+            return 1
+        args.repo_id = repo_id
+        args.base = base
+        args.name = name
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
@@ -692,6 +792,13 @@ def _cmd_validate_training_data(parser: argparse.ArgumentParser, args: argparse.
         return 0
     for msg in errors:
         print(msg, file=sys.stderr)
+    print_actionable_error(
+        "validation failed",
+        next_steps=[
+            "Fix the errors above (invalid JSONL lines or missing fields)",
+            "Run: ollama-forge validate-training-data <path>",
+        ],
+    )
     return 1
 
 
@@ -710,7 +817,13 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
     if not ok:
         for msg in errors:
             print(msg, file=sys.stderr)
-        print("Fix errors above before preparing.", file=sys.stderr)
+        print_actionable_error(
+            "validation failed; fix errors before preparing",
+            next_steps=[
+                "Run: ollama-forge validate-training-data <path> to see errors",
+                "Fix invalid JSONL lines or missing fields, then re-run prepare-training-data",
+            ],
+        )
         return 1
     out = Path(args.output)
     try:
@@ -733,6 +846,37 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
     return 0
 
 
+def _cmd_convert_training_data_format(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> int:
+    """Convert JSONL from messages format (e.g. TeichAI/datagen) to Alpaca-style instruction/output."""
+    input_spec = args.input
+    if isinstance(input_spec, list):
+        input_spec = input_spec[0] if input_spec else ""
+    path_in = Path(input_spec)
+    if not path_in.is_file():
+        print_actionable_error(
+            f"Input file not found: {path_in}",
+            next_steps=[
+                "Pass a .jsonl file (e.g. from datagen --out dataset.jsonl)",
+                "Run: ollama-forge convert-training-data-format <input.jsonl> -o <output.jsonl>",
+            ],
+        )
+        return 1
+    path_out = Path(args.output)
+    try:
+        count = convert_messages_to_alpaca_jsonl(path_in, path_out)
+    except OSError as e:
+        print_actionable_error(
+            "failed to write output file",
+            cause=str(e),
+            next_steps=["Check output path and permissions"],
+        )
+        return 1
+    print(f"Wrote {count} Alpaca-style record(s) to {path_out}")
+    return 0
+
+
 def _cmd_train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Generate a training script: validate → prepare data → trainer → retrain."""
     paths = get_jsonl_paths_or_exit(
@@ -752,10 +896,7 @@ def _cmd_train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     name = args.name
     base_gguf = getattr(args, "base_gguf", None)
     run_trainer = getattr(args, "run_trainer", False)
-    if base_gguf:
-        base_gguf_var = f'BASE_GGUF="{base_gguf}"'
-    else:
-        base_gguf_var = 'BASE_GGUF=""  # set to your base .gguf path'
+    base_gguf_var = f'BASE_GGUF="{base_gguf}"' if base_gguf else 'BASE_GGUF=""  # set to your base .gguf path'
     run_finetune_block = ""
     if base_gguf and run_trainer:
         run_finetune_block = """
@@ -805,6 +946,94 @@ echo "Then: ollama run $NAME"
         return 0
     print(script)
     return 0
+
+
+def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run the full pipeline: validate → prepare → (finetune if available) → retrain."""
+    paths = get_jsonl_paths_or_exit(
+        args.data,
+        error_msg="Error: no .jsonl files found at --data.",
+        next_steps=["Pass one or more .jsonl files or a directory containing .jsonl"],
+    )
+    if paths is None:
+        return 1
+    ok, errors, _ = validate_training_data_paths(paths)
+    if not ok:
+        for msg in errors:
+            print(msg, file=sys.stderr)
+        print_actionable_error(
+            "validation failed; fix errors before running pipeline",
+            next_steps=[
+                "Run: ollama-forge validate-training-data <path>",
+                "Fix invalid JSONL lines or missing fields, then re-run train-run",
+            ],
+        )
+        return 1
+    data_spec = args.data[0] if isinstance(args.data, list) and args.data else args.data
+    if isinstance(data_spec, list):
+        data_spec = data_spec[0]
+    first_path = Path(data_spec).resolve()
+    prepared_path = Path(getattr(args, "prepared_output", None) or "train_prepared.txt")
+    adapter_dir = Path(getattr(args, "adapter_output", None) or "adapter_out")
+    base = args.base
+    name = args.name
+    base_gguf = getattr(args, "base_gguf", None)
+    # Step 2: prepare
+    try:
+        convert_jsonl_to_plain_text(paths, prepared_path, format_name=getattr(args, "format", "llama.cpp"))
+    except OSError as e:
+        print_actionable_error(
+            "failed to write prepared data",
+            cause=str(e),
+            next_steps=["Use --prepared-output <path> or fix permissions"],
+        )
+        return 1
+    print(f"Prepared data → {prepared_path}", file=sys.stderr)
+    # Step 3: finetune (if base_gguf and finetune on PATH)
+    ran_finetune = False
+    if base_gguf and Path(base_gguf).is_file():
+        finetune_bin = shutil.which("finetune") or shutil.which("llama-finetune")
+        if finetune_bin:
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                finetune_bin,
+                "--train-data", str(prepared_path.resolve()),
+                "--sample-start", "### Instruction",
+                "--model-base", str(Path(base_gguf).resolve()),
+                "--lora-out", str(adapter_dir.resolve()),
+            ]
+            print("Running finetune...", file=sys.stderr)
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                print_actionable_error(
+                    "finetune failed",
+                    next_steps=[
+                        "Check --base-gguf and training data",
+                        "Run finetune manually and then: ollama-forge retrain --base <base> --adapter <dir> --name <name>",
+                    ],
+                )
+                return 1
+            ran_finetune = True
+        else:
+            print("finetune not on PATH; skipping. Run: ollama-forge setup-llama-cpp", file=sys.stderr)
+    if not ran_finetune:
+        intro = "Skipped finetune (need --base-gguf and finetune on PATH). After training:"
+        cmd = f"ollama-forge retrain --base {base} --adapter {adapter_dir} --name {name}"
+        print(intro, cmd, file=sys.stderr)
+        return 0
+    # Step 4: retrain (create-from-base with adapter)
+    fake = argparse.Namespace(
+        base=base,
+        name=name,
+        adapter=str(adapter_dir.resolve()),
+        system=getattr(args, "system", None),
+        temperature=getattr(args, "temperature", None),
+        num_ctx=getattr(args, "num_ctx", None),
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
+        out_modelfile=getattr(args, "out_modelfile", None),
+    )
+    return _cmd_create_from_base(parser, fake)
 
 
 def _cmd_retrain(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -879,6 +1108,10 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             ],
         )
         return 1
+    if getattr(args, "validate_only", False):
+        source = "base" if "base" in recipe else ("gguf" if "gguf" in recipe else "hf_repo")
+        print(f"Recipe valid: name={recipe['name']!r}, source={source}")
+        return 0
     out_modelfile = getattr(args, "out_modelfile", None)
     if "hf_repo" in recipe:
         return _cmd_fetch(parser, _namespace_for_fetch(recipe, out_modelfile))
@@ -897,8 +1130,38 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     return _cmd_create_from_base(parser, _namespace_for_create_from_base(recipe, out_modelfile))
 
 
+def _cmd_validate_recipe(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Validate a recipe file (schema and paths) without building."""
+    try:
+        recipe = load_recipe(args.recipe)
+    except FileNotFoundError as e:
+        print_actionable_error(
+            str(e),
+            next_steps=["Check recipe path and retry: ollama-forge validate-recipe <recipe.yaml>"],
+        )
+        return 1
+    except (ValueError, ImportError) as e:
+        print_actionable_error(
+            "invalid recipe",
+            cause=str(e),
+            next_steps=[
+                "Ensure recipe has name and exactly one of base/gguf/hf_repo",
+                "See docs/RECIPE.md and wiki/Recipes.md",
+            ],
+        )
+        return 1
+    source = "base" if "base" in recipe else ("gguf" if "gguf" in recipe else "hf_repo")
+    print(f"Recipe valid: name={recipe['name']!r}, source={source}")
+    return 0
+
+
 def _cmd_check(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Verify ollama, HF, optional deps, and llama.cpp; print what's missing."""
+    if getattr(args, "json", False):
+        status = _env_status()
+        print(json.dumps(status))
+        ok = status["ollama"] and status["huggingface_hub"] and status["pyyaml"]
+        return 0 if ok else 1
     ok = True
     ok = (
         check_item(
@@ -994,6 +1257,10 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     """Diagnose environment and optionally apply common fixes."""
     status = _env_status()
     json_mode = bool(getattr(args, "json", False))
+    if json_mode and not getattr(args, "fix", False):
+        print(json.dumps(status))
+        ok = status["ollama"] and status["huggingface_hub"] and status["pyyaml"]
+        return 0 if ok else 1
     if not json_mode:
         print("Doctor report:")
         check_item(
@@ -1080,6 +1347,8 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
     final_status = _env_status()
     ok = final_status["ollama"] and final_status["huggingface_hub"] and final_status["pyyaml"]
+    if json_mode:
+        print(json.dumps(final_status))
     return 0 if ok else 1
 
 
@@ -1139,7 +1408,11 @@ def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespa
     try:
         models = list(api.list_models(search=query, limit=limit))
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "adapter search failed",
+            cause=str(e),
+            next_steps=["Check network and HF access", "Try: ollama-forge adapters search '<query>' --limit 10"],
+        )
         return 1
     if not models:
         print("No adapters found. Try another search (e.g. 'llama lora', 'mistral adapter').")
@@ -1286,7 +1559,14 @@ def _cmd_hf_cache_ls(parser: argparse.ArgumentParser, args: argparse.Namespace) 
     try:
         cache_info = scan_cache_dir()
     except Exception as e:
-        print(f"Error scanning cache: {e}", file=sys.stderr)
+        print_actionable_error(
+            "failed to scan Hugging Face cache",
+            cause=str(e),
+            next_steps=[
+                "Check that ~/.cache/huggingface/hub exists and is readable",
+                "Run: ollama-forge hf-cache ls",
+            ],
+        )
         return 1
     verbosity = 1 if getattr(args, "revisions", False) else 0
     print(cache_info.export_as_table(verbosity=verbosity))
@@ -1308,14 +1588,27 @@ def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) 
         repo_ids = [repo_ids]
     repo_ids = repo_ids or []
     if not repo_ids:
-        print("Error: provide at least one repo_id (e.g. TheBloke/Llama-2-7B-GGUF)", file=sys.stderr)
+        print_actionable_error(
+            "no repo_id provided",
+            next_steps=[
+                "Provide at least one repo id: ollama-forge hf-cache rm <repo_id> [repo_id ...]",
+                "Example: ollama-forge hf-cache rm TheBloke/Llama-2-7B-GGUF",
+            ],
+        )
         return 1
     dry_run = getattr(args, "dry_run", False)
     yes = getattr(args, "yes", False)
     try:
         cache_info = scan_cache_dir()
     except Exception as e:
-        print(f"Error scanning cache: {e}", file=sys.stderr)
+        print_actionable_error(
+            "failed to scan Hugging Face cache",
+            cause=str(e),
+            next_steps=[
+                "Check that ~/.cache/huggingface/hub exists and is readable",
+                "Run: ollama-forge hf-cache ls",
+            ],
+        )
         return 1
     revisions_to_delete: list[str] = []
     for repo in cache_info.repos:
@@ -1324,7 +1617,13 @@ def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) 
             for rev in repo.revisions:
                 revisions_to_delete.append(rev.commit_hash)
     if not revisions_to_delete:
-        print("No matching repos found in cache.", file=sys.stderr)
+        print_actionable_error(
+            "no matching repos found in cache",
+            next_steps=[
+                "Run: ollama-forge hf-cache ls (with --revisions) to see cached repo ids",
+                "Use exact repo_id(s) from that list, e.g. TheBloke/Llama-2-7B-GGUF",
+            ],
+        )
         return 1
     strategy = cache_info.delete_revisions(*revisions_to_delete)
     print(f"About to free {strategy.expected_freed_size_str}.", file=sys.stderr)
@@ -1349,11 +1648,21 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
     try:
         from ollama_forge.security_eval.run import run_eval
     except ImportError as e:
-        print(f"Error: security-eval failed to import: {e}", file=sys.stderr)
+        print_actionable_error(
+            "security-eval failed to import",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra security-eval", "Then: ollama-forge security-eval run <prompt_set>"],
+        )
         return 1
     prompt_set = getattr(args, "prompt_set", None)
     if not prompt_set:
-        print("Error: prompt_set path required", file=sys.stderr)
+        print_actionable_error(
+            "prompt_set path required",
+            next_steps=[
+                "Run: ollama-forge security-eval run <path_to_.txt_or_.jsonl> [--model <name>]",
+                "Example: ollama-forge security-eval run ./prompts.txt --model llama3.2",
+            ],
+        )
         return 1
     base_url = getattr(args, "base_url", None) or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
     model = getattr(args, "model", "llama3.2")
@@ -1363,6 +1672,16 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
     use_chat = not getattr(args, "no_chat", False)
     timeout = getattr(args, "timeout", 120.0)
     verbose = not getattr(args, "quiet", False)
+    if not getattr(args, "no_check_ollama", False) and not ping_ollama(base_url):
+        print_actionable_error(
+            "Ollama (or serve) is not reachable at " + base_url,
+            next_steps=[
+                "Start Ollama: ollama serve (or start abliterate serve and set OLLAMA_HOST)",
+                "Or set --base-url to your Ollama/serve URL",
+                "Or skip this check: ollama-forge security-eval run <path> --no-check-ollama",
+            ],
+        )
+        return 1
     try:
         run_meta = run_eval(
             prompt_set,
@@ -1375,15 +1694,28 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
             system=system,
             timeout=timeout,
             verbose=verbose,
+            retries=getattr(args, "retries", 2),
         )
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "prompt set file not found",
+            cause=str(e),
+            next_steps=["Check the path to your .txt or .jsonl prompt set", "Run: ollama-forge security-eval run <path> --help"],
+        )
         return 1
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "invalid prompt set or options",
+            cause=str(e),
+            next_steps=["Check prompt set format (one prompt per line or JSONL)", "Run: ollama-forge security-eval run --help"],
+        )
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "security-eval run failed",
+            cause=str(e),
+            next_steps=["Ensure Ollama is running (ollama serve) or set --base-url", "Run: ollama-forge security-eval run --help"],
+        )
         return 1
     kpis = run_meta.get("kpis") or {}
     print("\n--- KPIs ---", file=sys.stderr)
@@ -1408,7 +1740,13 @@ def _cmd_security_eval_ui(parser: argparse.ArgumentParser, args: argparse.Namesp
     app_dir = Path(__file__).resolve().parent
     app_path = app_dir / "security_eval" / "app.py"
     if not app_path.exists():
-        print(f"Error: App not found at {app_path}", file=sys.stderr)
+        print_actionable_error(
+            f"security-eval UI app not found at {app_path}",
+            next_steps=[
+                "Ensure the security_eval package is installed with app.py",
+                "Run: uv sync --extra security-eval-ui",
+            ],
+        )
         return 1
     try:
         subprocess.run(
@@ -1416,9 +1754,12 @@ def _cmd_security_eval_ui(parser: argparse.ArgumentParser, args: argparse.Namesp
             check=False,
         )
     except FileNotFoundError:
-        print(
-            "Error: Streamlit not found. Run: uv sync --extra security-eval-ui",
-            file=sys.stderr,
+        print_actionable_error(
+            "Streamlit not found",
+            next_steps=[
+                "Run: uv sync --extra security-eval-ui",
+                "Then: ollama-forge security-eval ui",
+            ],
         )
         return 1
     return 0
@@ -1587,13 +1928,18 @@ ABLITERATE_REFUSAL_DIR_HARMLESS = (
 )
 
 
-def _abliterate_fetch_json_instructions(urls: tuple[str, ...]) -> list[str]:
-    """Fetch JSON arrays from URLs; each item must have 'instruction' key. Return deduped list."""
+def _abliterate_fetch_url(url: str, timeout: int = 60) -> bytes:
+    """Fetch URL and return raw bytes. Used for parallel download."""
+    with urlopen(url, timeout=timeout) as r:
+        return r.read()
+
+
+def _abliterate_fetch_json_instructions_from_bytes(raw_list: list[bytes]) -> list[str]:
+    """Parse JSON arrays from raw bytes; each item must have 'instruction' key. Return deduped list."""
     instructions: list[str] = []
     seen: set[str] = set()
-    for url in urls:
-        with urlopen(url, timeout=90) as r:
-            data = json.loads(r.read().decode("utf-8"))
+    for raw in raw_list:
+        data = json.loads(raw.decode("utf-8"))
         for item in data:
             if isinstance(item, dict) and "instruction" in item:
                 s = (item["instruction"] or "").strip()
@@ -1606,39 +1952,42 @@ def _abliterate_fetch_json_instructions(urls: tuple[str, ...]) -> list[str]:
 def _abliterate_merge_harmful_sources() -> list[str]:
     """Fetch and merge all harmful sources (Sumandora, HarmBench, JBB, AdvBench, refusal_direction)."""
     import csv
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    with urlopen(ABLITERATE_HARMFUL_URL, timeout=60) as r:
-        sumandora = r.read().decode("utf-8")
+    urls_with_timeout: list[tuple[str, int]] = [
+        (ABLITERATE_HARMFUL_URL, 60),
+        (ABLITERATE_HARMBENCH_URL, 60),
+        (ABLITERATE_JBB_HARMFUL_URL, 60),
+        (ABLITERATE_ADVBENCH_URL, 60),
+    ]
+    for _ in ABLITERATE_REFUSAL_DIR_HARMFUL:
+        urls_with_timeout.append((_, 90))
+    results: dict[str, bytes] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(urls_with_timeout))) as executor:
+        futures = {executor.submit(_abliterate_fetch_url, u, t): u for u, t in urls_with_timeout}
+        for fut in as_completed(futures):
+            url = futures[fut]
+            with contextlib.suppress(Exception):
+                results[url] = fut.result()
+    sumandora = results.get(ABLITERATE_HARMFUL_URL, b"").decode("utf-8")
     lines = [s.strip() for s in sumandora.splitlines() if s.strip() and not s.strip().startswith("#")]
     seen = set(lines)
-    with urlopen(ABLITERATE_HARMBENCH_URL, timeout=60) as r:
-        reader = csv.reader(r.read().decode("utf-8").splitlines())
-        next(reader)
+    for url, key in [
+        (ABLITERATE_HARMBENCH_URL, 0),
+        (ABLITERATE_JBB_HARMFUL_URL, 1),
+        (ABLITERATE_ADVBENCH_URL, 0),
+    ]:
+        raw = results.get(url, b"")
+        reader = csv.reader(raw.decode("utf-8").splitlines())
+        next(reader, None)
         for row in reader:
-            if row:
-                b = row[0].strip()
+            if len(row) > key:
+                b = row[key].strip()
                 if b and b not in seen:
                     seen.add(b)
                     lines.append(b)
-    with urlopen(ABLITERATE_JBB_HARMFUL_URL, timeout=60) as r:
-        reader = csv.reader(r.read().decode("utf-8").splitlines())
-        next(reader)
-        for row in reader:
-            if len(row) > 1:
-                b = row[1].strip()  # Goal column
-                if b and b not in seen:
-                    seen.add(b)
-                    lines.append(b)
-    with urlopen(ABLITERATE_ADVBENCH_URL, timeout=60) as r:
-        reader = csv.reader(r.read().decode("utf-8").splitlines())
-        next(reader)
-        for row in reader:
-            if row:
-                b = row[0].strip()  # goal column
-                if b and b not in seen:
-                    seen.add(b)
-                    lines.append(b)
-    for instr in _abliterate_fetch_json_instructions(ABLITERATE_REFUSAL_DIR_HARMFUL):
+    json_bytes = [results.get(u, b"") for u in ABLITERATE_REFUSAL_DIR_HARMFUL]
+    for instr in _abliterate_fetch_json_instructions_from_bytes(json_bytes):
         if instr not in seen:
             seen.add(instr)
             lines.append(instr)
@@ -1648,20 +1997,35 @@ def _abliterate_merge_harmful_sources() -> list[str]:
 def _abliterate_merge_harmless_sources() -> list[str]:
     """Fetch and merge harmless sources (Sumandora + JBB benign + refusal_direction)."""
     import csv
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    with urlopen(ABLITERATE_HARMLESS_URL, timeout=60) as r:
-        lines = [s.strip() for s in r.read().decode("utf-8").splitlines() if s.strip()]
+    urls_with_timeout: list[tuple[str, int]] = [
+        (ABLITERATE_HARMLESS_URL, 60),
+        (ABLITERATE_JBB_BENIGN_URL, 60),
+    ]
+    for u in ABLITERATE_REFUSAL_DIR_HARMLESS:
+        urls_with_timeout.append((u, 90))
+    results: dict[str, bytes] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(urls_with_timeout))) as executor:
+        futures = {executor.submit(_abliterate_fetch_url, u, t): u for u, t in urls_with_timeout}
+        for fut in as_completed(futures):
+            url = futures[fut]
+            with contextlib.suppress(Exception):
+                results[url] = fut.result()
+    raw_harmless = results.get(ABLITERATE_HARMLESS_URL, b"")
+    lines = [s.strip() for s in raw_harmless.decode("utf-8").splitlines() if s.strip()]
     seen = set(lines)
-    with urlopen(ABLITERATE_JBB_BENIGN_URL, timeout=60) as r:
-        reader = csv.reader(r.read().decode("utf-8").splitlines())
-        next(reader)
-        for row in reader:
-            if len(row) > 1:
-                b = row[1].strip()  # Goal column
-                if b and b not in seen:
-                    seen.add(b)
-                    lines.append(b)
-    for instr in _abliterate_fetch_json_instructions(ABLITERATE_REFUSAL_DIR_HARMLESS):
+    raw_jbb = results.get(ABLITERATE_JBB_BENIGN_URL, b"")
+    reader = csv.reader(raw_jbb.decode("utf-8").splitlines())
+    next(reader, None)
+    for row in reader:
+        if len(row) > 1:
+            b = row[1].strip()
+            if b and b not in seen:
+                seen.add(b)
+                lines.append(b)
+    json_bytes = [results.get(u, b"") for u in ABLITERATE_REFUSAL_DIR_HARMLESS]
+    for instr in _abliterate_fetch_json_instructions_from_bytes(json_bytes):
         if instr not in seen:
             seen.add(instr)
             lines.append(instr)
@@ -1680,7 +2044,14 @@ def _cmd_abliterate_download_lists(parser: argparse.ArgumentParser, args: argpar
         harmful_path.write_text("\n".join(harmful_lines) + "\n", encoding="utf-8")
         harmless_path.write_text("\n".join(harmless_lines) + "\n", encoding="utf-8")
     except Exception as e:
-        print(f"Error downloading lists: {e}", file=sys.stderr)
+        print_actionable_error(
+            "failed to download harmful/harmless lists",
+            cause=str(e),
+            next_steps=[
+                "Check network access and list URLs in ollama_forge/data/",
+                "Or pass --harmful <path> --harmless <path> to use local files",
+            ],
+        )
         return 1
     print(f"Saved harmful list:  {harmful_path} ({len(harmful_lines)} instructions)")
     print(f"Saved harmless list: {harmless_path} ({len(harmless_lines)} instructions)")
@@ -1704,15 +2075,18 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         from ollama_forge.abliterate import run_chat
         from ollama_forge.abliterate_serve import chat_via_serve
     except ImportError:
-        print(
-            "Error: abliterate chat requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate chat requires optional deps",
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate chat --name <name>"],
         )
         return 1
     name = getattr(args, "name", None)
     checkpoint_arg = getattr(args, "checkpoint", None)
     if name and checkpoint_arg:
-        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        print_actionable_error(
+            "use either --name or --checkpoint, not both",
+            next_steps=["Run: ollama-forge abliterate chat --name <name> OR --checkpoint <dir>"],
+        )
         return 1
     if name:
         checkpoint = (Path(_abliterate_output_dir_from_name(name)) / "checkpoint").resolve()
@@ -1721,15 +2095,23 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         checkpoint = Path(checkpoint_arg).resolve()
         model_name = None
     else:
-        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        print_actionable_error(
+            "pass --name <model_name> (from abliterate run) or --checkpoint DIR",
+            next_steps=[
+                "Run: ollama-forge abliterate chat --name <name> (after abliterate run)",
+                "Or: ollama-forge abliterate chat --checkpoint <path_to_checkpoint>",
+            ],
+        )
         return 1
     if not checkpoint.is_dir():
-        print(
-            f"Error: checkpoint dir not found: {checkpoint}",
-            file=sys.stderr,
+        print_actionable_error(
+            f"checkpoint dir not found: {checkpoint}",
+            next_steps=(
+                ["Run abliterate run first with that --name (checkpoint is saved by default)."]
+                if name
+                else ["Ensure --checkpoint points to a directory containing the abliterated checkpoint."]
+            ),
         )
-        if name:
-            print("  Run abliterate run first with that --name (checkpoint is saved by default).", file=sys.stderr)
         return 1
 
     # If we have a model name and user didn't pass --no-serve, try existing abliterate serve first
@@ -1752,13 +2134,16 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
             device="cpu" if getattr(args, "device", None) == "cpu" else None,
         )
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "checkpoint or resource not found",
+            cause=str(e),
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate chat --checkpoint <dir>"],
+        )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        print(f"Error: {msg}", file=sys.stderr)
-        if "histogram_mps" in msg or "not implemented" in msg.lower():
-            print("Try: ollama-forge abliterate chat --name <name> --device cpu", file=sys.stderr)
+        next_steps = ["Run: ollama-forge abliterate chat --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]
+        print_actionable_error("abliterate chat failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
 
@@ -1768,15 +2153,147 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
     try:
         from ollama_forge.abliterate_proxy import run_proxy
     except ImportError:
-        print(
-            "Error: abliterate proxy requires transformers. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate proxy requires transformers",
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate proxy --name <name>"],
         )
         return 1
+    config_file = getattr(args, "config", None)
+    add_models = getattr(args, "add_model", None) or []
     name = getattr(args, "name", None)
     checkpoint_arg = getattr(args, "checkpoint", None)
+    if (config_file or add_models) and (name or checkpoint_arg):
+        print_actionable_error(
+            "use either --config/--add-model (multi-model) or --name/--checkpoint (single), not both",
+            next_steps=[
+                "Single: ollama-forge abliterate proxy --name <name>",
+                "Multi: ollama-forge abliterate proxy --config <file> or --add-model name:path [--add-model ...]",
+            ],
+        )
+        return 1
+    models_list: list[tuple[str, str]] = []
+    if config_file:
+        config_path = Path(config_file)
+        if not config_path.is_file():
+            print_actionable_error(
+                f"Config file not found: {config_path}",
+                next_steps=["Use a YAML file with 'models: [{name: <name>, checkpoint: <path>}, ...]'", "Run: ollama-forge abliterate proxy --help"],
+            )
+            return 1
+        try:
+            import yaml
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            print_actionable_error(
+                "Failed to load proxy config YAML",
+                cause=str(e),
+                next_steps=["Use valid YAML with 'models: [{name: <name>, checkpoint: <path>}, ...]'"],
+            )
+            return 1
+        for entry in data.get("models") or []:
+            if isinstance(entry, dict):
+                n, p = entry.get("name"), entry.get("checkpoint")
+                if n and p:
+                    models_list.append((str(n).strip(), str(p).strip()))
+        if not models_list:
+            print_actionable_error(
+                "Config file has no valid 'models' entries (expect name and checkpoint per entry)",
+                next_steps=["Example YAML: models: [{name: my-model, checkpoint: ./abliterate-my/checkpoint}]"],
+            )
+            return 1
+    if models_list:
+        if not getattr(args, "no_check_ollama", False):
+            ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            if not ping_ollama(ollama_target):
+                print_actionable_error(
+                    "Ollama is not reachable at " + ollama_target,
+                    next_steps=[
+                        "Start Ollama: ollama serve",
+                        "Or set OLLAMA_HOST / --ollama-target to your Ollama URL",
+                        "Or skip this check: ollama-forge abliterate proxy ... --no-check-ollama",
+                    ],
+                )
+                return 1
+        try:
+            run_proxy(
+                host=getattr(args, "host", "127.0.0.1"),
+                port=getattr(args, "port", 11436),
+                ollama_target=getattr(args, "ollama_target", None),
+                models=models_list,
+            )
+        except FileNotFoundError as e:
+            print_actionable_error(
+                "checkpoint or resource not found",
+                cause=str(e),
+                next_steps=["Check paths in --config or --add-model", "Run: ollama-forge abliterate proxy --help"],
+            )
+            return 1
+        except Exception as e:
+            print_actionable_error(
+                "abliterate proxy failed",
+                cause=str(e),
+                next_steps=["Check the checkpoint paths", "Run: ollama-forge abliterate proxy --help"],
+            )
+            return 1
+        return 0
+    if add_models:
+        # Multi-model: parse "name:path" pairs
+        for spec in add_models:
+            if ":" not in spec:
+                print_actionable_error(
+                    "each --add-model must be 'name:path'",
+                    next_steps=["Example: ollama-forge abliterate proxy --add-model my-model:/path/to/checkpoint"],
+                )
+                return 1
+            n, p = spec.split(":", 1)
+            n, p = n.strip(), p.strip()
+            if not n or not p:
+                print_actionable_error(
+                    "each --add-model must be 'name:path' (non-empty name and path)",
+                    next_steps=["Example: ollama-forge abliterate proxy --add-model my-model:/path/to/checkpoint"],
+                )
+                return 1
+            models_list.append((n, p))
+        if not getattr(args, "no_check_ollama", False):
+            ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            if not ping_ollama(ollama_target):
+                print_actionable_error(
+                    "Ollama is not reachable at " + ollama_target,
+                    next_steps=[
+                        "Start Ollama: ollama serve",
+                        "Or set OLLAMA_HOST / --ollama-target to your Ollama URL",
+                        "Or skip this check: ollama-forge abliterate proxy ... --no-check-ollama",
+                    ],
+                )
+                return 1
+        try:
+            run_proxy(
+                host=getattr(args, "host", "127.0.0.1"),
+                port=getattr(args, "port", 11436),
+                ollama_target=getattr(args, "ollama_target", None),
+                models=models_list,
+            )
+        except FileNotFoundError as e:
+            print_actionable_error(
+                "checkpoint or resource not found",
+                cause=str(e),
+                next_steps=["Check each path in --add-model name:path", "Run: ollama-forge abliterate proxy --help"],
+            )
+            return 1
+        except Exception as e:
+            print_actionable_error(
+                "abliterate proxy failed",
+                cause=str(e),
+                next_steps=["Check the checkpoint paths", "Run: ollama-forge abliterate proxy --help"],
+            )
+            return 1
+        return 0
+    # Single-model mode
     if name and checkpoint_arg:
-        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        print_actionable_error(
+            "use either --name or --checkpoint, not both",
+            next_steps=["Run: ollama-forge abliterate proxy --name <name> OR --checkpoint <dir>"],
+        )
         return 1
     if name:
         checkpoint = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
@@ -1789,13 +2306,36 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
             else (checkpoint.parent.name if checkpoint.parent else "abliterated")
         )
     else:
-        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        print_actionable_error(
+            "pass --name <model_name> (from abliterate run) or --checkpoint DIR or --add-model name:path",
+            next_steps=[
+                "Run: ollama-forge abliterate proxy --name <name> (after abliterate run)",
+                "Or: ollama-forge abliterate proxy --checkpoint <path_to_checkpoint>",
+                "Or: ollama-forge abliterate proxy --add-model name:path [--add-model name2:path2 ...]",
+            ],
+        )
         return 1
     if not checkpoint.is_dir():
-        print(f"Error: checkpoint dir not found: {checkpoint}", file=sys.stderr)
-        if name:
-            print("  Run abliterate run first with that --name.", file=sys.stderr)
+        print_actionable_error(
+            f"checkpoint dir not found: {checkpoint}",
+            next_steps=(
+                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]
+            ),
+        )
         return 1
+    # Optional: fail fast if Ollama (proxy target) is not reachable
+    if not getattr(args, "no_check_ollama", False):
+        ollama_target = getattr(args, "ollama_target", None) or os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        if not ping_ollama(ollama_target):
+            print_actionable_error(
+                "Ollama is not reachable at " + ollama_target,
+                next_steps=[
+                    "Start Ollama: ollama serve",
+                    "Or set OLLAMA_HOST / --ollama-target to your Ollama URL",
+                    "Or skip this check: ollama-forge abliterate proxy ... --no-check-ollama",
+                ],
+            )
+            return 1
     try:
         run_proxy(
             checkpoint_dir=str(checkpoint.resolve()),
@@ -1805,10 +2345,18 @@ def _cmd_abliterate_proxy(parser: argparse.ArgumentParser, args: argparse.Namesp
             ollama_target=getattr(args, "ollama_target", None),
         )
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "checkpoint or resource not found",
+            cause=str(e),
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate proxy --checkpoint <dir>"],
+        )
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "abliterate proxy failed",
+            cause=str(e),
+            next_steps=["Check the checkpoint path", "Run: ollama-forge abliterate proxy --help"],
+        )
         return 1
     return 0
 
@@ -1818,15 +2366,18 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
     try:
         from ollama_forge.abliterate_serve import serve_abliterated
     except ImportError:
-        print(
-            "Error: abliterate serve requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate serve requires optional deps",
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate serve --name <name>"],
         )
         return 1
     name = getattr(args, "name", None)
     checkpoint_arg = getattr(args, "checkpoint", None)
     if name and checkpoint_arg:
-        print("Error: use either --name or --checkpoint, not both", file=sys.stderr)
+        print_actionable_error(
+            "use either --name or --checkpoint, not both",
+            next_steps=["Run: ollama-forge abliterate serve --name <name> OR --checkpoint <dir>"],
+        )
         return 1
     if name:
         checkpoint = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
@@ -1839,12 +2390,21 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
             else (checkpoint.parent.name if checkpoint.parent else "abliterated")
         )
     else:
-        print("Error: pass --name <model_name> (from abliterate run) or --checkpoint DIR", file=sys.stderr)
+        print_actionable_error(
+            "pass --name <model_name> (from abliterate run) or --checkpoint DIR",
+            next_steps=[
+                "Run: ollama-forge abliterate serve --name <name> (after abliterate run)",
+                "Or: ollama-forge abliterate serve --checkpoint <path_to_checkpoint>",
+            ],
+        )
         return 1
     if not checkpoint.is_dir():
-        print(f"Error: checkpoint dir not found: {checkpoint}", file=sys.stderr)
-        if name:
-            print("  Run abliterate run first with that --name.", file=sys.stderr)
+        print_actionable_error(
+            f"checkpoint dir not found: {checkpoint}",
+            next_steps=(
+                ["Run abliterate run first with that --name."] if name else ["Ensure --checkpoint points to the abliterated checkpoint directory."]
+            ),
+        )
         return 1
     try:
         serve_abliterated(
@@ -1855,13 +2415,16 @@ def _cmd_abliterate_serve(parser: argparse.ArgumentParser, args: argparse.Namesp
             device="cpu" if getattr(args, "device", None) == "cpu" else None,
         )
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "checkpoint or resource not found",
+            cause=str(e),
+            next_steps=["Check that the checkpoint directory is complete", "Run: ollama-forge abliterate serve --checkpoint <dir>"],
+        )
         return 1
     except Exception as e:
         msg = str(e).strip()
-        print(f"Error: {msg}", file=sys.stderr)
-        if "histogram_mps" in msg or "not implemented" in msg.lower():
-            print("Try: ollama-forge abliterate serve --name <name> --device cpu", file=sys.stderr)
+        next_steps = ["Run: ollama-forge abliterate serve --name <name> --device cpu"] if ("histogram_mps" in msg or "not implemented" in msg.lower()) else ["Check the checkpoint path and try --device cpu"]
+        print_actionable_error("abliterate serve failed", cause=msg, next_steps=next_steps)
         return 1
     return 0
 
@@ -1871,9 +2434,9 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
     try:
         from ollama_forge.abliterate import evaluate_abliteration
     except ImportError:
-        print(
-            "Error: abliterate evaluate requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate evaluate requires optional deps",
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate evaluate --checkpoint <dir> --harmful <path> --harmless <path>"],
         )
         return 1
     try:
@@ -1887,10 +2450,18 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
         print(f"Refusals: {metrics['refusal_count']} / {metrics['total']} ({metrics['refusal_rate']:.1%})")
         return 0
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "checkpoint or prompt file not found",
+            cause=str(e),
+            next_steps=["Check --checkpoint, --harmful, and --harmless paths", "Run: ollama-forge abliterate evaluate --help"],
+        )
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "abliterate evaluate failed",
+            cause=str(e),
+            next_steps=["Check paths and refusal markers", "Run: ollama-forge abliterate evaluate --help"],
+        )
         return 1
 
 
@@ -1899,11 +2470,11 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
     try:
         from ollama_forge.abliterate import optimize_abliteration
     except ImportError as e:
-        print(
-            "Error: abliterate optimize requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate optimize requires optional deps",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate optimize --model <id> --harmful <path> --harmless <path>"],
         )
-        print(str(e), file=sys.stderr)
         return 1
     model_id = _abliterate_resolve_model(args.model)
     gguf_file = str(model_id) if str(model_id).lower().endswith(".gguf") else None
@@ -1923,10 +2494,18 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
         print("Best params:", best)
         return 0
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "refusal_pt, harmful, harmless, or output path not found",
+            cause=str(e),
+            next_steps=["Check --refusal_pt, --harmful, --harmless, and --output-dir", "Run: ollama-forge abliterate optimize --help"],
+        )
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "abliterate optimize failed",
+            cause=str(e),
+            next_steps=["Check paths and refusal markers", "Run: ollama-forge abliterate optimize --help"],
+        )
         return 1
 
 
@@ -1934,7 +2513,13 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
     """Update an existing Ollama abliterated model's chat template from the checkpoint (fix garbled ollama run)."""
     name = getattr(args, "name", None)
     if not name:
-        print("Error: --name <ollama_model> is required (e.g. openai/gpt-oss-20b-abliterated)", file=sys.stderr)
+        print_actionable_error(
+            "--name <ollama_model> is required",
+            next_steps=[
+                "Run: ollama-forge abliterate fix-ollama-template --name <ollama_model_name>",
+                "Example: ollama-forge abliterate fix-ollama-template --name openai/gpt-oss-20b-abliterated",
+            ],
+        )
         return 1
     checkpoint_arg = getattr(args, "checkpoint", None)
     if checkpoint_arg:
@@ -1942,36 +2527,40 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
     else:
         checkpoint_dir = Path(_abliterate_output_dir_from_name(name)) / "checkpoint"
     if not checkpoint_dir.is_dir():
-        print(
-            f"Error: checkpoint not found at {checkpoint_dir}",
-            file=sys.stderr,
+        print_actionable_error(
+            f"checkpoint not found at {checkpoint_dir}",
+            next_steps=[
+                "Run abliterate run first with that --name, or use --checkpoint DIR",
+                "Run: ollama-forge abliterate fix-ollama-template --name <name> --checkpoint <dir>",
+            ],
         )
-        print("  Run abliterate run first with that --name, or use --checkpoint DIR.", file=sys.stderr)
         return 1
     template_from = getattr(args, "template_from", None)
     if template_from:
         ref_content = run_ollama_show_modelfile(template_from)
-        if ref_content:
-            template_body = template_body_from_modelfile(ref_content)
-        else:
-            template_body = None
+        template_body = template_body_from_modelfile(ref_content) if ref_content else None
         if not template_body:
-            print(
-                f"Error: could not get template from Ollama model {template_from!r} (pull it first?).",
-                file=sys.stderr,
+            print_actionable_error(
+                f"could not get template from Ollama model {template_from!r}",
+                next_steps=["Pull or create that model first: ollama pull " + template_from.split("/")[-1], "Then re-run fix-ollama-template"],
             )
             return 1
         print(f"Using chat template from Ollama model {template_from!r}.", file=sys.stderr)
     else:
         template_body, reason = template_from_hf_checkpoint_with_reason(str(checkpoint_dir))
         if not template_body:
-            print("Error: could not derive chat template from checkpoint tokenizer.", file=sys.stderr)
-            if reason:
-                print(f"  {reason}", file=sys.stderr)
+            print_actionable_error(
+                "could not derive chat template from checkpoint tokenizer",
+                cause=reason or "Unknown",
+                next_steps=["Use --template-from <ollama_model> to copy template from another model", "Run: ollama-forge abliterate fix-ollama-template --help"],
+            )
             return 1
     content = run_ollama_show_modelfile(name)
     if not content:
-        print(f"Error: Ollama model {name!r} not found. Pull or create it first.", file=sys.stderr)
+        print_actionable_error(
+            f"Ollama model {name!r} not found",
+            next_steps=["Pull or create the model first: ollama pull <model> or ollama create <name>", "Then run: ollama-forge abliterate fix-ollama-template --name " + name],
+        )
         return 1
     content = modelfile_append_template(content, template_body)
     stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
@@ -2000,11 +2589,11 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
     try:
         from ollama_forge.abliterate import compute_refusal_dir
     except ImportError as e:
-        print(
-            "Error: abliterate requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+        print_actionable_error(
+            "abliterate compute-dir requires optional deps",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate compute-dir --model <id> --output <dir>"],
         )
-        print(str(e), file=sys.stderr)
         return 1
     model_id = _abliterate_resolve_model(args.model)
     gguf_file_for_load = str(model_id) if str(model_id).lower().endswith(".gguf") else None
@@ -2031,40 +2620,86 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
             for t in temp_files:
                 Path(t).unlink(missing_ok=True)
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "model, harmful, harmless, or output path not found",
+            cause=str(e),
+            next_steps=["Check --model, --harmful, --harmless, and --output paths", "Run: ollama-forge abliterate compute-dir --help"],
+        )
         return 1
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print_actionable_error(
+            "abliterate compute-dir failed",
+            cause=str(e),
+            next_steps=["Ensure optional deps are installed: uv sync --extra abliterate", "Run: ollama-forge abliterate compute-dir --help"],
+        )
         return 1
 
 
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
-    try:
-        from ollama_forge.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
-    except ImportError:
-        print(
-            "Error: abliterate run requires optional deps. Run: uv sync --extra abliterate",
-            file=sys.stderr,
+    from_checkpoint_dir = getattr(args, "from_checkpoint", None)
+    name = getattr(args, "name", None)
+    if not name:
+        print_actionable_error(
+            "--name is required",
+            next_steps=["Run: ollama-forge abliterate run --model <id> --name <name> or --from-checkpoint <dir> --name <name>"],
         )
         return 1
+    if from_checkpoint_dir:
+        checkpoint_dir = Path(from_checkpoint_dir).resolve()
+        if not checkpoint_dir.is_dir():
+            print_actionable_error(
+                f"--from-checkpoint path is not a directory: {checkpoint_dir}",
+                next_steps=["Point --from-checkpoint to an existing abliterate checkpoint directory (e.g. ./abliterate-<name>/checkpoint)"],
+            )
+            return 1
+        if not (checkpoint_dir / "config.json").is_file():
+            print_actionable_error(
+                f"Checkpoint directory has no config.json: {checkpoint_dir}",
+                next_steps=["Use a directory produced by abliterate run (compute + apply) or abliterate compute-dir + apply"],
+            )
+            return 1
+        output_dir = checkpoint_dir.parent
+        gguf_path = output_dir / "model.gguf"
+        model_id = getattr(args, "model", None)  # optional when resuming; used later for template_from
+    else:
+        try:
+            from ollama_forge.abliterate import apply_refusal_dir_and_save, compute_refusal_dir
+        except ImportError:
+            print_actionable_error(
+                "abliterate run requires optional deps",
+                next_steps=["Run: uv sync --extra abliterate", "Then: ollama-forge abliterate run --model <id> --name <name>"],
+            )
+            return 1
+        model_id = getattr(args, "model", None)
+        if not model_id:
+            print_actionable_error(
+                "--model is required (or use --from-checkpoint to resume from a checkpoint)",
+                next_steps=[
+                    "Run: ollama-forge abliterate run --model <hf_repo_or_path> --name <ollama_model_name>",
+                    "Example: ollama-forge abliterate run --model meta-llama/Llama-2-7b-hf --name my-abliterated",
+                ],
+            )
+            return 1
+        checkpoint_dir = output_dir = gguf_path = None  # set below
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
-    model_id = getattr(args, "model", None)
-    name = getattr(args, "name", None)
-    if not model_id or not name:
-        print("Error: --model and --name are required", file=sys.stderr)
-        return 1
-    model_id = _abliterate_resolve_model(model_id)
-    gguf_file_for_load_run = str(model_id) if str(model_id).lower().endswith(".gguf") else None
-    if gguf_file_for_load_run:
-        print(f"Using local GGUF at {model_id}", file=sys.stderr)
-    default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
-    output_dir = Path(
-        getattr(args, "output_dir", None)
-        or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-forge-abliterate-"))
-    )
+    if not from_checkpoint_dir:
+        model_id = _abliterate_resolve_model(model_id)
+        gguf_file_for_load_run = str(model_id) if str(model_id).lower().endswith(".gguf") else None
+        if gguf_file_for_load_run:
+            print(f"Using local GGUF at {model_id}", file=sys.stderr)
+        default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
+        output_dir = Path(
+            getattr(args, "output_dir", None)
+            or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-forge-abliterate-"))
+        )
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        refusal_pt = output_dir / "refusal_dir.pt"
+        checkpoint_dir = output_dir / "checkpoint"
+        gguf_path = output_dir / "model.gguf"
     llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
     if not llama_cpp_dir:
         for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
@@ -2072,69 +2707,78 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 llama_cpp_dir = candidate
                 break
     if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
-        print(
-            "Error: convert_hf_to_gguf.py not found. Set --llama-cpp-dir to your llama.cpp clone.",
-            file=sys.stderr,
+        print_actionable_error(
+            "convert_hf_to_gguf.py not found",
+            next_steps=[
+                "Clone llama.cpp and set --llama-cpp-dir to the clone path",
+                "Or run: ollama-forge setup-llama-cpp",
+                "Then: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
+            ],
         )
         return 1
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    refusal_pt = output_dir / "refusal_dir.pt"
-    checkpoint_dir = output_dir / "checkpoint"
-    gguf_path = output_dir / "model.gguf"
-    try:
-        harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
+    if from_checkpoint_dir:
+        print("Resuming from checkpoint: converting to GGUF...", file=sys.stderr)
+    else:
         try:
-            print("Computing refusal direction...", file=sys.stderr)
-            compute_refusal_dir(
-                model_id,
-                str(harmful_path),
-                str(harmless_path),
-                str(refusal_pt),
-                num_instructions=getattr(args, "num_instructions", 32),
-                layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
-                n_directions=getattr(args, "num_directions", 1),
-                load_in_8bit=getattr(args, "load_in_8bit", False),
-                gguf_file=gguf_file_for_load_run,
-                per_layer_directions=getattr(args, "per_layer_directions", False),
-            )
-            # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
-            import gc
-            gc.collect()
+            harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
             try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
-            print("Baking ablation into weights and saving checkpoint...", file=sys.stderr)
-            apply_refusal_dir_and_save(
-                model_id,
-                refusal_pt,
-                checkpoint_dir,
-                verify=not getattr(args, "no_verify", False),
-                gguf_file=gguf_file_for_load_run,
-                strength=getattr(args, "strength", 1.0),
-                atten_strength=getattr(args, "atten_strength", None),
-                mlp_strength=getattr(args, "mlp_strength", None),
-                direction_index=getattr(args, "direction_index", None),
-                strength_kernel=getattr(args, "strength_kernel", "constant"),
-                kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
-                kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
-                skip_begin_layers=getattr(args, "skip_begin_layers", 0),
-                skip_end_layers=getattr(args, "skip_end_layers", 0),
-            )
-        finally:
-            for t in temp_files:
-                Path(t).unlink(missing_ok=True)
-    except Exception as e:
-        import traceback
+                print("Computing refusal direction...", file=sys.stderr)
+                compute_refusal_dir(
+                    model_id,
+                    str(harmful_path),
+                    str(harmless_path),
+                    str(refusal_pt),
+                    num_instructions=getattr(args, "num_instructions", 32),
+                    layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
+                    n_directions=getattr(args, "num_directions", 1),
+                    load_in_8bit=getattr(args, "load_in_8bit", False),
+                    gguf_file=gguf_file_for_load_run,
+                    per_layer_directions=getattr(args, "per_layer_directions", False),
+                )
+                # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
+                import gc
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                print("Baking ablation into weights and saving checkpoint...", file=sys.stderr)
+                apply_refusal_dir_and_save(
+                    model_id,
+                    refusal_pt,
+                    checkpoint_dir,
+                    verify=not getattr(args, "no_verify", False),
+                    gguf_file=gguf_file_for_load_run,
+                    strength=getattr(args, "strength", 1.0),
+                    atten_strength=getattr(args, "atten_strength", None),
+                    mlp_strength=getattr(args, "mlp_strength", None),
+                    direction_index=getattr(args, "direction_index", None),
+                    strength_kernel=getattr(args, "strength_kernel", "constant"),
+                    kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
+                    kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
+                    skip_begin_layers=getattr(args, "skip_begin_layers", 0),
+                    skip_end_layers=getattr(args, "skip_end_layers", 0),
+                )
+            finally:
+                for t in temp_files:
+                    Path(t).unlink(missing_ok=True)
+        except Exception as e:
+            import traceback
 
-        msg = str(e).strip() or f"{type(e).__name__} (no message)"
-        print(f"Error: {msg}", file=sys.stderr)
-        if not str(e).strip():
-            traceback.print_exc(file=sys.stderr)
-        return 1
+            msg = str(e).strip() or f"{type(e).__name__} (no message)"
+            print_actionable_error(
+                "abliterate run failed (compute or bake step)",
+                cause=msg,
+                next_steps=[
+                    "Check --model (HF repo or path), --harmful, --harmless paths",
+                    "Run: ollama-forge abliterate run --help",
+                ],
+            )
+            if not str(e).strip():
+                traceback.print_exc(file=sys.stderr)
+            return 1
     print("Converting to GGUF...", file=sys.stderr)
     convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
     checkpoint_abs = checkpoint_dir.resolve()
@@ -2150,12 +2794,35 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             ],
             cwd=str(llama_cpp_dir.resolve()),
             check=True,
+            timeout=3600,
         )
+    except subprocess.TimeoutExpired:
+        print_actionable_error(
+            "GGUF conversion timed out after 3600s",
+            next_steps=[
+                "Try a smaller model or increase system resources",
+                "Re-run: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
+            ],
+        )
+        return 1
     except subprocess.CalledProcessError as e:
-        print(f"Error: GGUF conversion failed: {e}", file=sys.stderr)
+        print_actionable_error(
+            "GGUF conversion failed",
+            cause=str(e),
+            next_steps=[
+                "Ensure llama.cpp convert_hf_to_gguf.py runs in that directory",
+                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
+            ],
+        )
         return 1
     if not gguf_path.is_file():
-        print("Error: GGUF file was not produced", file=sys.stderr)
+        print_actionable_error(
+            "GGUF file was not produced",
+            next_steps=[
+                "Check disk space and llama.cpp convert script output",
+                "Re-run: ollama-forge abliterate run --model <id> --name <name>",
+            ],
+        )
         return 1
     gguf_to_use = gguf_path
     requantize = not getattr(args, "no_requantize", False)
@@ -2163,11 +2830,13 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         quant_type = getattr(args, "quant", "Q4_K_M")
         quantize_bin = _which_quantize()
         if not quantize_bin:
-            print(
-                "Error: requantize (default) requires llama.cpp 'quantize' or 'llama-quantize' on PATH",
-                file=sys.stderr,
+            print_actionable_error(
+                "requantize (default) requires llama.cpp quantize on PATH",
+                next_steps=[
+                    "Run: ollama-forge setup-llama-cpp; add the build dir to PATH",
+                    "Or pass --no-requantize to keep full-size GGUF (no quantize step)",
+                ],
             )
-            print("  Add llama.cpp build dir to PATH, or pass --no-requantize to keep full-size GGUF.", file=sys.stderr)
             return 1
         quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
         print(f"Quantizing to {quant_type}...", file=sys.stderr)
@@ -2175,18 +2844,35 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             subprocess.run(
                 [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
                 check=True,
+                timeout=3600,
             )
+        except subprocess.TimeoutExpired:
+            print_actionable_error(
+                "quantization timed out after 3600s",
+                next_steps=[
+                    "Try --no-requantize to skip quantize and use full-size GGUF",
+                    "Or re-run with more time / smaller quant type",
+                ],
+            )
+            return 1
         except subprocess.CalledProcessError as e:
-            print(f"Error: quantization failed: {e}", file=sys.stderr)
+            print_actionable_error(
+                "quantization failed",
+                cause=str(e),
+                next_steps=[
+                    "Ensure llama.cpp quantize (or llama-quantize) is on PATH",
+                    "Or pass --no-requantize to keep full-size GGUF",
+                ],
+            )
             return 1
         if quant_gguf.is_file():
             gguf_to_use = quant_gguf
     # Use absolute path so Ollama finds the GGUF when the Modelfile is in a temp dir
     gguf_for_modelfile = gguf_to_use.resolve()
     content = build_modelfile(str(gguf_for_modelfile))
-    _model_path = Path(model_id)
+    _model_path = Path(model_id) if model_id else checkpoint_dir
     _is_local_hf = _model_path.is_dir() and (_model_path / "config.json").is_file()
-    template_from = getattr(args, "template_from", None) or (None if _is_local_hf else model_id)
+    template_from = getattr(args, "template_from", None) or (None if _is_local_hf else (model_id if model_id else None))
     if template_from:
         ref_content = run_ollama_show_modelfile(template_from)
         if ref_content:
@@ -2268,12 +2954,22 @@ def main() -> int:
         "check",
         help="Verify ollama, Hugging Face, optional deps, and llama.cpp",
     )
+    p_check.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable status (same shape as doctor --json)",
+    )
     p_check.set_defaults(handler=_cmd_check)
 
     # doctor (diagnose + optional fixes)
     p_doctor = subparsers.add_parser(
         "doctor",
         help="Diagnose environment and optionally apply common fixes",
+    )
+    p_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable status for CI/scripting",
     )
     p_doctor.add_argument(
         "--fix",
@@ -2700,9 +3396,15 @@ def main() -> int:
     )
     p_fetch.add_argument(
         "repo_id",
-        help="Hugging Face repo id (e.g. TheBloke/Llama-2-7B-GGUF)",
+        nargs="?",
+        default=None,
+        help="Hugging Face repo id (e.g. TheBloke/Llama-2-7B-GGUF); prompted if missing and running in a TTY",
     )
-    p_fetch.add_argument("--name", required=True, help="Name for the new Ollama model")
+    p_fetch.add_argument(
+        "--name",
+        default=None,
+        help="Name for the new Ollama model; prompted if missing when running in a TTY (default: my-model)",
+    )
     p_fetch.add_argument(
         "--gguf-file",
         help="Specific .gguf filename if repo has multiple (optional)",
@@ -2731,10 +3433,20 @@ def main() -> int:
     )
     p_fetch_adapter.add_argument(
         "repo_id",
-        help="Hugging Face repo id of the adapter (e.g. user/my-lora)",
+        nargs="?",
+        default=None,
+        help="Hugging Face repo id of the adapter (e.g. user/my-lora); prompted if missing in a TTY",
     )
-    p_fetch_adapter.add_argument("--base", required=True, help="Base model name or path")
-    p_fetch_adapter.add_argument("--name", required=True, help="Name for the new model")
+    p_fetch_adapter.add_argument(
+        "--base",
+        default=None,
+        help="Base model name or path; prompted if missing in a TTY",
+    )
+    p_fetch_adapter.add_argument(
+        "--name",
+        default=None,
+        help="Name for the new model; prompted if missing in a TTY",
+    )
     p_fetch_adapter.add_argument("--revision", default="main", help="Repo revision (default: main)")
     p_fetch_adapter.add_argument(
         "--output",
@@ -2761,8 +3473,24 @@ def main() -> int:
         "recipe",
         help="Path to recipe file (.yaml, .yml, or .json) with name and base or gguf",
     )
+    p_build.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Only validate recipe (load and check schema), do not build",
+    )
     p_build.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_build.set_defaults(handler=_cmd_build)
+
+    # validate-recipe (standalone preflight)
+    p_validate_recipe = subparsers.add_parser(
+        "validate-recipe",
+        help="Validate a recipe file (schema and paths) without building",
+    )
+    p_validate_recipe.add_argument(
+        "recipe",
+        help="Path to recipe file (.yaml, .yml, or .json)",
+    )
+    p_validate_recipe.set_defaults(handler=_cmd_validate_recipe)
 
     # validate-training-data
     p_validate = subparsers.add_parser(
@@ -2793,6 +3521,23 @@ def main() -> int:
         help="Output format (default: llama.cpp)",
     )
     p_prepare.set_defaults(handler=_cmd_prepare_training_data)
+
+    # convert-training-data-format (messages → Alpaca JSONL, e.g. for datagen output)
+    p_convert_fmt = subparsers.add_parser(
+        "convert-training-data-format",
+        help="Convert JSONL to Alpaca-style (e.g. from TeichAI/datagen messages format)",
+    )
+    p_convert_fmt.add_argument(
+        "input",
+        help="Input .jsonl file (Alpaca or messages format)",
+    )
+    p_convert_fmt.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output .jsonl file (Alpaca-style instruction/input/output)",
+    )
+    p_convert_fmt.set_defaults(handler=_cmd_convert_training_data_format)
 
     # train (generate script: data → prepare → trainer → retrain)
     p_train = subparsers.add_parser(
@@ -2846,6 +3591,26 @@ def main() -> int:
     )
     p_retrain.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_retrain.set_defaults(handler=_cmd_retrain)
+
+    # train-run (e2e: validate → prepare → finetune → retrain)
+    p_train_run = subparsers.add_parser(
+        "train-run",
+        help="Run full pipeline: validate → prepare → finetune (if --base-gguf and finetune on PATH) → retrain",
+    )
+    p_train_run.add_argument("--data", required=True, nargs="+", help="Training data: .jsonl file(s) or directory")
+    p_train_run.add_argument("--base", required=True, help="Base model name for retrain (e.g. llama3.2)")
+    p_train_run.add_argument("--name", required=True, help="Name for the new Ollama model")
+    p_train_run.add_argument("--base-gguf", help="Path to base GGUF; if set and finetune on PATH, run finetune then retrain")
+    p_train_run.add_argument("--prepared-output", default=None, help="Output path for prepared text (default: train_prepared.txt)")
+    p_train_run.add_argument("--adapter-output", default=None, help="Output dir for LoRA adapter (default: adapter_out)")
+    p_train_run.add_argument("--format", default="llama.cpp", help="Prepare format (default: llama.cpp)")
+    p_train_run.add_argument("--system", help="System message for final model")
+    p_train_run.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_train_run.add_argument("--num-ctx", type=int, help="Context window size in tokens")
+    p_train_run.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_train_run.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
+    p_train_run.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_train_run.set_defaults(handler=_cmd_train_run)
 
     # abliterate (refusal removal)
     p_abliterate = subparsers.add_parser(
@@ -2921,10 +3686,14 @@ def main() -> int:
     )
     p_run.add_argument(
         "--model",
-        required=True,
-        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file (omit when using --from-checkpoint)",
     )
     p_run.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_run.add_argument(
+        "--from-checkpoint",
+        metavar="DIR",
+        help="Resume from an existing checkpoint dir (skip compute/apply; run GGUF conversion and create)",
+    )
     p_run.add_argument(
         "--output-dir",
         help="Directory for checkpoint and GGUF (default: ./abliterate-<name>, or temp if no --name)",
@@ -3125,7 +3894,7 @@ def main() -> int:
         "--port",
         type=int,
         default=11435,
-        help="Bind port (default: 11435; use a different port if Ollama runs on 11434)",
+        help="Bind port (default: 11435; Ollama: 11434, abliterate proxy: 11436)",
     )
     p_serve.add_argument(
         "--device",
@@ -3273,12 +4042,28 @@ def main() -> int:
         "--port",
         type=int,
         default=11436,
-        help="Proxy port (default: 11436, Ollama runs on 11434)",
+        help="Bind port (default: 11436; Ollama: 11434, abliterate serve: 11435)",
     )
     p_proxy.add_argument(
         "--ollama-target",
         metavar="URL",
         help="Ollama URL to forward to (default: OLLAMA_HOST or http://127.0.0.1:11434)",
+    )
+    p_proxy.add_argument(
+        "--no-check-ollama",
+        action="store_true",
+        help="Skip checking that Ollama is reachable before starting proxy (default: check)",
+    )
+    p_proxy.add_argument(
+        "--config",
+        metavar="FILE",
+        help="YAML config file listing models (e.g. models: [{name: my-model, checkpoint: /path}]); cannot use with --name/--checkpoint",
+    )
+    p_proxy.add_argument(
+        "--add-model",
+        action="append",
+        metavar="NAME:PATH",
+        help="Register a model (name:checkpoint_path). Repeat for multiple models; cannot use with --name/--checkpoint",
     )
     p_proxy.set_defaults(handler=_cmd_abliterate_proxy)
 
@@ -3422,6 +4207,17 @@ def main() -> int:
         "--base-url",
         default=None,
         help="Ollama or abliterate serve URL (default: OLLAMA_HOST or http://127.0.0.1:11434)",
+    )
+    p_se_run.add_argument(
+        "--no-check-ollama",
+        action="store_true",
+        help="Skip checking that Ollama/serve is reachable before running (default: check)",
+    )
+    p_se_run.add_argument(
+        "--retries",
+        type=int,
+        default=2,
+        help="Number of retries per prompt on transient API errors (default: 2)",
     )
     p_se_run.add_argument(
         "--output-csv",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,17 +117,13 @@ def detect_model_family(checkpoint_dir: str | Path) -> ModelFamily | None:
     
     config_path = checkpoint_dir / "config.json"
     if config_path.is_file():
-        try:
+        with contextlib.suppress(Exception):
             config_data = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
     
     tokenizer_path = checkpoint_dir / "tokenizer_config.json"
     if tokenizer_path.is_file():
-        try:
+        with contextlib.suppress(Exception):
             tokenizer_data = json.loads(tokenizer_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
     
     model_type = _normalize(config_data.get("model_type"))
     tokenizer_class = _normalize(tokenizer_data.get("tokenizer_class"))
@@ -178,6 +175,12 @@ def get_family_name(checkpoint_dir: str | Path) -> str | None:
     """Get the detected family name or None."""
     family = detect_model_family(checkpoint_dir)
     return family.name if family else None
+
+
+def is_gemma_checkpoint(checkpoint_dir: str | Path) -> bool:
+    """True if the checkpoint is detected as a Gemma model (Gemma 2/3)."""
+    family = detect_model_family(checkpoint_dir)
+    return family is not None and family.name == "gemma"
 
 
 def suggest_gguf_flags(checkpoint_dir: str | Path) -> dict[str, Any]:

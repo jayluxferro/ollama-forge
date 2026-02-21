@@ -163,6 +163,18 @@ uv run ollama-forge abliterate optimize --model <hf_id> --refusal-pt refusal.pt 
 
 ---
 
+## Ports (Ollama vs abliterate)
+
+| Service           | Default port | Purpose                          |
+|-------------------|-------------|-----------------------------------|
+| Ollama            | 11434       | Main Ollama server               |
+| abliterate serve  | 11435       | Full-model Ollama-API server     |
+| abliterate proxy  | 11436       | Tokenizer-only proxy → Ollama    |
+
+Use `--port` to change serve or proxy port when running multiple services.
+
+---
+
 ## Prompt proxy (hybrid approach)
 
 When Ollama's GGUF tokenization produces garbled or incorrect output, the **lightweight prompt proxy** lets agents use Ollama for inference while formatting prompts with the original HF tokenizer.

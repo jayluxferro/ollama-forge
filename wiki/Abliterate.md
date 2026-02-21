@@ -26,6 +26,10 @@ uv sync --extra abliterate
 
 For large or MXFP4-quantized models, use **`--load-in-8bit`** to avoid "Invalid buffer size" (loads in 8-bit). Install bitsandbytes first: `pip install bitsandbytes` (Linux/CUDA; not supported on macOS).
 
+### Proxy-only (minimal deps)
+
+If you only run **`abliterate proxy`** (format prompts with HF tokenizer, forward to Ollama) and do not run compute/apply or chat/serve with loaded models, you can use minimal deps: **`transformers`** is enough to load tokenizers; **`torch`** is only required for `abliterate run`, `compute-dir`, and in-process chat/serve. Example: `pip install ollama-forge transformers` or `uv sync` then `pip install transformers`. For full abliterate (run, compute-dir, etc.) use `uv sync --extra abliterate`.
+
 ---
 
 ## Built-in lists (no files needed)
@@ -113,11 +117,21 @@ uv run ollama-forge abliterate chat --name my-abliterated
 
 If you passed **`--output-dir DIR`** to run, use **`--checkpoint DIR/checkpoint`** instead of `--name`.
 
+**Ports:** By default, **Ollama** uses **11434**, **abliterate serve** uses **11435**, and **abliterate proxy** uses **11436**, so all three can run side by side. Override with `--port` for serve or proxy.
+
 **Proxy for agents (recommended):** The **lightweight prompt proxy** is the recommended way to use abliterated models with agents. It only loads the tokenizer (not the model), formats prompts with the HF tokenizer, and forwards inference to Ollama:
 
 ```bash
 uv run ollama-forge abliterate proxy --name my-abliterated --port 11436
 ```
+
+**Multiple models:** Register several abliterated models with one proxy using `--add-model name:path` (repeat for each):
+
+```bash
+uv run ollama-forge abliterate proxy --add-model model-a:/path/to/checkpoint-a --add-model model-b:/path/to/checkpoint-b
+```
+
+**Health check:** `GET /` or `GET /api/tags` returns 200 and a list of registered models so agents can verify the proxy is up.
 
 The proxy listens on `http://127.0.0.1:11436` (default). Point agents at this URL:
 

@@ -4,16 +4,14 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from ollama_forge.model_family import (
-    ModelFamily,
     _MODEL_FAMILIES,
     _normalize,
     detect_model_family,
     get_family_name,
     get_family_stop_tokens,
     get_family_template_override,
+    is_gemma_checkpoint,
     suggest_gguf_flags,
 )
 
@@ -143,6 +141,18 @@ class TestDetectModelFamily:
             assert family is not None
             assert family.name == "gemma"
 
+    def test_detect_by_tokenizer_class_substring(self) -> None:
+        """Detect by tokenizer_class when family.name in tokenizer_class and tc in tokenizer_class."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "unknown", "architectures": []}
+            # e.g. Qwen2TokenizerFast -> qwen2 in name, qwen2tokenizerfast contains tokenizer class
+            tokenizer_config = {"tokenizer_class": "Qwen2TokenizerFast"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            (Path(d) / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "qwen2"
+
     def test_model_type_priority_over_tokenizer(self) -> None:
         """Model type takes priority over tokenizer class."""
         with tempfile.TemporaryDirectory() as d:
@@ -216,6 +226,28 @@ class TestGetFamilyTemplateOverride:
             (Path(d) / "config.json").write_text(json.dumps(config))
             template = get_family_template_override(d)
             assert template is None
+
+
+class TestIsGemmaCheckpoint:
+    """Tests for is_gemma_checkpoint function."""
+
+    def test_nonexistent_returns_false(self) -> None:
+        """Non-existent path returns False."""
+        assert is_gemma_checkpoint("/nonexistent") is False
+
+    def test_gemma_config_returns_true(self) -> None:
+        """Gemma model_type returns True."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "gemma2"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_gemma_checkpoint(d) is True
+
+    def test_llama_config_returns_false(self) -> None:
+        """Non-Gemma model_type returns False."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "llama"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_gemma_checkpoint(d) is False
 
 
 class TestGetFamilyName:

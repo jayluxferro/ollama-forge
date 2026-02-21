@@ -64,7 +64,7 @@ llama.cpp/
 abliterate_lists/
 abliterate-*/
 blog/
-docs/
+# docs/ intentionally tracked for product/analysis docs (wiki/ is main UX docs)
 
 # Secrets / env
 .env

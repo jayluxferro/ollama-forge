@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
 def test_cli_help() -> None:
@@ -317,6 +319,20 @@ def test_check_runs() -> None:
     assert "huggingface" in result.stdout.lower() or "HF" in result.stdout
 
 
+def test_check_json() -> None:
+    """check --json outputs machine-readable status (same shape as doctor --json)."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "check", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode in (0, 1)
+    payload = json.loads(result.stdout)
+    assert "ollama" in payload and "huggingface_hub" in payload
+    assert "pyyaml" in payload and "hf_token" in payload
+    assert all(isinstance(v, bool) for v in payload.values())
+
+
 def test_doctor_help() -> None:
     """doctor --help lists --fix options."""
     result = subprocess.run(
@@ -338,6 +354,19 @@ def test_doctor_runs() -> None:
     )
     assert result.returncode in (0, 1)
     assert "Doctor report" in result.stdout
+
+
+def test_doctor_json() -> None:
+    """doctor --json outputs machine-readable status for CI/scripting."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "doctor", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode in (0, 1)
+    payload = json.loads(result.stdout)
+    assert "ollama" in payload and "huggingface_hub" in payload
+    assert all(isinstance(v, bool) for v in payload.values())
 
 
 def test_doctor_fix_plan_runs() -> None:
@@ -385,7 +414,7 @@ def test_downsize_pipeline_subcommand() -> None:
 
 
 def test_build_help() -> None:
-    """build --help lists recipe and --out-modelfile."""
+    """build --help lists recipe, --validate-only, and --out-modelfile."""
     result = subprocess.run(
         [sys.executable, "-m", "ollama_forge.cli", "build", "--help"],
         capture_output=True,
@@ -393,6 +422,7 @@ def test_build_help() -> None:
     )
     assert result.returncode == 0
     assert "recipe" in result.stdout and "build" in result.stdout.lower()
+    assert "validate-only" in result.stdout
 
 
 def test_build_nonexistent_recipe_fails() -> None:
@@ -406,6 +436,78 @@ def test_build_nonexistent_recipe_fails() -> None:
     assert "not found" in result.stderr.lower() or "Error" in result.stderr
 
 
+def test_build_missing_recipe_error_ux() -> None:
+    """build with missing recipe path prints Next: and ollama-forge in stderr."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "build", "/nonexistent/recipe.yaml"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "Next:" in result.stderr
+    assert "ollama-forge" in result.stderr
+
+
+def test_build_invalid_recipe_error_ux() -> None:
+    """build with invalid recipe (no name) prints Next: and Run: ollama-forge in stderr."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        f.write('{"base": "llama3.2"}')
+        path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ollama_forge.cli", "build", path, "--validate-only"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "Next:" in result.stderr
+        assert "Run: ollama-forge" in result.stderr
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_build_validate_only_success() -> None:
+    """build --validate-only with valid recipe exits 0 and prints summary."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        f.write('{"name": "my-model", "base": "llama3.2"}')
+        path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ollama_forge.cli", "build", path, "--validate-only"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "Recipe valid" in result.stdout
+        assert "my-model" in result.stdout
+        assert "base" in result.stdout
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_build_validate_only_invalid_recipe_fails() -> None:
+    """build --validate-only with invalid recipe (no name) exits non-zero."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8"
+    ) as f:
+        f.write('{"base": "llama3.2"}')
+        path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ollama_forge.cli", "build", path, "--validate-only"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "invalid" in result.stderr.lower() or "name" in result.stderr.lower()
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 def test_prepare_training_data_help() -> None:
     """prepare-training-data --help lists data, output, format."""
     result = subprocess.run(
@@ -415,6 +517,42 @@ def test_prepare_training_data_help() -> None:
     )
     assert result.returncode == 0
     assert "data" in result.stdout and "output" in result.stdout
+
+
+def test_convert_training_data_format_help() -> None:
+    """convert-training-data-format --help lists input and output."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "convert-training-data-format", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "input" in result.stdout and "output" in result.stdout
+
+
+def test_convert_training_data_format_runs() -> None:
+    """convert-training-data-format converts messages JSONL to Alpaca-style."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        f.write('{"messages": [{"role": "user", "content": "Hi?"}, {"role": "assistant", "content": "Hello!"}]}\n')
+        in_path = f.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as f:
+        out_path = f.name
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "ollama_forge.cli",
+                "convert-training-data-format", in_path, "-o", out_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        data = json.loads(Path(out_path).read_text().strip())
+        assert data["instruction"] == "Hi?"
+        assert data["output"] == "Hello!"
+    finally:
+        Path(in_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
 
 
 def test_train_help() -> None:

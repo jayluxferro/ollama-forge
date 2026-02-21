@@ -1,6 +1,9 @@
 # Training Data
 
-Use **JSONL** (one JSON object per line) for training data. Fields: `instruction` (required), `output` (required), `input` (optional).
+Use **JSONL** (one JSON object per line) for training data. ollama-forge accepts two formats:
+
+- **Alpaca-style:** `instruction` (required), `output` (required), `input` (optional).
+- **Messages-style** (e.g. [TeichAI/datagen](https://github.com/TeichAI/datagen)): `messages` array with `user` and `assistant` roles; system is optional. Validate and prepare accept this format directly.
 
 ---
 
@@ -62,6 +65,18 @@ Example (Alpaca-style):
 ```
 
 Minimal: `{"instruction": "Say hello.", "output": "Hello!"}`
+
+---
+
+## Generating training data
+
+Tools like [TeichAI/datagen](https://github.com/TeichAI/datagen) generate JSONL from a list of prompts by calling an LLM (e.g. via OpenRouter): one prompt per line in a TXT file → one JSONL line per response. datagen outputs a **`messages`** array (user/assistant roles). ollama-forge **accepts this format directly** in `validate-training-data` and `prepare-training-data`. Optionally convert to Alpaca-style JSONL on disk:
+
+```bash
+ollama-forge convert-training-data-format dataset.jsonl -o dataset_alpaca.jsonl
+```
+
+See [docs/DATAGEN-ANALYSIS.md](../docs/DATAGEN-ANALYSIS.md) for details.
 
 ---
 

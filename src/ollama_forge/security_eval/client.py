@@ -7,13 +7,6 @@ import urllib.error
 import urllib.request
 
 
-def _normalize_base_url(url: str) -> str:
-    base = url.strip().rstrip("/")
-    if not base.startswith("http://") and not base.startswith("https://"):
-        base = "http://" + base
-    return base
-
-
 def query_model(
     prompt: str,
     *,
@@ -27,7 +20,9 @@ def query_model(
     Send one prompt to the model and return (response_text, duration_seconds).
     Uses POST /api/chat (messages) if use_chat else POST /api/generate (prompt).
     """
-    base = _normalize_base_url(base_url)
+    from ollama_forge.http_util import normalize_base_url
+
+    base = normalize_base_url(base_url)
     if use_chat:
         url = base + "/api/chat"
         messages = [{"role": "user", "content": prompt}]
@@ -64,10 +59,7 @@ def query_model(
             err_msg = str(e)
         raise RuntimeError(f"Model API error: {err_msg}") from e
 
-    if use_chat:
-        text = (data.get("message") or {}).get("content") or ""
-    else:
-        text = data.get("response") or ""
+    text = (data.get("message") or {}).get("content") or "" if use_chat else data.get("response") or ""
     duration = data.get("eval_duration")  # nanoseconds in Ollama
     duration_sec = duration / 1e9 if duration is not None else None
     return (text.strip(), duration_sec)

@@ -20,13 +20,17 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **fetch** | Download a GGUF from Hugging Face and create an Ollama model |
 | **fetch-adapter** | Download an adapter from HF and create an Ollama model (base + adapter) |
 | **build** | Build an Ollama model from a recipe file (YAML or JSON) |
-| **validate-training-data** | Validate JSONL training data (file(s) or directory) |
-| **prepare-training-data** | Convert JSONL to plain text for trainers (e.g. llama.cpp) |
+| **validate-recipe** | Validate a recipe file (schema and paths) without building |
+| **validate-training-data** | Validate JSONL training data (file(s) or directory); accepts Alpaca or messages format |
+| **prepare-training-data** | Convert JSONL to plain text for trainers (e.g. llama.cpp); accepts both formats |
+| **convert-training-data-format** | Convert JSONL to Alpaca-style (e.g. from TeichAI/datagen) — input file, `-o` output |
 | **train** | Generate a training script (data path → runnable pipeline) |
+| **train-run** | E2E pipeline: validate → prepare → finetune (if --base-gguf) → retrain |
 | **retrain** | Create an Ollama model from base + adapter (after training) |
-| **abliterate** | Refusal removal (compute-dir; then use Sumandora or export to GGUF) |
+| **abliterate** | Refusal removal: compute-dir, run, chat, serve, **proxy** (lightweight tokenizer proxy for agents), evaluate, optimize, fix-ollama-template, download-lists |
 | **adapters** | Find and use adapters (search, recommend) |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
+| **security-eval** | Run prompt sets against Ollama (run), or optional UI (ui) for refusal/compliance KPIs |
 | **hf-cache** | List or remove Hugging Face Hub local cache (ls, rm) |
 
 ---
@@ -47,13 +51,16 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | Customize model (prompt, params, adapter) | `create-from-base`, `retrain`, or `build recipe.yaml` |
 | Validate training data | `validate-training-data <file(s) or dir>` |
 | JSONL → trainer format | `prepare-training-data <file(s) or dir> -o out.txt` |
+| Messages JSONL → Alpaca | `convert-training-data-format dataset.jsonl -o alpaca.jsonl` |
+| Run full training pipeline | `train-run --data <path> --base <base> --name <name> [--base-gguf <path>]` |
 | Generate training pipeline script | `train --data <path> --base <base> --name <name> --write-script train.sh` |
 | Check environment | `check` |
 | Diagnose / auto-fix | `doctor [--fix] [--plan] [--fix-llama-cpp]` |
 | Install llama.cpp | `setup-llama-cpp [--dir ./llama.cpp]` |
-| Refusal removal | `abliterate compute-dir` |
+| Refusal removal | `abliterate compute-dir`; for agents with tools: `abliterate proxy --name <name>` |
 | Downsize (distillation) | `downsize --teacher <hf_id> --student <hf_id> --name <name>` |
 | One-file config build | `build recipe.yaml` |
+| Validate recipe only | `validate-recipe recipe.yaml` |
 | List HF cache | `hf-cache ls` |
 | Remove HF cache repo(s) | `hf-cache rm <repo_id> [repo_id ...] [--yes]` |
 
@@ -62,6 +69,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 ## Subcommands
 
 - **adapters** has subcommands: `search`, `recommend`.
-- **abliterate** has subcommands: `compute-dir` (and others; run `abliterate --help`).
+- **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
+- **Ports:** Ollama 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).
 
 Use `ollama-forge <command> --help` for options and examples.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from pathlib import Path
@@ -141,27 +142,6 @@ def _ensure_chat_template(tokenizer: object, checkpoint_dir: Path) -> bool:
     return False
 
 
-def _is_gemma_checkpoint(checkpoint_dir: Path) -> bool:
-    """True if config or tokenizer_config indicates a Gemma model (Gemma 2/3)."""
-    for name in ("config.json", "tokenizer_config.json"):
-        path = checkpoint_dir / name
-        if not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        # tokenizer_config.json from Gemma has "tokenizer_class": "GemmaTokenizer"
-        if data.get("tokenizer_class", "").lower().startswith("gemma"):
-            return True
-        # config.json has "model_type": "gemma2" or similar
-        if "gemma" in (data.get("model_type") or "").lower():
-            return True
-    return False
-
-
 # Built-in Ollama template for Gemma 2/3 when the checkpoint has no chat_template saved.
 # BOS at start (Gemma expects it once); then <<start_of_turn>>user\n{prompt}<<end_of_turn>>\n<<start_of_turn>>model\n{response}
 _GEMMA_OLLAMA_TEMPLATE = """<bos>{{ if .System }}{{ .System }}
@@ -220,7 +200,9 @@ def template_from_hf_checkpoint_with_reason(checkpoint_dir: str | Path) -> tuple
         return (None, f"could not load tokenizer: {e}")
     if not _ensure_chat_template(tokenizer, checkpoint_dir):
         # Checkpoint has no chat_template (e.g. GemmaTokenizer doesn't persist it). Use built-in for Gemma.
-        if _is_gemma_checkpoint(checkpoint_dir):
+        from ollama_forge.model_family import is_gemma_checkpoint
+
+        if is_gemma_checkpoint(checkpoint_dir):
             return (_GEMMA_OLLAMA_TEMPLATE, None)
         return (None, "no chat_template on tokenizer and none in tokenizer_config.json or chat_template.jinja")
     messages_sys_user = [
@@ -295,7 +277,7 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
     Get stop sequences from the checkpoint tokenizer (eos_token, pad_token, common end-of-turn).
     Uses model family detection to include family-specific stop tokens.
     """
-    from ollama_forge.model_family import get_family_stop_tokens
+    from ollama_forge.model_family import get_family_stop_tokens, is_gemma_checkpoint
 
     checkpoint_dir = Path(checkpoint_dir)
     if not (checkpoint_dir / "config.json").is_file():
@@ -314,7 +296,7 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
         add(s)
 
     # Gemma: also read eos/pad from tokenizer_config so we add exact tokens from config
-    if _is_gemma_checkpoint(checkpoint_dir):
+    if is_gemma_checkpoint(checkpoint_dir):
         cfg_path = checkpoint_dir / "tokenizer_config.json"
         if cfg_path.is_file():
             try:
@@ -338,17 +320,13 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
     if getattr(tokenizer, "eos_token", None):
         add(tokenizer.eos_token)
     elif getattr(tokenizer, "eos_token_id", None) is not None:
-        try:
+        with contextlib.suppress(Exception):
             add(tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False))
-        except Exception:
-            pass
     if getattr(tokenizer, "pad_token", None) and tokenizer.pad_token != getattr(tokenizer, "eos_token", None):
         add(tokenizer.pad_token)
     elif getattr(tokenizer, "pad_token_id", None) is not None and tokenizer.pad_token_id != getattr(tokenizer, "eos_token_id", None):
-        try:
+        with contextlib.suppress(Exception):
             add(tokenizer.decode([tokenizer.pad_token_id], skip_special_tokens=False))
-        except Exception:
-            pass
 
     # Common end-of-turn / EOS in chat templates (avoid endless repetition when eos is empty)
     for candidate in (

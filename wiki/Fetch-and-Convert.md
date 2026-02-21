@@ -24,7 +24,7 @@ uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_
 
 - `--gguf-file <filename>` — Use a specific file when the repo has many.
 - `--revision main` — Branch/tag/revision of the repo.
-- `--system "..."`, `--temperature 0.7`, `--num-ctx 4096` — Modelfile options.
+- `--system "..."`, `--temperature 0.7`, `--num-ctx 4096`, `--top-p 0.9`, `--repeat-penalty 1.1` — Modelfile options.
 
 **Gated or private repos:** Set `HF_TOKEN` or run `huggingface-cli login`.
 

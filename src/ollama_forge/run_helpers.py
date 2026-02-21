@@ -7,10 +7,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from ollama_forge.http_util import normalize_base_url
 from ollama_forge.training_data import collect_jsonl_paths
 
 OLLAMA_MISSING_MSG = "Error: ollama not found. Install Ollama and ensure it is on PATH."
@@ -46,6 +48,25 @@ def require_ollama() -> int | None:
     return 1
 
 
+def ping_ollama(base_url: str, timeout: float = 5.0) -> bool:
+    """
+    Check whether an Ollama (or Ollama-compatible) server is reachable at base_url.
+    Uses GET /api/tags. Returns True if the server responds successfully, False otherwise.
+    """
+    url = normalize_base_url(base_url).rstrip("/") + "/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status in (200, 204)
+    except (OSError, ValueError):
+        return False
+
+
+# Timeouts for subprocess calls (seconds)
+OLLAMA_SHOW_TIMEOUT = 60
+OLLAMA_CREATE_TIMEOUT = 300
+
+
 def run_ollama_show_modelfile(model: str) -> str | None:
     """Run `ollama show --modelfile <model>` and return stdout, or None on failure."""
     if not shutil.which("ollama"):
@@ -56,9 +77,10 @@ def run_ollama_show_modelfile(model: str) -> str | None:
             capture_output=True,
             text=True,
             check=True,
+            timeout=OLLAMA_SHOW_TIMEOUT,
         )
         return result.stdout or ""
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
 
 
@@ -76,6 +98,7 @@ def run_ollama_create(
             subprocess.run(
                 ["ollama", "create", name, "-f", str(path)],
                 check=True,
+                timeout=OLLAMA_CREATE_TIMEOUT,
             )
             print(f"Created model {name!r}. Run with: ollama run {name}")
             return 0
@@ -88,6 +111,12 @@ def run_ollama_create(
                 ],
             )
             return 1
+        except subprocess.TimeoutExpired:
+            print_actionable_error(
+                f"ollama create timed out after {OLLAMA_CREATE_TIMEOUT}s",
+                next_steps=["Try again or use a smaller model"],
+            )
+            return 1
         except subprocess.CalledProcessError as e:
             return e.returncode
     with temporary_text_file(modelfile_content, suffix=".Modelfile", prefix="") as path:
@@ -95,6 +124,7 @@ def run_ollama_create(
             subprocess.run(
                 ["ollama", "create", name, "-f", str(path)],
                 check=True,
+                timeout=OLLAMA_CREATE_TIMEOUT,
             )
             print(f"Created model {name!r}. Run with: ollama run {name}")
             return 0
@@ -105,6 +135,12 @@ def run_ollama_create(
                     "Install Ollama from https://ollama.com",
                     "Run: ollama-forge check",
                 ],
+            )
+            return 1
+        except subprocess.TimeoutExpired:
+            print_actionable_error(
+                f"ollama create timed out after {OLLAMA_CREATE_TIMEOUT}s",
+                next_steps=["Try again or use a smaller model"],
             )
             return 1
         except subprocess.CalledProcessError as e:

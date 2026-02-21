@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -59,29 +60,6 @@ def _normalize_message_for_template(m: dict) -> dict:
     if m.get("role") == "tool":
         out["name"] = m.get("name") or ""
     return out
-
-
-def _ollama_forge_to_hf(tools: list[dict] | None) -> list[dict] | None:
-    """Convert Ollama tools to format HF apply_chat_template expects
-    (type, function with name, description, parameters)."""
-    if not tools:
-        return None
-    out = []
-    for t in tools:
-        if t.get("type") != "function":
-            continue
-        fn = t.get("function") or {}
-        out.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": fn.get("name") or "",
-                    "description": fn.get("description") or "",
-                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-                },
-            }
-        )
-    return out if out else None
 
 
 def _process_images_if_supported(
@@ -228,8 +206,10 @@ def _messages_to_input_ids(
     import torch
 
     use_chat_template = getattr(tokenizer, "chat_template", None) is not None
+    from ollama_forge.chat_util import ollama_tools_to_hf
+
     conv = [_normalize_message_for_template(m) for m in messages]
-    hf_tools = _ollama_forge_to_hf(tools)
+    hf_tools = ollama_tools_to_hf(tools)
     encoded = None
     if use_chat_template:
         try:
@@ -602,7 +582,7 @@ def _strip_role_lines_and_hold_prefix(text: str) -> tuple[str, str]:
     for role in _ROLE_PREFIXES:
         r = role.rstrip(":")
         is_prefix = len(rest_lower) < len(r) and r.startswith(rest_lower)
-        if rest_lower == r or rest_lower == role or is_prefix:
+        if rest_lower in (r, role) or is_prefix:
             return "", rest
     return rest, ""
 
@@ -955,10 +935,8 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
                 ev["eval_count"] = 0  # token count not available in stream path
             self.wfile.write((json.dumps(ev) + "\n").encode("utf-8"))
             self.wfile.flush()
-        try:
+        with contextlib.suppress(BrokenPipeError, OSError):
             self.wfile.flush()
-        except (BrokenPipeError, OSError):
-            pass
 
     def _path(self) -> str:
         """Path without query string, normalized."""
