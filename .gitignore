@@ -63,8 +63,8 @@ git-push
 llama.cpp/
 abliterate_lists/
 abliterate-*/
+docs/ intentionally tracked for product/analysis docs (wiki/ is main UX docs)
 blog/
-# docs/ intentionally tracked for product/analysis docs (wiki/ is main UX docs)
 
 # Secrets / env
 .env
