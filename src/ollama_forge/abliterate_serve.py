@@ -11,7 +11,9 @@ from socketserver import ThreadingMixIn
 from threading import Thread
 from typing import Any
 
-from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
+from ollama_forge.log import get_logger
+
+log = get_logger()
 
 
 def _load_model_and_tokenizer(
@@ -23,6 +25,8 @@ def _load_model_and_tokenizer(
 
     import torch
     from transformers import AutoTokenizer
+
+    from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
 
     checkpoint_dir = Path(checkpoint_dir) if isinstance(checkpoint_dir, (str, bytes)) else checkpoint_dir
     if isinstance(checkpoint_dir, bytes):
@@ -105,7 +109,8 @@ def _process_images_if_supported(
         if attention_mask is None:
             attention_mask = input_ids.new_ones(input_ids.shape)
         return input_ids, attention_mask, pixel_values
-    except Exception:
+    except Exception as e:
+        log.warning("Vision processing failed for checkpoint %s: %s", checkpoint_dir, e)
         return None
 
 
@@ -219,7 +224,8 @@ def _messages_to_input_ids(
             if hf_tools:
                 kw["tools"] = hf_tools
             encoded = tokenizer.apply_chat_template(conv, **kw)
-        except Exception:
+        except Exception as e:
+            log.debug("apply_chat_template failed (%s); falling back to plain text format.", e)
             use_chat_template = False
             encoded = None
     if not use_chat_template or encoded is None:
@@ -274,8 +280,8 @@ def _prompt_system_to_input_ids(
                 else torch.ones_like(input_ids, dtype=torch.long)
             )
             return input_ids, attention_mask
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("apply_chat_template failed for generate prompt (%s); using plain text fallback.", e)
     # Fallback
     text = f"System: {system}\n\nUser: {prompt}\n\nAssistant: " if system else f"User: {prompt}\n\nAssistant: "
     if format_instruction and not system:
@@ -835,7 +841,7 @@ def chat_via_serve(
                     print(reply)
                     messages.append({"role": "assistant", "content": reply})
             except (OSError, urllib.error.URLError) as e:
-                print(f"Error talking to serve: {e}", file=sys.stderr)
+                log.error("Error talking to serve: %s", e)
                 messages.pop()  # remove the user message we just added
                 continue
     except (EOFError, KeyboardInterrupt):
@@ -862,7 +868,7 @@ class OllamaCompatHandler(BaseHTTPRequestHandler):
         return getattr(self.server, "_ollama_tokenizer", None)
 
     def log_message(self, format, *args):
-        print(format % args, file=sys.stderr)
+        log.debug(format, *args)
 
     def _send_cors_headers(self):
         """Send CORS headers so browser/Open WebUI can call the API from another origin."""
@@ -1343,8 +1349,8 @@ def serve_abliterated(
     Agents can set OLLAMA_HOST=http://host:port and use the same /api/chat and /api/generate.
     """
     model, tokenizer = _load_model_and_tokenizer(checkpoint_dir, device=device)
-    print(f"Serving abliterated model {model_name!r} at http://{host}:{port}", file=sys.stderr)
-    print(f"Check: curl -s http://127.0.0.1:{port}/api/tags", file=sys.stderr)
+    log.info("Serving abliterated model %r at http://%s:%d", model_name, host, port)
+    log.info("Check: curl -s http://127.0.0.1:%d/api/tags", port)
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True

@@ -12,7 +12,6 @@ from ollama_forge.model_family import (
     get_family_stop_tokens,
     get_family_template_override,
     is_gemma_checkpoint,
-    suggest_gguf_flags,
 )
 
 
@@ -219,10 +218,19 @@ class TestGetFamilyTemplateOverride:
             assert template is not None
             assert "<<start_of_turn>>" in template
 
-    def test_llama_no_override(self) -> None:
-        """Llama has no template override."""
+    def test_llama_has_override(self) -> None:
+        """Llama3 has a tool-capable template override."""
         with tempfile.TemporaryDirectory() as d:
             config = {"model_type": "llama"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            template = get_family_template_override(d)
+            assert template is not None
+            assert "<|start_header_id|>" in template
+
+    def test_phi3_no_override(self) -> None:
+        """Phi3 has stop tokens but no template override."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "phi3"}
             (Path(d) / "config.json").write_text(json.dumps(config))
             template = get_family_template_override(d)
             assert template is None
@@ -265,17 +273,3 @@ class TestGetFamilyName:
             assert get_family_name(d) == "qwen2"
 
 
-class TestSuggestGgufFlags:
-    """Tests for suggest_gguf_flags function."""
-
-    def test_nonexistent_returns_empty(self) -> None:
-        """Non-existent path returns empty dict."""
-        assert suggest_gguf_flags("/nonexistent") == {}
-
-    def test_no_gguf_flags_returns_empty(self) -> None:
-        """Family without gguf_flags returns empty dict."""
-        with tempfile.TemporaryDirectory() as d:
-            config = {"model_type": "llama"}
-            (Path(d) / "config.json").write_text(json.dumps(config))
-            flags = suggest_gguf_flags(d)
-            assert flags == {}

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -618,7 +619,7 @@ def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace
             cmd = action.strip()
             if cmd.lower().startswith("run:"):
                 cmd = cmd[4:].strip()
-            code = subprocess.run(cmd, shell=True)
+            code = subprocess.run(shlex.split(cmd))
             return code.returncode
     elif "actions" in data:
         for step in data["actions"]:
@@ -629,7 +630,7 @@ def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace
                 cmd = step.strip()
                 if cmd.lower().startswith("run:"):
                     cmd = cmd[4:].strip()
-                code = subprocess.run(cmd, shell=True)
+                code = subprocess.run(shlex.split(cmd))
                 last_code = code.returncode
             return last_code
     else:
@@ -2462,16 +2463,18 @@ def _collect_instructions_from_path(path: str | Path) -> list[str]:
     p = Path(path)
     lines: list[str] = []
     if p.is_file():
-        for line in p.open(encoding="utf-8"):
-            s = line.strip()
-            if s and not s.startswith("#"):
-                lines.append(s)
-    elif p.is_dir():
-        for f in sorted(p.glob("*.txt")):
-            for line in f.open(encoding="utf-8"):
+        with p.open(encoding="utf-8") as fh:
+            for line in fh:
                 s = line.strip()
                 if s and not s.startswith("#"):
                     lines.append(s)
+    elif p.is_dir():
+        for f in sorted(p.glob("*.txt")):
+            with f.open(encoding="utf-8") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        lines.append(s)
     return lines
 
 
@@ -3417,8 +3420,9 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "strength": 1.0,
     "atten_strength": None,
     "mlp_strength": None,
-    "skip_begin_layers": 0,
-    "skip_end_layers": 0,
+    "skip_begin_layers": 1,
+    "skip_end_layers": 1,
+    "norm_preserving": True,
     "direction_index": None,
     "strength_kernel": "constant",
     "kernel_center_frac": 0.5,
@@ -3426,6 +3430,7 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "no_requantize": False,
     "quant": "Q4_K_M",
     "template_from": None,
+    "device": "auto",
 }
 
 
@@ -3554,6 +3559,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 num_instructions=getattr(args, "num_instructions", 32),
                 layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
                 n_directions=getattr(args, "num_directions", 1),
+                device=None if getattr(args, "device", "auto") == "auto" else getattr(args, "device", None),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load_run,
                 per_layer_directions=getattr(args, "per_layer_directions", False),
@@ -3587,8 +3593,9 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             strength_kernel=getattr(args, "strength_kernel", "constant"),
             kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
             kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
-            skip_begin_layers=getattr(args, "skip_begin_layers", 0),
-            skip_end_layers=getattr(args, "skip_end_layers", 0),
+            skip_begin_layers=getattr(args, "skip_begin_layers", 1),
+            skip_end_layers=getattr(args, "skip_end_layers", 1),
+            norm_preserving=getattr(args, "norm_preserving", True),
         )
         log.info("Checkpoint saved to %s", checkpoint_dir)
         return 0
@@ -3623,6 +3630,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     num_instructions=getattr(args, "num_instructions", 32),
                     layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
                     n_directions=getattr(args, "num_directions", 1),
+                    device=None if getattr(args, "device", "auto") == "auto" else getattr(args, "device", None),
                     load_in_8bit=getattr(args, "load_in_8bit", False),
                     gguf_file=gguf_file_for_load_run,
                     per_layer_directions=getattr(args, "per_layer_directions", False),
@@ -3636,6 +3644,8 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
 
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    if getattr(torch, "mps", None) and getattr(torch.mps, "empty_cache", None):
+                        torch.mps.empty_cache()
                 except ImportError:
                     pass
                 log.info("Baking ablation into weights and saving checkpoint...")
@@ -3652,8 +3662,9 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     strength_kernel=getattr(args, "strength_kernel", "constant"),
                     kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
                     kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
-                    skip_begin_layers=getattr(args, "skip_begin_layers", 0),
-                    skip_end_layers=getattr(args, "skip_end_layers", 0),
+                    skip_begin_layers=getattr(args, "skip_begin_layers", 1),
+                    skip_end_layers=getattr(args, "skip_end_layers", 1),
+                    norm_preserving=getattr(args, "norm_preserving", True),
                 )
             finally:
                 for t in temp_files:
@@ -3685,6 +3696,8 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 str(checkpoint_abs),
                 "--outfile",
                 str(gguf_path_abs),
+                "--outtype",
+                "bf16",  # Preserve bfloat16 precision; avoids f16 overflow on abliterated weights
             ],
             cwd=str(llama_cpp_dir.resolve()),
             check=True,
@@ -3834,81 +3847,9 @@ def _load_env() -> None:
     load_dotenv(override=False)  # do not overwrite shell exports
 
 
-def main() -> int:
-    _load_env()
-    parser = argparse.ArgumentParser(
-        prog="ollama-forge",
-        description="Create, retrain, ablate, and convert models for local Ollama.",
-        epilog="Quick start: ollama-forge fetch <HF_REPO> --name my-model",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose (debug) output",
-    )
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # check (environment)
-    p_check = subparsers.add_parser(
-        "check",
-        help="Verify ollama, Hugging Face, optional deps, and llama.cpp",
-    )
-    p_check.add_argument(
-        "--json",
-        action="store_true",
-        help="Output machine-readable status (same shape as doctor --json)",
-    )
-    p_check.add_argument(
-        "--fix",
-        action="store_true",
-        help="Apply fixes (same as doctor --fix: uv sync, optional setup-llama-cpp)",
-    )
-    p_check.add_argument(
-        "--fix-llama-cpp",
-        action="store_true",
-        help="With --fix, also run setup-llama-cpp when finetune/quantize missing",
-    )
-    p_check.add_argument(
-        "--llama-cpp-dir",
-        default=None,
-        help="With --fix --fix-llama-cpp, directory for llama.cpp clone",
-    )
-    p_check.set_defaults(handler=_cmd_check)
-
-    # doctor (diagnose + optional fixes)
-    p_doctor = subparsers.add_parser(
-        "doctor",
-        help="Diagnose environment and optionally apply common fixes",
-    )
-    p_doctor.add_argument(
-        "--json",
-        action="store_true",
-        help="Output machine-readable status for CI/scripting",
-    )
-    p_doctor.add_argument(
-        "--fix",
-        action="store_true",
-        help="Apply lightweight fixes (e.g. uv sync)",
-    )
-    p_doctor.add_argument(
-        "--plan",
-        action="store_true",
-        help="With --fix, show planned fix actions without executing",
-    )
-    p_doctor.add_argument(
-        "--fix-llama-cpp",
-        action="store_true",
-        help="Also run setup-llama-cpp when finetune/quantize are missing",
-    )
-    p_doctor.add_argument(
-        "--llama-cpp-dir",
-        default=None,
-        help="Directory for setup-llama-cpp when --fix-llama-cpp is used",
-    )
-    p_doctor.set_defaults(handler=_cmd_doctor)
-
-    # plan (global dry-run wrappers for key flows)
+def _add_plan_args(subparsers) -> "argparse.ArgumentParser":
+    """Register the 'plan' subcommand and all its subparsers."""
     p_plan = subparsers.add_parser(
         "plan",
         help="Preview major operations without executing them",
@@ -4073,6 +4014,654 @@ def main() -> int:
         help="Output saved plan as JSON only",
     )
     p_plan_continue.set_defaults(handler=_cmd_plan_continue)
+    return p_plan
+
+def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
+    """Register the 'abliterate' subcommand and all its subparsers."""
+    p_abliterate = subparsers.add_parser(
+        "abliterate",
+        help="Refusal removal (abliteration); use compute-dir then Sumandora or export to GGUF",
+    )
+    abliterate_sub = p_abliterate.add_subparsers(dest="abliterate_command")
+    p_compute = abliterate_sub.add_parser(
+        "compute-dir",
+        help="Compute refusal direction from harmful/harmless instructions (needs: uv sync --extra abliterate)",
+    )
+    p_compute.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
+    )
+    p_compute.add_argument(
+        "--harmful",
+        help="Path to file with harmful instructions (one per line)",
+    )
+    p_compute.add_argument(
+        "--harmless",
+        help="Path to file with harmless instructions (one per line)",
+    )
+    p_compute.add_argument(
+        "--harmful-dir",
+        help="Directory of .txt files with harmful instructions (alternative to --harmful)",
+    )
+    p_compute.add_argument(
+        "--harmless-dir",
+        help="Directory of .txt files with harmless instructions (alternative to --harmless)",
+    )
+    p_compute.add_argument(
+        "--output",
+        required=True,
+        help="Output path for .pt file",
+    )
+    p_compute.add_argument(
+        "--num-instructions",
+        type=int,
+        default=32,
+        help="Number of instructions to sample (default: 32)",
+    )
+    p_compute.add_argument(
+        "--layer-frac",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Use a single layer fraction (e.g. 0.5); overrides --layer-fracs for faster runs",
+    )
+    p_compute.add_argument(
+        "--layer-fracs",
+        type=float,
+        nargs="+",
+        default=[0.4, 0.5, 0.6],
+        metavar="F",
+        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
+    )
+    p_compute.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a JSON summary (layer_frac, layer_index, gap_norm) to stdout; ignored if --per-layer-directions",
+    )
+    p_compute.add_argument(
+        "--num-directions",
+        type=int,
+        default=1,
+        help="Number of refusal directions from SVD (default: 1)",
+    )
+    p_compute.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
+    )
+    p_compute.add_argument(
+        "--per-layer-directions",
+        action="store_true",
+        help="Compute one refusal direction per layer (Heretic-style); save format usable with --direction-index",
+    )
+    p_compute.set_defaults(handler=_cmd_abliterate_compute_dir)
+
+    p_run = abliterate_sub.add_parser(
+        "run",
+        help="Compute, apply, convert to GGUF, requantize (default), and create Ollama model",
+    )
+    p_run.add_argument(
+        "--model",
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file (omit when using --from-checkpoint)",
+    )
+    p_run.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_run.add_argument(
+        "--from-checkpoint",
+        metavar="DIR",
+        help="Resume from an existing checkpoint dir (skip compute/apply; run GGUF conversion and create)",
+    )
+    p_run.add_argument(
+        "--output-dir",
+        help="Directory for checkpoint and GGUF (default: ./abliterate-<name>, or temp if no --name)",
+    )
+    p_run.add_argument(
+        "--llama-cpp-dir",
+        help="Path to llama.cpp clone (for convert_hf_to_gguf.py); default: ./llama.cpp or ~/llama.cpp",
+    )
+    p_run.add_argument("--harmful", help="Path to file with harmful instructions (one per line)")
+    p_run.add_argument("--harmless", help="Path to file with harmless instructions (one per line)")
+    p_run.add_argument("--harmful-dir", help="Directory of .txt files with harmful instructions")
+    p_run.add_argument("--harmless-dir", help="Directory of .txt files with harmless instructions")
+    p_run.add_argument(
+        "--num-instructions",
+        type=int,
+        default=32,
+        help="Number of instructions for direction (default: 32)",
+    )
+    p_run.add_argument(
+        "--layer-fracs",
+        type=float,
+        nargs="+",
+        default=[0.4, 0.5, 0.6],
+        metavar="F",
+        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
+    )
+    p_run.add_argument(
+        "--num-directions",
+        type=int,
+        default=1,
+        help="Number of refusal directions from SVD (default: 1)",
+    )
+    p_run.add_argument(
+        "--per-layer-directions",
+        action="store_true",
+        help="Compute one refusal direction per layer (Heretic-style); use with --direction-index on apply",
+    )
+    p_run.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
+    )
+    p_run.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip forward-pass verification after ablation (default: verify)",
+    )
+    p_run.add_argument(
+        "--strength",
+        type=float,
+        default=1.0,
+        metavar="ALPHA",
+        help="Ablation strength 0 < ALPHA <= 1 (default: 1.0). Use 0.5–0.7 on small models to reduce coherence loss.",
+    )
+    p_run.add_argument(
+        "--atten-strength",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="Strength for attention layers only (default: same as --strength). Heretic-style: can set lower --mlp-strength to preserve quality.",  # noqa: E501
+    )
+    p_run.add_argument(
+        "--mlp-strength",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",  # noqa: E501
+    )
+    p_run.add_argument(
+        "--skip-begin-layers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of layers to skip at the start (default: 1; skipping layer 0 prevents embedding corruption).",
+    )
+    p_run.add_argument(
+        "--skip-end-layers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of layers to skip at the end (default: 1; skipping the last layer reduces output distribution shift).",
+    )
+    p_run.add_argument(
+        "--no-norm-preserving",
+        dest="norm_preserving",
+        action="store_false",
+        default=True,
+        help="Disable Frobenius-norm rescaling after ablation (default: enabled). "
+             "Use on small models (<3B) or if the output is garbled -- norm rescaling "
+             "amplifies weights per layer and the effect compounds across many layers.",
+    )
+    p_run.add_argument(
+        "--direction-index",
+        type=float,
+        default=None,
+        metavar="IDX",
+        help="With per-layer directions: layer index (int) or blend (float) to use one effective direction for all layers.",  # noqa: E501
+    )
+    p_run.add_argument(
+        "--strength-kernel",
+        choices=("constant", "linear_peak", "gaussian"),
+        default="constant",
+        help="Layer-dependent strength: constant (default), linear_peak (peak at center), gaussian.",
+    )
+    p_run.add_argument(
+        "--kernel-center-frac",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help="Center of strength kernel as layer fraction (default: 0.5).",
+    )
+    p_run.add_argument(
+        "--kernel-width-frac",
+        type=float,
+        default=0.4,
+        metavar="F",
+        help="Width of strength kernel (default: 0.4).",
+    )
+    p_run.add_argument(
+        "--no-requantize",
+        action="store_true",
+        help="Skip quantizing GGUF (default: quantize to --quant to keep size similar to input)",
+    )
+    p_run.add_argument(
+        "--quant",
+        default="Q4_K_M",
+        help="GGUF quantization when requantizing (default: Q4_K_M); requires quantize on PATH",
+    )
+    p_run.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Ollama model to copy chat template from (default: same as --model; pull first for tools)",
+    )
+    p_run.add_argument(
+        "--only-compute",
+        action="store_true",
+        help="Only compute refusal direction (.pt); skip apply, GGUF, and create (resumable run)",
+    )
+    p_run.add_argument(
+        "--only-apply",
+        action="store_true",
+        help="Only apply direction to weights and save checkpoint; requires existing refusal_dir.pt in output dir",
+    )
+    p_run.add_argument(
+        "--only-export",
+        action="store_true",
+        help="Only convert checkpoint to GGUF and create Ollama model; use with --from-checkpoint or existing checkpoint",
+    )
+    p_run.add_argument(
+        "--device",
+        choices=("auto", "cpu", "mps", "cuda"),
+        default="auto",
+        help="Device for the direction-computation forward pass (default: auto — MPS on Apple Silicon, CUDA if available). "
+             "The apply/bake step always runs on CPU. Use 'cpu' if you hit unsupported-op errors on MPS.",
+    )
+    p_run.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
+    )
+    p_run.set_defaults(handler=_cmd_abliterate_run)
+
+    p_download = abliterate_sub.add_parser(
+        "download-lists",
+        help="Download harmful/harmless lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction)",
+    )
+    p_download.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory to write harmful.txt and harmless.txt (default: current dir)",
+    )
+    p_download.add_argument(
+        "--curated-only",
+        action="store_true",
+        help="Copy only the small curated lists from the package (no network); requires package data files",
+    )
+    p_download.set_defaults(handler=_cmd_abliterate_download_lists)
+
+    p_chat = abliterate_sub.add_parser(
+        "chat",
+        help="Interactive chat using abliterated checkpoint (HF tokenizer; use when GGUF/Ollama output is garbled)",
+    )
+    p_chat.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Ollama/model name from abliterate run (finds checkpoint in ./abliterate-<name>/checkpoint)",
+    )
+    p_chat.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Path to checkpoint dir (alternative to --name)",
+    )
+    p_chat.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max new tokens per reply (default: from model config max_position_embeddings, capped at 8192)",
+    )
+    p_chat.add_argument(
+        "--serve-url",
+        metavar="URL",
+        default=None,
+        help="Abliterate serve URL first (default: OLLAMA_HOST or http://127.0.0.1:11435); if reachable, chat uses it",
+    )
+    p_chat.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="Do not try an existing serve; always load the checkpoint locally",
+    )
+    p_chat.add_argument(
+        "--device",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon (e.g. histogram_mps).",
+    )
+    p_chat.set_defaults(handler=_cmd_abliterate_chat)
+
+    p_serve = abliterate_sub.add_parser(
+        "serve",
+        help="Ollama-API-compatible server for abliterated model (HF tokenizer); agents use OLLAMA_HOST to point here",
+    )
+    p_serve.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Ollama/model name from abliterate run (checkpoint in ./abliterate-<name>/checkpoint)",
+    )
+    p_serve.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Path to checkpoint directory (alternative to --name)",
+    )
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (use 0.0.0.0 if clients run in Docker/another host)",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=11435,
+        help="Bind port (default: 11435; Ollama: 11434, abliterate proxy: 11436)",
+    )
+    p_serve.add_argument(
+        "--device",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon.",
+    )
+    p_serve.set_defaults(handler=_cmd_abliterate_serve)
+
+    p_evaluate = abliterate_sub.add_parser(
+        "evaluate",
+        help="Run harmful prompts through abliterated checkpoint and count refusals (refusal_markers)",
+    )
+    p_evaluate.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        required=True,
+        help="Path to abliterated checkpoint directory",
+    )
+    p_evaluate.add_argument(
+        "--harmful",
+        metavar="FILE",
+        required=True,
+        help="Path to file with harmful prompts (one per line)",
+    )
+    p_evaluate.add_argument(
+        "--refusal-markers",
+        metavar="FILE",
+        default=None,
+        help="Path to file with refusal marker substrings (default: bundled list)",
+    )
+    p_evaluate.add_argument(
+        "--num-prompts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max number of harmful prompts to run (default: 50)",
+    )
+    p_evaluate.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=256,
+        metavar="N",
+        help="Max new tokens per response (default: 256)",
+    )
+    p_evaluate.add_argument(
+        "--json",
+        action="store_true",
+        help="Output metrics as JSON (refusal_count, total, refusal_rate) for CI",
+    )
+    p_evaluate.set_defaults(handler=_cmd_abliterate_evaluate)
+
+    p_optimize = abliterate_sub.add_parser(
+        "optimize",
+        help="Optuna search over ablation params to minimize refusal rate (requires optuna)",
+    )
+    p_optimize.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id or path (same as used for compute-dir)",
+    )
+    p_optimize.add_argument(
+        "--refusal-pt",
+        required=True,
+        metavar="FILE",
+        help="Path to refusal direction .pt (from compute-dir)",
+    )
+    p_optimize.add_argument(
+        "--harmful",
+        required=True,
+        metavar="FILE",
+        help="Path to harmful prompts for evaluation",
+    )
+    p_optimize.add_argument(
+        "--harmless",
+        default=None,
+        metavar="FILE",
+        help="Path to harmless prompts (optional; only needed if re-computing direction)",
+    )
+    p_optimize.add_argument(
+        "--output-dir",
+        default=".",
+        metavar="DIR",
+        help="Directory to write best params JSON (default: current dir)",
+    )
+    p_optimize.add_argument(
+        "--n-trials",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Number of Optuna trials (default: 20)",
+    )
+    p_optimize.add_argument(
+        "--max-evals",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max evaluations (overrides --n-trials when set)",
+    )
+    p_optimize.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Stop optimization after this many seconds (optional)",
+    )
+    p_optimize.add_argument(
+        "--max-parallel",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Max parallel Optuna trials (default: 1; increase only if enough CPU/memory)",
+    )
+    p_optimize.add_argument(
+        "--num-eval-prompts",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Number of prompts per evaluation (default: 30)",
+    )
+    p_optimize.add_argument(
+        "--refusal-markers",
+        default=None,
+        metavar="FILE",
+        help="Path to refusal markers file (default: bundled)",
+    )
+    p_optimize.add_argument(
+        "--eval-prompt-set",
+        default=None,
+        metavar="PATH",
+        help="After optimize, run security-eval with this prompt set (serve must have best model)",
+    )
+    p_optimize.add_argument(
+        "--eval-base-url",
+        default="http://127.0.0.1:11434",
+        metavar="URL",
+        help="Base URL for post-optimize security eval (default: 127.0.0.1:11434)",
+    )
+    p_optimize.add_argument(
+        "--eval-model",
+        default=None,
+        metavar="NAME",
+        help="Model name for post-optimize eval (default: abliterated)",
+    )
+    p_optimize.add_argument(
+        "--eval-max-prompts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max prompts for post-optimize security eval (default: 50)",
+    )
+    p_optimize.set_defaults(handler=_cmd_abliterate_optimize)
+
+    p_fix_template = abliterate_sub.add_parser(
+        "fix-ollama-template",
+        help="Recreate the Ollama model with chat template from checkpoint (fix garbled ollama run). Destructive: replaces the existing model.",
+    )
+    p_fix_template.add_argument(
+        "--name",
+        metavar="NAME",
+        required=True,
+        help="Ollama model name (e.g. openai/gpt-oss-20b-abliterated)",
+    )
+    p_fix_template.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Checkpoint dir (default: abliterate-<name>/checkpoint)",
+    )
+    p_fix_template.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Use template from this Ollama model (e.g. gemma3:270m) instead of deriving from checkpoint",
+    )
+    p_fix_template.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print or write Modelfile and exit without running ollama create",
+    )
+    p_fix_template.add_argument(
+        "--out-modelfile",
+        help="With --dry-run, write Modelfile to this path",
+    )
+    p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
+
+    p_proxy = abliterate_sub.add_parser(
+        "proxy",
+        help="Lightweight prompt proxy: formats with HF tokenizer, forwards to Ollama (supports tools)",
+    )
+    p_proxy.add_argument(
+        "--name",
+        metavar="NAME",
+        help="Model name from abliterate run (uses abliterate-<name>/checkpoint)",
+    )
+    p_proxy.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Direct path to abliterated checkpoint (HF format)",
+    )
+    p_proxy.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1)",
+    )
+    p_proxy.add_argument(
+        "--port",
+        type=int,
+        default=11436,
+        help="Bind port (default: 11436; Ollama: 11434, abliterate serve: 11435)",
+    )
+    p_proxy.add_argument(
+        "--ollama-target",
+        metavar="URL",
+        help="Ollama URL to forward to (default: OLLAMA_HOST or http://127.0.0.1:11434)",
+    )
+    p_proxy.add_argument(
+        "--no-check-ollama",
+        action="store_true",
+        help="Skip checking that Ollama is reachable before starting proxy (default: check)",
+    )
+    p_proxy.add_argument(
+        "--config",
+        metavar="FILE",
+        help="YAML config file listing models (e.g. models: [{name: my-model, checkpoint: /path}]); cannot use with --name/--checkpoint",  # noqa: E501
+    )
+    p_proxy.add_argument(
+        "--add-model",
+        action="append",
+        metavar="NAME:PATH",
+        help="Register a model (name:checkpoint_path). Repeat for multiple models; cannot use with --name/--checkpoint",
+    )
+    p_proxy.set_defaults(handler=_cmd_abliterate_proxy)
+    return p_abliterate
+
+def main() -> int:
+    _load_env()
+    parser = argparse.ArgumentParser(
+        prog="ollama-forge",
+        description="Create, retrain, ablate, and convert models for local Ollama.",
+        epilog="Quick start: ollama-forge fetch <HF_REPO> --name my-model",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose (debug) output",
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # check (environment)
+    p_check = subparsers.add_parser(
+        "check",
+        help="Verify ollama, Hugging Face, optional deps, and llama.cpp",
+    )
+    p_check.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable status (same shape as doctor --json)",
+    )
+    p_check.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply fixes (same as doctor --fix: uv sync, optional setup-llama-cpp)",
+    )
+    p_check.add_argument(
+        "--fix-llama-cpp",
+        action="store_true",
+        help="With --fix, also run setup-llama-cpp when finetune/quantize missing",
+    )
+    p_check.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="With --fix --fix-llama-cpp, directory for llama.cpp clone",
+    )
+    p_check.set_defaults(handler=_cmd_check)
+
+    # doctor (diagnose + optional fixes)
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="Diagnose environment and optionally apply common fixes",
+    )
+    p_doctor.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable status for CI/scripting",
+    )
+    p_doctor.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply lightweight fixes (e.g. uv sync)",
+    )
+    p_doctor.add_argument(
+        "--plan",
+        action="store_true",
+        help="With --fix, show planned fix actions without executing",
+    )
+    p_doctor.add_argument(
+        "--fix-llama-cpp",
+        action="store_true",
+        help="Also run setup-llama-cpp when finetune/quantize are missing",
+    )
+    p_doctor.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Directory for setup-llama-cpp when --fix-llama-cpp is used",
+    )
+    p_doctor.set_defaults(handler=_cmd_doctor)
+
+    # plan (global dry-run wrappers for key flows)
+    p_plan = _add_plan_args(subparsers)
 
     # quickstart (beginner one-command flow)
     p_quickstart = subparsers.add_parser(
@@ -4712,556 +5301,7 @@ def main() -> int:
     p_finetune.set_defaults(handler=_cmd_train_run)
 
     # abliterate (refusal removal)
-    p_abliterate = subparsers.add_parser(
-        "abliterate",
-        help="Refusal removal (abliteration); use compute-dir then Sumandora or export to GGUF",
-    )
-    abliterate_sub = p_abliterate.add_subparsers(dest="abliterate_command")
-    p_compute = abliterate_sub.add_parser(
-        "compute-dir",
-        help="Compute refusal direction from harmful/harmless instructions (needs: uv sync --extra abliterate)",
-    )
-    p_compute.add_argument(
-        "--model",
-        required=True,
-        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
-    )
-    p_compute.add_argument(
-        "--harmful",
-        help="Path to file with harmful instructions (one per line)",
-    )
-    p_compute.add_argument(
-        "--harmless",
-        help="Path to file with harmless instructions (one per line)",
-    )
-    p_compute.add_argument(
-        "--harmful-dir",
-        help="Directory of .txt files with harmful instructions (alternative to --harmful)",
-    )
-    p_compute.add_argument(
-        "--harmless-dir",
-        help="Directory of .txt files with harmless instructions (alternative to --harmless)",
-    )
-    p_compute.add_argument(
-        "--output",
-        required=True,
-        help="Output path for .pt file",
-    )
-    p_compute.add_argument(
-        "--num-instructions",
-        type=int,
-        default=32,
-        help="Number of instructions to sample (default: 32)",
-    )
-    p_compute.add_argument(
-        "--layer-frac",
-        type=float,
-        default=None,
-        metavar="F",
-        help="Use a single layer fraction (e.g. 0.5); overrides --layer-fracs for faster runs",
-    )
-    p_compute.add_argument(
-        "--layer-fracs",
-        type=float,
-        nargs="+",
-        default=[0.4, 0.5, 0.6],
-        metavar="F",
-        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
-    )
-    p_compute.add_argument(
-        "--json",
-        action="store_true",
-        help="Print a JSON summary (layer_frac, layer_index, gap_norm) to stdout; ignored if --per-layer-directions",
-    )
-    p_compute.add_argument(
-        "--num-directions",
-        type=int,
-        default=1,
-        help="Number of refusal directions from SVD (default: 1)",
-    )
-    p_compute.add_argument(
-        "--load-in-8bit",
-        action="store_true",
-        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
-    )
-    p_compute.add_argument(
-        "--per-layer-directions",
-        action="store_true",
-        help="Compute one refusal direction per layer (Heretic-style); save format usable with --direction-index",
-    )
-    p_compute.set_defaults(handler=_cmd_abliterate_compute_dir)
-
-    p_run = abliterate_sub.add_parser(
-        "run",
-        help="Compute, apply, convert to GGUF, requantize (default), and create Ollama model",
-    )
-    p_run.add_argument(
-        "--model",
-        help="Hugging Face model id, or path to local HF-format dir or .gguf file (omit when using --from-checkpoint)",
-    )
-    p_run.add_argument("--name", required=True, help="Name for the Ollama model")
-    p_run.add_argument(
-        "--from-checkpoint",
-        metavar="DIR",
-        help="Resume from an existing checkpoint dir (skip compute/apply; run GGUF conversion and create)",
-    )
-    p_run.add_argument(
-        "--output-dir",
-        help="Directory for checkpoint and GGUF (default: ./abliterate-<name>, or temp if no --name)",
-    )
-    p_run.add_argument(
-        "--llama-cpp-dir",
-        help="Path to llama.cpp clone (for convert_hf_to_gguf.py); default: ./llama.cpp or ~/llama.cpp",
-    )
-    p_run.add_argument("--harmful", help="Path to file with harmful instructions (one per line)")
-    p_run.add_argument("--harmless", help="Path to file with harmless instructions (one per line)")
-    p_run.add_argument("--harmful-dir", help="Directory of .txt files with harmful instructions")
-    p_run.add_argument("--harmless-dir", help="Directory of .txt files with harmless instructions")
-    p_run.add_argument(
-        "--num-instructions",
-        type=int,
-        default=32,
-        help="Number of instructions for direction (default: 32)",
-    )
-    p_run.add_argument(
-        "--layer-fracs",
-        type=float,
-        nargs="+",
-        default=[0.4, 0.5, 0.6],
-        metavar="F",
-        help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
-    )
-    p_run.add_argument(
-        "--num-directions",
-        type=int,
-        default=1,
-        help="Number of refusal directions from SVD (default: 1)",
-    )
-    p_run.add_argument(
-        "--per-layer-directions",
-        action="store_true",
-        help="Compute one refusal direction per layer (Heretic-style); use with --direction-index on apply",
-    )
-    p_run.add_argument(
-        "--load-in-8bit",
-        action="store_true",
-        help="Load model in 8-bit (bitsandbytes) to avoid OOM on large/MXFP4 models",
-    )
-    p_run.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="Skip forward-pass verification after ablation (default: verify)",
-    )
-    p_run.add_argument(
-        "--strength",
-        type=float,
-        default=1.0,
-        metavar="ALPHA",
-        help="Ablation strength 0 < ALPHA <= 1 (default: 1.0). Use 0.5–0.7 on small models to reduce coherence loss.",
-    )
-    p_run.add_argument(
-        "--atten-strength",
-        type=float,
-        default=None,
-        metavar="ALPHA",
-        help="Strength for attention layers only (default: same as --strength). Heretic-style: can set lower --mlp-strength to preserve quality.",  # noqa: E501
-    )
-    p_run.add_argument(
-        "--mlp-strength",
-        type=float,
-        default=None,
-        metavar="ALPHA",
-        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",  # noqa: E501
-    )
-    p_run.add_argument(
-        "--skip-begin-layers",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Number of layers to skip at the start (default: 0 for full abliteration).",
-    )
-    p_run.add_argument(
-        "--skip-end-layers",
-        type=int,
-        default=0,
-        metavar="N",
-        help="Number of layers to skip at the end (default: 0 for full abliteration).",
-    )
-    p_run.add_argument(
-        "--direction-index",
-        type=float,
-        default=None,
-        metavar="IDX",
-        help="With per-layer directions: layer index (int) or blend (float) to use one effective direction for all layers.",  # noqa: E501
-    )
-    p_run.add_argument(
-        "--strength-kernel",
-        choices=("constant", "linear_peak", "gaussian"),
-        default="constant",
-        help="Layer-dependent strength: constant (default), linear_peak (peak at center), gaussian.",
-    )
-    p_run.add_argument(
-        "--kernel-center-frac",
-        type=float,
-        default=0.5,
-        metavar="F",
-        help="Center of strength kernel as layer fraction (default: 0.5).",
-    )
-    p_run.add_argument(
-        "--kernel-width-frac",
-        type=float,
-        default=0.4,
-        metavar="F",
-        help="Width of strength kernel (default: 0.4).",
-    )
-    p_run.add_argument(
-        "--no-requantize",
-        action="store_true",
-        help="Skip quantizing GGUF (default: quantize to --quant to keep size similar to input)",
-    )
-    p_run.add_argument(
-        "--quant",
-        default="Q4_K_M",
-        help="GGUF quantization when requantizing (default: Q4_K_M); requires quantize on PATH",
-    )
-    p_run.add_argument(
-        "--template-from",
-        metavar="OLLAMA_MODEL",
-        help="Ollama model to copy chat template from (default: same as --model; pull first for tools)",
-    )
-    p_run.add_argument(
-        "--only-compute",
-        action="store_true",
-        help="Only compute refusal direction (.pt); skip apply, GGUF, and create (resumable run)",
-    )
-    p_run.add_argument(
-        "--only-apply",
-        action="store_true",
-        help="Only apply direction to weights and save checkpoint; requires existing refusal_dir.pt in output dir",
-    )
-    p_run.add_argument(
-        "--only-export",
-        action="store_true",
-        help="Only convert checkpoint to GGUF and create Ollama model; use with --from-checkpoint or existing checkpoint",
-    )
-    p_run.add_argument(
-        "--config",
-        metavar="FILE",
-        help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
-    )
-    p_run.set_defaults(handler=_cmd_abliterate_run)
-
-    p_download = abliterate_sub.add_parser(
-        "download-lists",
-        help="Download harmful/harmless lists (Sumandora, HarmBench, JailbreakBench, AdvBench, refusal_direction)",
-    )
-    p_download.add_argument(
-        "--output-dir",
-        default=".",
-        help="Directory to write harmful.txt and harmless.txt (default: current dir)",
-    )
-    p_download.add_argument(
-        "--curated-only",
-        action="store_true",
-        help="Copy only the small curated lists from the package (no network); requires package data files",
-    )
-    p_download.set_defaults(handler=_cmd_abliterate_download_lists)
-
-    p_chat = abliterate_sub.add_parser(
-        "chat",
-        help="Interactive chat using abliterated checkpoint (HF tokenizer; use when GGUF/Ollama output is garbled)",
-    )
-    p_chat.add_argument(
-        "--name",
-        metavar="NAME",
-        help="Ollama/model name from abliterate run (finds checkpoint in ./abliterate-<name>/checkpoint)",
-    )
-    p_chat.add_argument(
-        "--checkpoint",
-        metavar="DIR",
-        help="Path to checkpoint dir (alternative to --name)",
-    )
-    p_chat.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Max new tokens per reply (default: from model config max_position_embeddings, capped at 8192)",
-    )
-    p_chat.add_argument(
-        "--serve-url",
-        metavar="URL",
-        default=None,
-        help="Abliterate serve URL first (default: OLLAMA_HOST or http://127.0.0.1:11435); if reachable, chat uses it",
-    )
-    p_chat.add_argument(
-        "--no-serve",
-        action="store_true",
-        help="Do not try an existing serve; always load the checkpoint locally",
-    )
-    p_chat.add_argument(
-        "--device",
-        choices=("auto", "cpu"),
-        default="auto",
-        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon (e.g. histogram_mps).",
-    )
-    p_chat.set_defaults(handler=_cmd_abliterate_chat)
-
-    p_serve = abliterate_sub.add_parser(
-        "serve",
-        help="Ollama-API-compatible server for abliterated model (HF tokenizer); agents use OLLAMA_HOST to point here",
-    )
-    p_serve.add_argument(
-        "--name",
-        metavar="NAME",
-        help="Ollama/model name from abliterate run (checkpoint in ./abliterate-<name>/checkpoint)",
-    )
-    p_serve.add_argument(
-        "--checkpoint",
-        metavar="DIR",
-        help="Path to checkpoint directory (alternative to --name)",
-    )
-    p_serve.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Bind host (use 0.0.0.0 if clients run in Docker/another host)",
-    )
-    p_serve.add_argument(
-        "--port",
-        type=int,
-        default=11435,
-        help="Bind port (default: 11435; Ollama: 11434, abliterate proxy: 11436)",
-    )
-    p_serve.add_argument(
-        "--device",
-        choices=("auto", "cpu"),
-        default="auto",
-        help="Device for model (default: auto). Use cpu to avoid MPS errors on Apple Silicon.",
-    )
-    p_serve.set_defaults(handler=_cmd_abliterate_serve)
-
-    p_evaluate = abliterate_sub.add_parser(
-        "evaluate",
-        help="Run harmful prompts through abliterated checkpoint and count refusals (refusal_markers)",
-    )
-    p_evaluate.add_argument(
-        "--checkpoint",
-        metavar="DIR",
-        required=True,
-        help="Path to abliterated checkpoint directory",
-    )
-    p_evaluate.add_argument(
-        "--harmful",
-        metavar="FILE",
-        required=True,
-        help="Path to file with harmful prompts (one per line)",
-    )
-    p_evaluate.add_argument(
-        "--refusal-markers",
-        metavar="FILE",
-        default=None,
-        help="Path to file with refusal marker substrings (default: bundled list)",
-    )
-    p_evaluate.add_argument(
-        "--num-prompts",
-        type=int,
-        default=50,
-        metavar="N",
-        help="Max number of harmful prompts to run (default: 50)",
-    )
-    p_evaluate.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=256,
-        metavar="N",
-        help="Max new tokens per response (default: 256)",
-    )
-    p_evaluate.add_argument(
-        "--json",
-        action="store_true",
-        help="Output metrics as JSON (refusal_count, total, refusal_rate) for CI",
-    )
-    p_evaluate.set_defaults(handler=_cmd_abliterate_evaluate)
-
-    p_optimize = abliterate_sub.add_parser(
-        "optimize",
-        help="Optuna search over ablation params to minimize refusal rate (requires optuna)",
-    )
-    p_optimize.add_argument(
-        "--model",
-        required=True,
-        help="Hugging Face model id or path (same as used for compute-dir)",
-    )
-    p_optimize.add_argument(
-        "--refusal-pt",
-        required=True,
-        metavar="FILE",
-        help="Path to refusal direction .pt (from compute-dir)",
-    )
-    p_optimize.add_argument(
-        "--harmful",
-        required=True,
-        metavar="FILE",
-        help="Path to harmful prompts for evaluation",
-    )
-    p_optimize.add_argument(
-        "--harmless",
-        default=None,
-        metavar="FILE",
-        help="Path to harmless prompts (optional; only needed if re-computing direction)",
-    )
-    p_optimize.add_argument(
-        "--output-dir",
-        default=".",
-        metavar="DIR",
-        help="Directory to write best params JSON (default: current dir)",
-    )
-    p_optimize.add_argument(
-        "--n-trials",
-        type=int,
-        default=20,
-        metavar="N",
-        help="Number of Optuna trials (default: 20)",
-    )
-    p_optimize.add_argument(
-        "--max-evals",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Max evaluations (overrides --n-trials when set)",
-    )
-    p_optimize.add_argument(
-        "--timeout",
-        type=float,
-        default=None,
-        metavar="SECONDS",
-        help="Stop optimization after this many seconds (optional)",
-    )
-    p_optimize.add_argument(
-        "--max-parallel",
-        type=int,
-        default=1,
-        metavar="N",
-        help="Max parallel Optuna trials (default: 1; increase only if enough CPU/memory)",
-    )
-    p_optimize.add_argument(
-        "--num-eval-prompts",
-        type=int,
-        default=30,
-        metavar="N",
-        help="Number of prompts per evaluation (default: 30)",
-    )
-    p_optimize.add_argument(
-        "--refusal-markers",
-        default=None,
-        metavar="FILE",
-        help="Path to refusal markers file (default: bundled)",
-    )
-    p_optimize.add_argument(
-        "--eval-prompt-set",
-        default=None,
-        metavar="PATH",
-        help="After optimize, run security-eval with this prompt set (serve must have best model)",
-    )
-    p_optimize.add_argument(
-        "--eval-base-url",
-        default="http://127.0.0.1:11434",
-        metavar="URL",
-        help="Base URL for post-optimize security eval (default: 127.0.0.1:11434)",
-    )
-    p_optimize.add_argument(
-        "--eval-model",
-        default=None,
-        metavar="NAME",
-        help="Model name for post-optimize eval (default: abliterated)",
-    )
-    p_optimize.add_argument(
-        "--eval-max-prompts",
-        type=int,
-        default=50,
-        metavar="N",
-        help="Max prompts for post-optimize security eval (default: 50)",
-    )
-    p_optimize.set_defaults(handler=_cmd_abliterate_optimize)
-
-    p_fix_template = abliterate_sub.add_parser(
-        "fix-ollama-template",
-        help="Recreate the Ollama model with chat template from checkpoint (fix garbled ollama run). Destructive: replaces the existing model.",
-    )
-    p_fix_template.add_argument(
-        "--name",
-        metavar="NAME",
-        required=True,
-        help="Ollama model name (e.g. openai/gpt-oss-20b-abliterated)",
-    )
-    p_fix_template.add_argument(
-        "--checkpoint",
-        metavar="DIR",
-        help="Checkpoint dir (default: abliterate-<name>/checkpoint)",
-    )
-    p_fix_template.add_argument(
-        "--template-from",
-        metavar="OLLAMA_MODEL",
-        help="Use template from this Ollama model (e.g. gemma3:270m) instead of deriving from checkpoint",
-    )
-    p_fix_template.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print or write Modelfile and exit without running ollama create",
-    )
-    p_fix_template.add_argument(
-        "--out-modelfile",
-        help="With --dry-run, write Modelfile to this path",
-    )
-    p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
-
-    p_proxy = abliterate_sub.add_parser(
-        "proxy",
-        help="Lightweight prompt proxy: formats with HF tokenizer, forwards to Ollama (supports tools)",
-    )
-    p_proxy.add_argument(
-        "--name",
-        metavar="NAME",
-        help="Model name from abliterate run (uses abliterate-<name>/checkpoint)",
-    )
-    p_proxy.add_argument(
-        "--checkpoint",
-        metavar="DIR",
-        help="Direct path to abliterated checkpoint (HF format)",
-    )
-    p_proxy.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Bind host (default: 127.0.0.1)",
-    )
-    p_proxy.add_argument(
-        "--port",
-        type=int,
-        default=11436,
-        help="Bind port (default: 11436; Ollama: 11434, abliterate serve: 11435)",
-    )
-    p_proxy.add_argument(
-        "--ollama-target",
-        metavar="URL",
-        help="Ollama URL to forward to (default: OLLAMA_HOST or http://127.0.0.1:11434)",
-    )
-    p_proxy.add_argument(
-        "--no-check-ollama",
-        action="store_true",
-        help="Skip checking that Ollama is reachable before starting proxy (default: check)",
-    )
-    p_proxy.add_argument(
-        "--config",
-        metavar="FILE",
-        help="YAML config file listing models (e.g. models: [{name: my-model, checkpoint: /path}]); cannot use with --name/--checkpoint",  # noqa: E501
-    )
-    p_proxy.add_argument(
-        "--add-model",
-        action="append",
-        metavar="NAME:PATH",
-        help="Register a model (name:checkpoint_path). Repeat for multiple models; cannot use with --name/--checkpoint",
-    )
-    p_proxy.set_defaults(handler=_cmd_abliterate_proxy)
+    p_abliterate = _add_abliterate_args(subparsers)
 
     # adapters (search Hugging Face for adapters)
     p_adapters = subparsers.add_parser(

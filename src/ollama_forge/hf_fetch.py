@@ -7,6 +7,10 @@ import os
 import re
 from pathlib import Path
 
+from ollama_forge.log import get_logger
+
+log = get_logger()
+
 
 # Use faster downloads when hf_transfer is installed (pip install hf-transfer)
 def _enable_fast_downloads() -> None:
@@ -101,8 +105,9 @@ def verify_gguf_checksum(
     )
     try:
         meta = get_hf_file_metadata(url)
-    except Exception:
-        return  # Cannot get metadata; skip verification
+    except Exception as e:
+        log.warning("Could not fetch Hub metadata for %s/%s; skipping checksum verification: %s", repo_id, filename, e)
+        return
     etag = getattr(meta, "etag", None)
     if not etag:
         return

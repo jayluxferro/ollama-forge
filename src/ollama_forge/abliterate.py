@@ -187,11 +187,27 @@ def compute_refusal_dir(
             model_id = gguf_path_str  # use path as identifier for GGUF-only load
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, **load_from_gguf_kw)
+    if getattr(tokenizer, "chat_template", None) is None:
+        log.warning(
+            "Model %s has no chat_template — it may be a base (pre-trained) model rather than "
+            "an instruction-tuned model. Abliteration targets refusal behaviour learned during "
+            "instruction tuning; on a base model the computed direction is likely noise and will "
+            "corrupt the output. Use an instruction-tuned variant (e.g. %s-it) instead.",
+            model_id,
+            model_id,
+        )
     if device is None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        device = "cpu"
+        device = "mps"
+    # device_map="mps" is unreliable across accelerate versions; use the dict form instead.
+    if device == "mps":
+        device_map: str | dict = {"": "mps"}
+    elif device is None:
+        device_map = "auto"
+    else:
+        device_map = device
     load_kw: dict = {
         "trust_remote_code": True,
-        "device_map": "auto" if device is None else device,
+        "device_map": device_map,
         "low_cpu_mem_usage": True,
         **load_from_gguf_kw,
     }
@@ -212,8 +228,8 @@ def compute_refusal_dir(
                     is_bnb = "BitsAndBytes" in type(qconfig).__name__
                 if not is_bnb:
                     load_in_8bit = False
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Could not inspect quantization_config; leaving load_in_8bit unchanged: %s", e)
         if load_in_8bit:
             try:
                 from transformers import BitsAndBytesConfig
@@ -260,7 +276,8 @@ def compute_refusal_dir(
                         add_special_tokens=True,
                     )
                     input_ids = encoded["input_ids"]
-            except Exception:
+            except Exception as e:
+                log.debug("apply_chat_template failed; falling back to plain tokenizer: %s", e)
                 use_chat_template = False
                 encoded = tokenizer(
                     insn,
@@ -276,69 +293,69 @@ def compute_refusal_dir(
     n_layers = len(layers)
 
     if per_layer_directions:
-        # One direction per layer: (num_layers, hidden_size)
-        per_layer_list = []
+        # One direction per layer: (num_layers, hidden_size).
+        # Collect all hidden states in 2N passes (one per instruction) instead of
+        # n_layers × 2N passes. output_hidden_states=True returns every layer simultaneously.
+        all_layer_indices = list(range(n_layers))
+        harmful_by_layer: dict[int, list] = {idx: [] for idx in all_layer_indices}
+        harmless_by_layer: dict[int, list] = {idx: [] for idx in all_layer_indices}
         with torch.inference_mode():
-            for layer_idx in range(n_layers):
-                h_layer = layer_idx + 1
-                harmful_h = []
-                harmless_h = []
-                for toks in harmful_toks:
-                    out = model(toks, output_hidden_states=True)
-                    harmful_h.append(out.hidden_states[h_layer][:, pos, :])
-                for toks in harmless_toks:
-                    out = model(toks, output_hidden_states=True)
-                    harmless_h.append(out.hidden_states[h_layer][:, pos, :])
-                harm_mean = torch.cat(harmful_h, dim=0).mean(dim=0).float()
-                safe_mean = torch.cat(harmless_h, dim=0).mean(dim=0).float()
-                gap = harm_mean - safe_mean
-                nrm = gap.norm().item()
-                if nrm > 1e-8:
-                    gap = gap / nrm
-                per_layer_list.append(gap)
+            for toks in harmful_toks:
+                out = model(toks, output_hidden_states=True)
+                for idx in all_layer_indices:
+                    harmful_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+            for toks in harmless_toks:
+                out = model(toks, output_hidden_states=True)
+                for idx in all_layer_indices:
+                    harmless_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+        per_layer_list = []
+        for layer_idx in all_layer_indices:
+            harm_mean = torch.cat(harmful_by_layer[layer_idx], dim=0).mean(dim=0).float()
+            safe_mean = torch.cat(harmless_by_layer[layer_idx], dim=0).mean(dim=0).float()
+            gap = harm_mean - safe_mean
+            nrm = gap.norm().item()
+            if nrm > 1e-8:
+                gap = gap / nrm
+            per_layer_list.append(gap)
         directions_tensor = torch.stack(per_layer_list, dim=0)
         torch.save({"per_layer": True, "directions": directions_tensor}, output_path)
         if offload_folder:
             shutil.rmtree(offload_folder, ignore_errors=True)
         return None
 
-    # Direction selection: try each layer_frac, pick layer with largest harmful-harmless gap.
+    # Collect hidden states at all candidate layer indices in a single pass per instruction.
+    # output_hidden_states=True returns every layer's output simultaneously, so we can sample
+    # all candidate fracs in 2N passes instead of (len(layer_fracs) + 1) * 2N passes.
+    candidate_indices = sorted({min(int(len(layers) * f), len(layers) - 1) for f in layer_fracs})
+    harmful_by_layer: dict[int, list] = {idx: [] for idx in candidate_indices}
+    harmless_by_layer: dict[int, list] = {idx: [] for idx in candidate_indices}
+    with torch.inference_mode():
+        for toks in harmful_toks:
+            out = model(toks, output_hidden_states=True)
+            for idx in candidate_indices:
+                harmful_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+        for toks in harmless_toks:
+            out = model(toks, output_hidden_states=True)
+            for idx in candidate_indices:
+                harmless_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+
+    # Select best layer frac from cached tensors — no additional forward passes needed.
     best_layer_frac = layer_fracs[0]
     best_gap_norm = -1.0
+    best_layer_idx = candidate_indices[0]
     for layer_frac in layer_fracs:
-        layer_idx = int(len(layers) * layer_frac)
-        layer_idx = min(layer_idx, len(layers) - 1)
-        h_layer = layer_idx + 1
-        harmful_h = []
-        harmless_h = []
-        with torch.inference_mode():
-            for toks in harmful_toks:
-                out = model(toks, output_hidden_states=True)
-                harmful_h.append(out.hidden_states[h_layer][:, pos, :])
-            for toks in harmless_toks:
-                out = model(toks, output_hidden_states=True)
-                harmless_h.append(out.hidden_states[h_layer][:, pos, :])
-        harm_mean = torch.cat(harmful_h, dim=0).mean(dim=0).float()
-        safe_mean = torch.cat(harmless_h, dim=0).mean(dim=0).float()
+        layer_idx = min(int(len(layers) * layer_frac), len(layers) - 1)
+        harm_mean = torch.cat(harmful_by_layer[layer_idx], dim=0).mean(0).float()
+        safe_mean = torch.cat(harmless_by_layer[layer_idx], dim=0).mean(0).float()
         gap = harm_mean - safe_mean
         gnorm = gap.norm().item()
         if gnorm > best_gap_norm:
             best_gap_norm = gnorm
             best_layer_frac = layer_frac
+            best_layer_idx = layer_idx
 
-    layer_idx = min(int(len(layers) * best_layer_frac), len(layers) - 1)
-    h_layer = layer_idx + 1
-    harmful_hidden = []
-    harmless_hidden = []
-    with torch.inference_mode():
-        for toks in harmful_toks:
-            out = model(toks, output_hidden_states=True)
-            harmful_hidden.append(out.hidden_states[h_layer][:, pos, :])
-        for toks in harmless_toks:
-            out = model(toks, output_hidden_states=True)
-            harmless_hidden.append(out.hidden_states[h_layer][:, pos, :])
-    harmful_mat = torch.cat(harmful_hidden, dim=0).float()
-    harmless_mat = torch.cat(harmless_hidden, dim=0).float()
+    harmful_mat = torch.cat(harmful_by_layer[best_layer_idx], dim=0).float()
+    harmless_mat = torch.cat(harmless_by_layer[best_layer_idx], dim=0).float()
     hidden_size = harmful_mat.size(1)
 
     if n_directions <= 1:
@@ -461,6 +478,7 @@ def apply_refusal_dir_and_save(
 
     loaded = torch.load(refusal_pt_path, map_location="cpu", weights_only=True)
     per_layer = isinstance(loaded, dict) and loaded.get("per_layer") is True
+    d = None  # assigned in the else branch; kept None when per_layer=True
     if per_layer:
         directions_tensor = loaded["directions"].float()
         if directions_tensor.dim() != 2 or directions_tensor.size(1) < 1:
@@ -488,6 +506,18 @@ def apply_refusal_dir_and_save(
 
     if strength_kernel not in ("constant", "linear_peak", "gaussian"):
         raise ValueError(f"strength_kernel must be constant, linear_peak, or gaussian, got {strength_kernel!r}")
+
+    # Warn when norm_preserving + full strength is used together: the Frobenius-norm rescaling
+    # amplifies every weight matrix after direction removal, and the effect accumulates across
+    # all modified layers, which can cause activations to grow unboundedly and produce gibberish.
+    # If you see garbled output, try --strength 0.7-0.9 or --no-norm-preserving.
+    if norm_preserving and (s_attn >= 1.0 or s_mlp >= 1.0):
+        log.warning(
+            "norm_preserving=True with strength=1.0 may cause gibberish output: each ablated "
+            "weight matrix is Frobenius-renormalized, and this amplification accumulates across "
+            "all modified layers. Consider --strength 0.7 or disabling norm_preserving "
+            "(--no-norm-preserving) if the output model generates garbled text."
+        )
 
     use_gguf = gguf_file is not None or (isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf"))
     gguf_path_str = str(gguf_file) if gguf_file else (str(model_id) if use_gguf else None)
@@ -520,18 +550,37 @@ def apply_refusal_dir_and_save(
         )
     start_idx = min(skip_begin_layers, n_layers - 1)
     end_idx = max(start_idx, n_layers - skip_end_layers)
+    if start_idx >= end_idx:
+        log.warning(
+            "Zero layers will be ablated: skip_begin_layers=%d + skip_end_layers=%d >= n_layers=%d. "
+            "The model weights will not be modified. Reduce skip_begin_layers or skip_end_layers.",
+            skip_begin_layers,
+            skip_end_layers,
+            n_layers,
+        )
 
     def _get_D_for_layer(layer_idx: int):
         return get_D_for_layer(
             layer_idx, per_layer, directions_tensor, d, direction_index
         )
 
-    def _linears_with_hidden_in(attn):
-        out = []
-        for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
-            if hasattr(attn, name):
-                out.append(getattr(attn, name))
-        return out
+    def _get_attn_input_linears(attn):
+        """Input-side attention projections (right-multiply to ablate input space): q, k, v.
+        Also handles fused qkv variants (Phi-3, Falcon, GPT-NeoX, etc.)."""
+        # Standard separate projections
+        found = [getattr(attn, n) for n in ("q_proj", "k_proj", "v_proj") if hasattr(attn, n)]
+        if found:
+            return found
+        # Fused qkv projections (Phi-3 qkv_proj, Falcon query_key_value, etc.)
+        for fused_name in ("qkv_proj", "query_key_value", "c_attn"):
+            if hasattr(attn, fused_name):
+                return [getattr(attn, fused_name)]
+        return []
+
+    def _get_attn_output_linears(attn):
+        """Output-side attention projections (left-multiply to ablate output space): o_proj.
+        Handles naming variants: o_proj (LLaMA), out_proj (OPT/BERT), dense (Falcon/GPT-NeoX), c_proj (GPT-2)."""
+        return [getattr(attn, n) for n in ("o_proj", "out_proj", "dense", "c_proj") if hasattr(attn, n)]
 
     def _apply_right(linear, I_minus_DDT):
         w = linear.weight.data.float()
@@ -569,25 +618,36 @@ def apply_refusal_dir_and_save(
         DDT = D @ D.T
         I_minus_DDT_attn = torch.eye(hidden_size) - (s_attn * scale) * DDT
         I_minus_DDT_mlp = torch.eye(hidden_size) - (s_mlp * scale) * DDT
-        # Attention
-        if hasattr(layer, "self_attn"):
-            linears = _linears_with_hidden_in(layer.self_attn)
-        elif hasattr(layer, "attention"):
-            linears = _linears_with_hidden_in(layer.attention)
-        else:
-            linears = []
-        for linear in linears:
-            _apply_right(linear, I_minus_DDT_attn)
-        # MLP
+        # Attention: right-multiply for input-side (q/k/v), left-multiply for output-side (o_proj).
+        # o_proj shape is (hidden_size, num_heads*head_dim), so it needs left multiplication
+        # to project out the refusal direction from its output, not _apply_right which would
+        # silently skip it due to the shape[1] != hidden_size guard.
+        # Attention module: covers self_attn (LLaMA/Mistral/Qwen), attention (BERT/Gemma),
+        # attn (GPT-2/GPT-NeoX).
+        attn = (
+            getattr(layer, "self_attn", None)
+            or getattr(layer, "attention", None)
+            or getattr(layer, "attn", None)
+        )
+        if attn is not None:
+            for linear in _get_attn_input_linears(attn):
+                _apply_right(linear, I_minus_DDT_attn)
+            for linear in _get_attn_output_linears(attn):
+                _apply_left(linear, I_minus_DDT_attn)
+        # MLP: input projections (right-multiply) cover LLaMA gate_proj/up_proj, GPT-2 c_fc,
+        # OPT fc1, Falcon/GPT-NeoX dense_h_to_4h, Mixtral/Yi w1/w3.
+        # Output projections (left-multiply) cover LLaMA down_proj, GPT-2 c_proj, OPT fc2,
+        # Falcon/GPT-NeoX dense_4h_to_h, Mixtral/Yi w2.
         mlp = getattr(layer, "mlp", None)
         if mlp is not None:
-            for name in ("gate_proj", "up_proj"):
+            for name in ("gate_proj", "up_proj", "c_fc", "fc1", "dense_h_to_4h", "w1", "w3"):
                 proj = getattr(mlp, name, None)
                 if proj is not None:
                     _apply_right(proj, I_minus_DDT_mlp)
-            down = getattr(mlp, "down_proj", None)
-            if down is not None:
-                _apply_left(down, I_minus_DDT_mlp)
+            for name in ("down_proj", "c_proj", "fc2", "dense_4h_to_h", "w2"):
+                proj = getattr(mlp, name, None)
+                if proj is not None:
+                    _apply_left(proj, I_minus_DDT_mlp)
 
     if verify:
         with torch.inference_mode():
@@ -597,9 +657,9 @@ def apply_refusal_dir_and_save(
                 out = model(input_ids, labels=input_ids)
                 loss = out.loss.item()
                 if not (loss == loss and abs(loss) != float("inf")):
-                    print("Warning: verification forward pass produced non-finite loss.", file=sys.stderr)
+                    log.warning("Verification forward pass produced non-finite loss.")
             except Exception as e:
-                print(f"Warning: verification forward pass failed: {e}", file=sys.stderr)
+                log.warning("Verification forward pass failed: %s", e)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -607,8 +667,7 @@ def apply_refusal_dir_and_save(
     except NotImplementedError:
         # Model was loaded with a weight conversion (e.g. MXFP4->bf16) that has no reverse.
         # Save state dict and config manually so convert_hf_to_gguf can still read the checkpoint.
-        print("Saving checkpoint manually (large model may take several minutes)...", file=sys.stderr)
-        sys.stderr.flush()
+        log.info("Saving checkpoint manually (large model may take several minutes)...")
         state_dict = model.state_dict()
         # Only tensors (model is already on CPU when device_map='cpu')
         state_dict = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
@@ -617,11 +676,10 @@ def apply_refusal_dir_and_save(
             # torch.save streams to disk; safetensors may use more peak memory for large models
             torch.save(state_dict, out_path)
         except Exception as e:
-            print(f"Error saving state dict: {e}", file=sys.stderr)
+            log.error("Error saving state dict: %s", e)
             raise
         model.config.save_pretrained(output_dir)
-        print("Checkpoint saved.", file=sys.stderr)
-        sys.stderr.flush()
+        log.info("Checkpoint saved.")
     tokenizer.save_pretrained(output_dir)
 
 
@@ -703,7 +761,8 @@ def evaluate_abliteration(
                         return_tensors="pt",
                     )
                     input_ids = enc["input_ids"] if isinstance(enc, dict) else enc
-                except Exception:
+                except Exception as e:
+                    log.debug("apply_chat_template failed in verify; falling back to plain tokenizer: %s", e)
                     input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=True)["input_ids"]
             elif use_gemma:
                 input_ids = tokenizer(

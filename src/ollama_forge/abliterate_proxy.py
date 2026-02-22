@@ -10,7 +10,6 @@ import contextlib
 import json
 import os
 import re
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +18,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any, Iterator
+
+from ollama_forge.log import get_logger
+
+log = get_logger()
 
 # Tokenizer cache size (configurable via OLLAMA_PROXY_TOKENIZER_CACHE_SIZE for multi-model setups)
 _tokenizer_cache_maxsize = max(1, int(os.environ.get("OLLAMA_PROXY_TOKENIZER_CACHE_SIZE", "4")))
@@ -66,7 +69,7 @@ def _ensure_chat_template(tokenizer: Any, checkpoint_dir: Path) -> bool:
                             if isinstance(first.get(sub), str):
                                 tokenizer.chat_template = first[sub]
                                 return True
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
     return False
 
@@ -240,8 +243,8 @@ def format_prompt_with_hf(
             )
             if test_result:
                 apply_kwargs["tools"] = hf_tools
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Tool-support probe for apply_chat_template failed (%s); proceeding without tools.", e)
 
     try:
         prompt = tokenizer.apply_chat_template(hf_messages, **apply_kwargs)
@@ -249,7 +252,7 @@ def format_prompt_with_hf(
             prompt = tokenizer.decode(prompt, skip_special_tokens=False)
         return prompt
     except Exception as e:
-        print(f"Warning: apply_chat_template failed ({e}), falling back to simple format", file=sys.stderr)
+        log.warning("apply_chat_template failed (%s), falling back to simple role:content format.", e)
         parts = []
         for m in messages:
             role = m.get("role", "user")
@@ -347,7 +350,7 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args) -> None:
-        print(f"[proxy] {args[0]}", file=sys.stderr)
+        log.debug("[proxy] %s", args[0] if args else format)
 
     def _send_json(self, status: int, data: Any):
         body = json.dumps(data).encode()
@@ -403,12 +406,32 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     error_data = {"error": resp.decode("utf-8", errors="replace")}
             else:
-                # Streaming error - consume iterator to get error message
-                error_bytes = b"".join(resp)
+                # Streaming error — read up to _ERROR_BODY_LIMIT bytes so a runaway
+                # stream cannot hang the proxy. If the body is larger we append a
+                # truncation marker so callers know the message was cut, rather than
+                # silently returning incomplete JSON or a misleading error string.
+                _ERROR_BODY_LIMIT = 4096
+                chunks: list[bytes] = []
+                total = 0
+                truncated = False
+                for chunk in resp:
+                    remaining = _ERROR_BODY_LIMIT - total
+                    if len(chunk) >= remaining:
+                        chunks.append(chunk[:remaining])
+                        truncated = True
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                error_bytes = b"".join(chunks)
                 try:
                     error_data = json.loads(error_bytes)
+                    if truncated and isinstance(error_data.get("error"), str):
+                        error_data["error"] += " ... [truncated]"
                 except json.JSONDecodeError:
-                    error_data = {"error": error_bytes.decode("utf-8", errors="replace")}
+                    msg = error_bytes.decode("utf-8", errors="replace")
+                    if truncated:
+                        msg += " ... [truncated]"
+                    error_data = {"error": msg}
             self._send_json(status, error_data)
             return
 
@@ -558,7 +581,7 @@ class PromptProxyHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_json(400, {"error": "Invalid JSON"})
             except Exception as e:
-                print(f"Error in /api/chat: {e}", file=sys.stderr)
+                log.error("Error in /api/chat: %s", e)
                 self._send_json(500, {"error": str(e)})
         else:
             self._proxy_passthrough("POST")
@@ -612,25 +635,24 @@ def run_proxy(
         os.environ["OLLAMA_PROXY_TARGET"] = ollama_target
 
     for name, cdir in pairs:
-        print(f"Loading tokenizer for {name!r} from {cdir}...", file=sys.stderr)
+        log.info("Loading tokenizer for %r from %s...", name, cdir)
         try:
             tokenizer = _load_tokenizer(cdir)
-            print(f"  {name}: {type(tokenizer).__name__}", file=sys.stderr)
+            log.info("  %s: %s", name, type(tokenizer).__name__)
         except Exception as e:
-            print(f"Warning: Could not pre-load tokenizer for {name!r}: {e}", file=sys.stderr)
+            log.warning("Could not pre-load tokenizer for %r: %s", name, e)
 
     server = ThreadedHTTPServer((host, port), PromptProxyHandler)
     target = _get_ollama_base()
 
-    print(f"Prompt proxy listening on http://{host}:{port}", file=sys.stderr)
+    log.info("Prompt proxy listening on http://%s:%d", host, port)
     for name, cdir in pairs:
-        print(f"  Model: {name!r} -> {cdir}", file=sys.stderr)
-    print(f"  Forwarding to Ollama at: {target}", file=sys.stderr)
-    print(f"  Set OLLAMA_HOST=http://{host}:{port} for agents", file=sys.stderr)
-    print("", file=sys.stderr)
+        log.info("  Model: %r -> %s", name, cdir)
+    log.info("  Forwarding to Ollama at: %s", target)
+    log.info("  Set OLLAMA_HOST=http://%s:%d for agents", host, port)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down proxy...", file=sys.stderr)
+        log.info("Shutting down proxy...")
         server.shutdown()

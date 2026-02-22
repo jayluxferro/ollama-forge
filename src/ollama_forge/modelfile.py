@@ -7,6 +7,10 @@ import json
 import re
 from pathlib import Path
 
+from ollama_forge.log import get_logger
+
+log = get_logger()
+
 
 def _extract_template_block(content: str) -> str | None:
     """Extract the TEMPLATE \"\"\"...\"\"\" block from Modelfile text. Returns full block or None."""
@@ -127,7 +131,7 @@ def _ensure_chat_template(tokenizer: object, checkpoint_dir: Path) -> bool:
     if cfg_path.is_file():
         try:
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return False
         template = _extract_template_from_config(data)
         if template:
@@ -138,7 +142,7 @@ def _ensure_chat_template(tokenizer: object, checkpoint_dir: Path) -> bool:
         try:
             tokenizer.chat_template = jinja_path.read_text(encoding="utf-8")
             return True
-        except Exception:
+        except (OSError, UnicodeDecodeError):
             pass
     return False
 
@@ -187,10 +191,27 @@ def template_from_hf_checkpoint_with_reason(checkpoint_dir: str | Path) -> tuple
     """
     Derive an Ollama TEMPLATE from the checkpoint tokenizer. Returns (template_content, None) on
     success or (None, error_reason) on failure. Use this when you need to show why derivation failed.
+
+    Priority order:
+    1. Model family template_override (preserves tool-calling support for known families)
+    2. HF tokenizer chat_template rendered with placeholder substitution (basic chat only)
+    3. Built-in Gemma template fallback
     """
     checkpoint_dir = Path(checkpoint_dir)
     if not (checkpoint_dir / "config.json").is_file():
         return (None, "checkpoint has no config.json")
+
+    # Priority 1: use the family's pre-built Ollama template when available.
+    # These templates include tool-calling sections that cannot be derived from HF Jinja2
+    # templates (which use different syntax and whose tool sections are stripped during rendering).
+    try:
+        from ollama_forge.model_family import get_family_template_override
+        family_template = get_family_template_override(checkpoint_dir)
+        if family_template:
+            return (family_template, None)
+    except ImportError:
+        pass
+
     try:
         from transformers import AutoTokenizer
     except ImportError:
@@ -206,6 +227,13 @@ def template_from_hf_checkpoint_with_reason(checkpoint_dir: str | Path) -> tuple
         if is_gemma_checkpoint(checkpoint_dir):
             return (_GEMMA_OLLAMA_TEMPLATE, None)
         return (None, "no chat_template on tokenizer and none in tokenizer_config.json or chat_template.jinja")
+
+    # Priority 2: render HF template with placeholder substitution.
+    # NOTE: this approach renders the Jinja2 template with concrete placeholder strings, then
+    # replaces those strings with Ollama Go-template variables. Tool-calling sections in the
+    # HF template are evaluated as absent (no tools passed) and are silently dropped during
+    # rendering, so the resulting template will NOT support tool calls. Use --template-from
+    # <ollama_model> or ensure the family has a template_override for tool support.
     messages_sys_user = [
         {"role": "system", "content": _HF_SYS_PLACEHOLDER},
         {"role": "user", "content": _HF_USER_PLACEHOLDER},
@@ -222,7 +250,11 @@ def template_from_hf_checkpoint_with_reason(checkpoint_dir: str | Path) -> tuple
                 break
     if out is None:
         return (None, "apply_chat_template failed for system+user, user-only, and full conversation (assistant/model)")
-    # Build Ollama template: map placeholders and append {{ .Response }} or truncate after it
+
+    # Build Ollama template: map placeholders and append {{ .Response }} or truncate after it.
+    # We truncate at {{ .Response }} because everything after it in the rendered HF template
+    # is post-generation content (end tokens, next-turn markers) that Ollama adds itself.
+    # Tool sections ARE lost here — use family template_override or --template-from to preserve them.
     if _HF_RESP_PLACEHOLDER in out:
         out = out.replace(_HF_SYS_PLACEHOLDER, "{{ .System }}")
         out = out.replace(_HF_USER_PLACEHOLDER, "{{ .Prompt }}")
@@ -305,8 +337,8 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
                 for key in ("eos_token", "pad_token"):
                     if isinstance(data.get(key), str) and data[key].strip():
                         add(data[key])
-            except Exception:
-                pass
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+                log.debug("Could not read tokenizer_config.json for Gemma stop tokens: %s", e)
 
     try:
         from transformers import AutoTokenizer
@@ -314,7 +346,8 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
         return out
     try:
         tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir), trust_remote_code=True)
-    except Exception:
+    except Exception as e:
+        log.debug("Could not load tokenizer for stop token extraction: %s", e)
         return out
 
     # Tokenizer EOS / PAD

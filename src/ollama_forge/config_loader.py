@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ollama_forge.log import get_logger
+
+log = get_logger()
+
 
 def load_config(path: str | Path) -> dict:
     """Load config from .yaml/.yml or .json. Returns a flat dict (e.g. model, name, num_instructions)."""
@@ -47,6 +51,7 @@ def apply_config_to_args(
     """
     for key, value in config.items():
         if not hasattr(args, key):
+            log.warning("Config key %r is not a recognised option and will be ignored.", key)
             continue
         if only_if_default is not None:
             current = getattr(args, key, None)

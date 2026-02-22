@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ollama_forge.log import get_logger
+
+log = get_logger()
+
 REQUIRED_KEYS = {"instruction", "output"}
 OPTIONAL_KEYS = {"input"}
 
@@ -163,6 +167,7 @@ def convert_jsonl_to_plain_text(
     """
     output = Path(output)
     lines_out: list[str] = []
+    skipped = 0
     for path in paths:
         with path.open(encoding="utf-8") as f:
             for line in f:
@@ -172,9 +177,11 @@ def convert_jsonl_to_plain_text(
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    skipped += 1
                     continue
                 norm = normalize_record(obj) if isinstance(obj, dict) else None
                 if norm is None:
+                    skipped += 1
                     continue
                 inst = norm["instruction"]
                 inp = norm["input"]
@@ -205,6 +212,8 @@ def convert_jsonl_to_plain_text(
                         f"{out_text}\n"
                     )
                     lines_out.append(block)
+    if skipped:
+        log.warning("convert_jsonl_to_plain_text: skipped %d record(s) with invalid JSON or unrecognised format.", skipped)
     output.write_text("\n".join(lines_out), encoding="utf-8")
     return len(lines_out)
 
@@ -217,6 +226,7 @@ def convert_messages_to_alpaca_jsonl(path_in: Path, path_out: Path) -> int:
     path_in = Path(path_in)
     path_out = Path(path_out)
     count = 0
+    skipped = 0
     with path_in.open(encoding="utf-8") as fin, path_out.open("w", encoding="utf-8") as fout:
         for line in fin:
             line = line.strip()
@@ -225,10 +235,14 @@ def convert_messages_to_alpaca_jsonl(path_in: Path, path_out: Path) -> int:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                skipped += 1
                 continue
             norm = normalize_record(obj) if isinstance(obj, dict) else None
             if norm is None:
+                skipped += 1
                 continue
             fout.write(json.dumps(norm, ensure_ascii=False) + "\n")
             count += 1
+    if skipped:
+        log.warning("convert_messages_to_alpaca_jsonl: skipped %d record(s) with invalid JSON or unrecognised format.", skipped)
     return count
