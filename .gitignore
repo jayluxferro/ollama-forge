@@ -63,7 +63,7 @@ git-push
 llama.cpp/
 abliterate_lists/
 abliterate-*/
-.ollama-forge*
+.ollama-forge-*.json
 docs/
 blog/
 
