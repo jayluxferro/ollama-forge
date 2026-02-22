@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from pathlib import Path
 
 
@@ -72,6 +74,55 @@ def download_gguf(
         local_dir_use_symlinks=False,
     )
     return path
+
+
+# ETag from Hub is often SHA256 for LFS files (64 hex chars, optionally wrapped in quotes)
+_ETAG_SHA256_RE = re.compile(r'^"?([0-9a-fA-F]{64})"?$')
+
+
+def verify_gguf_checksum(
+    repo_id: str,
+    filename: str,
+    local_path: str | Path,
+    *,
+    revision: str | None = None,
+) -> None:
+    """
+    Verify the downloaded file's SHA256 against the Hub's ETag when it is a SHA256 (e.g. LFS).
+    Raises ValueError if the Hub exposes a SHA256 ETag and the local file's hash does not match.
+    If the Hub does not expose a SHA256 ETag, returns without error (no-op).
+    """
+    from huggingface_hub import get_hf_file_metadata, hf_hub_url
+
+    url = hf_hub_url(
+        repo_id=repo_id,
+        filename=filename,
+        revision=revision or "main",
+    )
+    try:
+        meta = get_hf_file_metadata(url)
+    except Exception:
+        return  # Cannot get metadata; skip verification
+    etag = getattr(meta, "etag", None)
+    if not etag:
+        return
+    match = _ETAG_SHA256_RE.match(etag.strip())
+    if not match:
+        return  # ETag is not a SHA256 (e.g. git SHA1); skip
+    expected_sha = match.group(1).lower()
+    path = Path(local_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Local file not found: {path}")
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    actual_sha = h.hexdigest().lower()
+    if actual_sha != expected_sha:
+        raise ValueError(
+            f"Checksum mismatch for {filename}: expected {expected_sha}, got {actual_sha}. "
+            "File may be corrupted or incomplete."
+        )
 
 
 def download_adapter(

@@ -4,13 +4,22 @@ Strip harmful/harmless **refusal behavior** from an LLM by computing a "refusal 
 
 **Reference:** [Sumandora/remove-refusals-with-transformers](https://github.com/Sumandora/remove-refusals-with-transformers) — pure Hugging Face Transformers (no TransformerLens).
 
+**User-facing docs:** See the wiki [Abliterate](wiki/Abliterate) for commands, options, and usage (proxy, serve, chat, evaluate, config file, etc.).
+
 ---
 
-## Pipeline overview
+## Built-in pipeline (ollama-tools)
 
-1. **Compute refusal direction** — Run forward passes on harmful vs harmless instructions; take the difference of mean hidden states at a chosen layer/position; normalize. Saves a vector (e.g. `.pt`).
-2. **Apply ablation** — At inference (or by editing weights), subtract the projection of activations onto this direction. The reference repo does this at **inference time** by inserting ablation layers.
-3. **Export for Ollama** — To get a single model file for Ollama you need an **abliterated checkpoint** (modified weights or equivalent). Then: convert to GGUF (llama.cpp) → `ollama-tools convert --gguf <path> --name <name>`.
+ollama-tools provides a **full pipeline** in one command:
+
+1. **Compute refusal direction** — Run forward passes on harmful vs harmless instructions; take the difference of mean hidden states at a chosen layer/position; normalize. Saves a `.pt` file.
+2. **Apply ablation** — Bake the ablation into the model weights (edit linear layers) and save a full Hugging Face checkpoint (in-weight, not inference-time).
+3. **Export to GGUF** — Run llama.cpp `convert_hf_to_gguf.py` on the abliterated checkpoint.
+4. **Create Ollama model** — Build a Modelfile from the GGUF (optional requantization), derive or merge chat template, and run `ollama create`.
+
+**One command:** `uv run ollama-forge abliterate run --model <hf_id_or_path> --name my-abliterated` (requires `uv sync --extra abliterate`). Use `--from-checkpoint` to resume, or `--config <file>` for repeatable YAML/JSON config. After creation: `abliterate chat`, `serve`, or `proxy` (see wiki for tool/function-calling).
+
+**Disk space:** A full `abliterate run` writes a full-precision (bf16) checkpoint and then a GGUF (requantized by default). Ensure sufficient free disk space for both—roughly 2× the model size in GB for the checkpoint, plus the final GGUF size. The checkpoint is under `./abliterate-<name>/checkpoint` (or `--output-dir`). See wiki for memory and requantization options.
 
 ---
 
@@ -44,23 +53,16 @@ If you get an error like `model.model.layers` not found, try the other. The Suma
 
 ## Using ollama-tools
 
-- After you have an **abliterated GGUF** (from whatever pipeline):
-  ```bash
-  ollama-tools convert --gguf /path/to/abliterated.gguf --name my-abliterated
-  ollama run my-abliterated
-  ```
-- To **compute the refusal direction** (saves a `.pt` file for use with Sumandora or your own inference):
-  ```bash
-  uv run ollama-tools abliterate compute-dir --model <hf_id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt
-  ```
-  Requires optional deps: `uv sync --extra abliterate`. Then use Sumandora’s `inference.py` (point it at your `.pt`) or your own script to apply the ablation.
+- **Full pipeline → Ollama model:** `ollama-forge abliterate run --model <id> --name <name>` (see wiki for options and `--config`).
+- **Compute direction only (.pt):** `ollama-forge abliterate compute-dir --model <id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt`. Then use Sumandora’s `inference.py` or your own script for inference-time ablation.
+- **After run:** `ollama-forge abliterate chat --name <name>`, `serve`, or `proxy` (see wiki).
 
 ---
 
 ## Summary
 
-| Step | Action |
+| Goal | Command |
 |------|--------|
-| 1 | Compute refusal direction: `ollama-tools abliterate compute-dir --model <hf_id> --harmful harmful.txt --harmless harmless.txt --output refusal.pt` (requires `uv sync --extra abliterate`), or Sumandora’s `compute_refusal_dir.py`. |
-| 2 | Apply ablation (Sumandora `inference.py` for inference; or custom save for export). |
-| 3 | If you have an abliterated checkpoint: convert to GGUF (llama.cpp) → `ollama-tools convert --gguf <path> --name <name>`. |
+| Full pipeline → Ollama model | `ollama-forge abliterate run --model <id> --name <name>` |
+| Compute direction only (.pt) | `ollama-forge abliterate compute-dir ... --output refusal.pt` |
+| Chat / serve / proxy after run | `ollama-forge abliterate chat/serve/proxy --name <name>` (see wiki) |

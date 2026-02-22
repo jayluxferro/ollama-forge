@@ -191,6 +191,20 @@ def convert_jsonl_to_plain_text(
                         f"{out_text}\n"
                     )
                     lines_out.append(block)
+                elif format_name == "alpaca_plain":
+                    block = f"{inst}\n{out_text}\n"
+                    lines_out.append(block)
+                else:
+                    # fallback: same as llama.cpp
+                    block = (
+                        "### Instruction:\n"
+                        f"{inst}\n\n"
+                        "### Input:\n"
+                        f"{inp if inp else '(none)'}\n\n"
+                        "### Response:\n"
+                        f"{out_text}\n"
+                    )
+                    lines_out.append(block)
     output.write_text("\n".join(lines_out), encoding="utf-8")
     return len(lines_out)
 

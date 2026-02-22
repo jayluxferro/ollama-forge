@@ -84,6 +84,8 @@ uv run ollama-forge abliterate compute-dir --model <hf_id> --harmful my_lists/ha
 
 ## Output size and requantization
 
+**Disk space:** A full `abliterate run` needs free space for the bf16 checkpoint and the GGUF (often ~2× model size for the checkpoint, then the final GGUF). Ensure enough disk before running large models.
+
 The apply step saves a **full-precision** (bf16) checkpoint, so the saved model is larger than a quantized source. If your source was quantized (e.g. 19GB), the checkpoint can be roughly 2× size (e.g. 41GB) until the pipeline requantizes. The **`abliterate run`** command (compute → apply → GGUF → create) requantizes by default so the final GGUF is small again:
 
 - **Default:** After converting the checkpoint to GGUF, the pipeline runs llama.cpp `quantize` to produce a Q4_K_M GGUF (similar size to a typical quantized model). Requires `quantize` or `llama-quantize` on PATH (e.g. from a llama.cpp build).
@@ -205,6 +207,8 @@ Serve implements all Ollama endpoints that apply to a single in-memory model; pu
 ---
 
 ## Tool / function-calling support
+
+**For agents that use tool/function-calling with abliterated models, use `abliterate proxy` (recommended) or `abliterate serve`.** They format prompts with the Hugging Face tokenizer and parse tool calls correctly; raw `ollama run` can produce garbled output or incorrect tool parsing for some model families.
 
 **Abliteration preserves tool support.** Only the refusal direction is ablated in a subset of layers; the rest of the model (and the tokenizer/chat template) is unchanged. If the base model supports tools, the abliterated model does too.
 

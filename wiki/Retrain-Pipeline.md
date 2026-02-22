@@ -2,6 +2,8 @@
 
 End-to-end: **data → adapter → Ollama model**.
 
+**Default trainer:** `train-run` and `finetune` use **llama.cpp** as the default trainer (run `finetune` or `llama-finetune` when `--base-gguf` is set). The generated script from `train --write-script` also targets llama.cpp by default. To use another trainer (e.g. Axolotl, Unsloth), run it manually after `prepare-training-data`, then run `retrain --base <base> --adapter <path> --name <name>`.
+
 ---
 
 ## Steps

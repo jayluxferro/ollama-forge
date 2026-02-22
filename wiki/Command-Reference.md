@@ -78,3 +78,16 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 - **Ports:** Ollama 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).
 
 Use `ollama-forge <command> --help` for options and examples.
+
+---
+
+## Exit codes (scripting)
+
+For scripts and CI, rely on the process exit code:
+
+| Code | Meaning |
+|------|--------|
+| **0** | Success |
+| **1** | Error (invalid args, missing deps, failed step). Stderr has a short message and often "Next:" steps. |
+
+Subcommands (e.g. `abliterate run`, `train-run`) do not use other codes; any failure is 1. Use `--json` where available (e.g. `check --json`, `doctor --json`, `abliterate evaluate --json`) for machine-readable output.

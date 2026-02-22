@@ -43,6 +43,8 @@ uv run ollama-forge retrain --base llama3.2 --adapter /path/to/adapter --name my
 ollama run my-finetuned
 ```
 
+**Adapter format:** A directory (PEFT with `adapter_model.safetensors`, or a directory containing a single `.bin`/`.gguf` from llama.cpp finetune) or a single `.bin`/`.gguf` file. Use `--template-from <ollama_model>` to copy the chat template from an existing Ollama model (e.g. the base) for tool/function-calling support.
+
 ---
 
 ## adapters recommend

@@ -57,6 +57,13 @@ uv run ollama-forge abliterate download-lists --output-dir ./my_lists
 uv run ollama-forge abliterate run --model <model> --name my-abliterated --harmful my_lists/harmful.txt --harmless my_lists/harmless.txt
 ```
 
+## Optional: refusal_markers.txt
+
+For **abliterate evaluate**, the pipeline detects refusals by matching response text against a list of marker substrings. By default it uses a built-in list. You can provide a custom file so that responses containing any of these substrings (one per line, `#` lines skipped) are counted as refusals:
+
+- **Path:** `refusal_markers.txt` in this `data/` directory (same package path as the harmful/harmless lists). If the file is missing, the built-in list is used.
+- **Use:** `ollama-forge abliterate evaluate --checkpoint <dir> --harmful <file>`; optional `--refusal-markers <path>` overrides the default or package file.
+
 ## Fallback (no data files)
 
 If the default `.txt` files are missing (e.g. in a minimal install), the CLI falls back to a small built-in set in `ollama_forge.abliterate_defaults` (HARMFUL_DEFAULT / HARMLESS_DEFAULT, ~10 items each). For best results use the bundled files or the curated lists.

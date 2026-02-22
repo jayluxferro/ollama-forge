@@ -153,3 +153,30 @@ def test_load_recipe_yaml_hf_repo() -> None:
         assert r.get("quant") == "Q4_K_M"
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+def test_load_recipe_variables_substitution() -> None:
+    """Recipe variables and env substitution: {{ var }} and ${var}."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        f.write('{"name": "m", "base": "{{ base_model }}", "variables": {"base_model": "llama3.2"}}')
+        path = f.name
+    try:
+        r = load_recipe(path)
+        assert r["base"] == "llama3.2"
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_load_recipe_env_substitution() -> None:
+    """Environment variables are substituted in recipe strings."""
+    import os
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        f.write('{"name": "m", "base": "${OLLAMA_FORGE_TEST_BASE}"}')
+        path = f.name
+    try:
+        os.environ["OLLAMA_FORGE_TEST_BASE"] = "my-base"
+        r = load_recipe(path)
+        assert r["base"] == "my-base"
+    finally:
+        Path(path).unlink(missing_ok=True)
+        os.environ.pop("OLLAMA_FORGE_TEST_BASE", None)

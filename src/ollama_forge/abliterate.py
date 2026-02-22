@@ -10,8 +10,12 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
+from ollama_forge.log import get_logger
 from ollama_forge.model_family import is_gemma_checkpoint
+
+log = get_logger()
 
 
 def _gemma_prompt_for_messages(messages: list[dict]) -> str:
@@ -60,7 +64,7 @@ def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict):
+def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict) -> Any:
     """Call AutoModelForCausalLM.from_pretrained; on Invalid version 'N/A' (e.g. GGUF metadata),
     patch packaging.version and retry."""
     from transformers import AutoModelForCausalLM
@@ -86,7 +90,7 @@ def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict):
             pkg_version.Version = _orig
 
 
-def _model_hidden_size(model):  # noqa: ANN001
+def _model_hidden_size(model: Any) -> int | None:
     """Return hidden_size from config (supports multimodal Gemma 3 text_config)."""
     cfg = getattr(model, "config", None)
     if cfg is None:
@@ -99,7 +103,7 @@ def _model_hidden_size(model):  # noqa: ANN001
     return None
 
 
-def _model_max_position_embeddings(model):  # noqa: ANN001
+def _model_max_position_embeddings(model: Any) -> int | None:
     """Return max_position_embeddings from config (supports text_config for Gemma etc.)."""
     cfg = getattr(model, "config", None)
     if cfg is None:
@@ -115,7 +119,7 @@ def _model_max_position_embeddings(model):  # noqa: ANN001
     return None
 
 
-def get_layers(model):  # noqa: ANN001
+def get_layers(model: Any) -> Any:
     """Return transformer layers (model.model.layers, model.model.language_model.layers, or
     model.transformer.h)."""
     if hasattr(model, "model") and hasattr(model.model, "layers"):
@@ -148,13 +152,14 @@ def compute_refusal_dir(
     load_in_8bit: bool = False,
     gguf_file: str | Path | None = None,
     per_layer_directions: bool = False,
-) -> None:
+) -> dict[str, float | int] | None:
     """
     Compute refusal direction(s) from harmful vs harmless instructions and save to output_path (.pt).
     Tries each layer_frac, picks the layer with largest harmful-harmless gap (direction selection),
     unless per_layer_directions=True: then one direction per layer (num_layers, hidden_size).
     Saves one direction (mean difference) or n_directions (top-k from SVD on difference matrix).
     Requires torch and transformers. Use: uv sync --extra abliterate.
+    Returns a small summary dict (layer_frac, layer_index, gap_norm) when not per_layer_directions; else None.
     """
     import torch
     from transformers import AutoTokenizer
@@ -295,7 +300,7 @@ def compute_refusal_dir(
         torch.save({"per_layer": True, "directions": directions_tensor}, output_path)
         if offload_folder:
             shutil.rmtree(offload_folder, ignore_errors=True)
-        return
+        return None
 
     # Direction selection: try each layer_frac, pick layer with largest harmful-harmless gap.
     best_layer_frac = layer_fracs[0]
@@ -354,6 +359,11 @@ def compute_refusal_dir(
     torch.save(refusal_dir, output_path)
     if offload_folder:
         shutil.rmtree(offload_folder, ignore_errors=True)
+    return {
+        "layer_frac": best_layer_frac,
+        "layer_index": layer_idx,
+        "gap_norm": best_gap_norm,
+    }
 
 
 def _strength_kernel_scale(
@@ -377,6 +387,35 @@ def _strength_kernel_scale(
         sigma = max(0.01, width_frac)
         return math.exp(-((x - center_frac) ** 2) / (2 * sigma**2))
     return 1.0
+
+
+def get_D_for_layer(
+    layer_idx: int,
+    per_layer: bool,
+    directions_tensor: Any,
+    single_d: Any,
+    direction_index: int | float | None,
+) -> Any:
+    """Return the D matrix (hidden_size, 1) for a given layer. Used by apply_refusal_dir_and_save."""
+    if not per_layer:
+        return single_d
+    n_saved_layers = directions_tensor.size(0)
+    if direction_index is None:
+        idx = min(layer_idx, n_saved_layers - 1)
+        return directions_tensor[idx : idx + 1].T
+    if isinstance(direction_index, int):
+        idx = max(0, min(direction_index, n_saved_layers - 1))
+        return directions_tensor[idx : idx + 1].T
+    lo = max(0, min(int(direction_index), n_saved_layers - 1))
+    hi = min(lo + 1, n_saved_layers - 1)
+    alpha = direction_index - int(direction_index)
+    if alpha <= 0:
+        return directions_tensor[lo : lo + 1].T
+    blend = (1 - alpha) * directions_tensor[lo] + alpha * directions_tensor[hi]
+    nrm = blend.norm().item()
+    if nrm > 1e-8:
+        blend = blend / nrm
+    return blend.unsqueeze(1)
 
 
 def apply_refusal_dir_and_save(
@@ -472,28 +511,20 @@ def apply_refusal_dir_and_save(
 
     layers = get_layers(model)
     n_layers = len(layers)
+    if per_layer and n_saved_layers != n_layers:
+        log.warning(
+            "Per-layer directions: saved directions=%d, model layers=%d; "
+            "extra layers will reuse the last direction, fewer layers will use the first N.",
+            n_saved_layers,
+            n_layers,
+        )
     start_idx = min(skip_begin_layers, n_layers - 1)
     end_idx = max(start_idx, n_layers - skip_end_layers)
 
     def _get_D_for_layer(layer_idx: int):
-        if per_layer:
-            if direction_index is None:
-                idx = min(layer_idx, n_saved_layers - 1)
-                return directions_tensor[idx : idx + 1].T
-            if isinstance(direction_index, int):
-                idx = max(0, min(direction_index, n_saved_layers - 1))
-                return directions_tensor[idx : idx + 1].T
-            lo = max(0, min(int(direction_index), n_saved_layers - 1))
-            hi = min(lo + 1, n_saved_layers - 1)
-            alpha = direction_index - int(direction_index)
-            if alpha <= 0:
-                return directions_tensor[lo : lo + 1].T
-            blend = (1 - alpha) * directions_tensor[lo] + alpha * directions_tensor[hi]
-            nrm = blend.norm().item()
-            if nrm > 1e-8:
-                blend = blend / nrm
-            return blend.unsqueeze(1)
-        return d
+        return get_D_for_layer(
+            layer_idx, per_layer, directions_tensor, d, direction_index
+        )
 
     def _linears_with_hidden_in(attn):
         out = []
@@ -708,14 +739,17 @@ def optimize_abliteration(
     *,
     harmless_path: str | Path | None = None,
     n_trials: int = 20,
+    timeout: float | None = None,
     num_eval_prompts: int = 30,
     refusal_markers_path: str | Path | None = None,
     gguf_file: str | Path | None = None,
+    n_jobs: int = 1,
 ) -> dict:
     """
     Use Optuna to search over ablation parameters (strength, skip layers, etc.),
     minimizing refusal rate on harmful prompts. Each trial: apply with suggested
     params to a temp checkpoint, evaluate, return refusal_rate. Requires optuna.
+    When n_jobs > 1, trials run in parallel (resource-heavy; ensure enough CPU/memory).
     """
     try:
         import optuna
@@ -756,7 +790,13 @@ def optimize_abliteration(
         return metrics["refusal_rate"]
 
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        timeout=timeout,
+        show_progress_bar=True,
+        n_jobs=n_jobs,
+    )
     best = study.best_params
     best["refusal_rate"] = study.best_value
     best_path = output_dir / "optimize_best_params.json"

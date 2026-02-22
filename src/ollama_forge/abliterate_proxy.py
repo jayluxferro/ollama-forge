@@ -33,7 +33,7 @@ def _get_ollama_base() -> str:
 
 
 @lru_cache(maxsize=_tokenizer_cache_maxsize)
-def _load_tokenizer(checkpoint_dir: str):
+def _load_tokenizer(checkpoint_dir: str) -> Any:
     """Load and cache HF tokenizer from checkpoint."""
     from transformers import AutoTokenizer
 
@@ -41,7 +41,7 @@ def _load_tokenizer(checkpoint_dir: str):
     return tokenizer
 
 
-def _ensure_chat_template(tokenizer, checkpoint_dir: Path) -> bool:
+def _ensure_chat_template(tokenizer: Any, checkpoint_dir: Path) -> bool:
     """Load chat_template from checkpoint if tokenizer doesn't have one."""
     if getattr(tokenizer, "chat_template", None):
         return True

@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -9,12 +10,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
-from ollama_forge.hf_fetch import download_adapter, download_gguf, list_gguf_files, pick_one_gguf
+from ollama_forge.hf_fetch import (
+    download_adapter,
+    download_gguf,
+    list_gguf_files,
+    pick_one_gguf,
+    verify_gguf_checksum,
+)
 from ollama_forge.modelfile import (
     build_modelfile,
     get_stop_tokens_from_checkpoint,
@@ -26,7 +34,9 @@ from ollama_forge.modelfile import (
     template_from_hf_checkpoint,
     template_from_hf_checkpoint_with_reason,
 )
+from ollama_forge.config_loader import apply_config_to_args, load_config
 from ollama_forge.recipe import load_recipe
+from ollama_forge.log import get_logger, set_verbose
 from ollama_forge.run_helpers import (
     check_item,
     get_jsonl_paths_or_exit,
@@ -43,6 +53,30 @@ from ollama_forge.training_data import (
     convert_messages_to_alpaca_jsonl,
     validate_training_data_paths,
 )
+
+log = get_logger()
+
+
+def _plan_file_path() -> Path:
+    """Path for persisting last plan (for 'plan continue')."""
+    if os.environ.get("OLLAMA_FORGE_PLAN_FILE"):
+        return Path(os.environ["OLLAMA_FORGE_PLAN_FILE"]).expanduser().resolve()
+    return Path.cwd() / ".ollama-forge-last-plan.json"
+
+
+def _save_last_plan(plan_command: str, plan_obj: dict) -> None:
+    """Persist plan JSON so 'plan continue' can show or re-run it."""
+    path = _plan_file_path()
+    payload = {
+        "plan_command": plan_command,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        **plan_obj,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as e:
+        log.debug("Could not save last plan to %s: %s", path, e)
 
 
 def _which_quantize() -> str | None:
@@ -223,7 +257,17 @@ def _cmd_create_from_base(parser: argparse.ArgumentParser, args: argparse.Namesp
         repeat_penalty=getattr(args, "repeat_penalty", None),
         adapter=resolved_adapter,
     )
-    return run_ollama_create(args.name, content, out_path=args.out_modelfile)
+    template_from = getattr(args, "template_from", None)
+    if template_from:
+        ref_content = run_ollama_show_modelfile(template_from)
+        if ref_content:
+            content = merge_modelfile_with_reference_template(
+                content, ref_content, args.base, template_only=True
+            )
+            log.info("Using chat template from Ollama model %r", template_from)
+        else:
+            log.info("Note: no Ollama model %r found; pull it first for template.", template_from)
+    return run_ollama_create(args.name, content, out_path=getattr(args, "out_modelfile", None))
 
 
 def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -256,6 +300,14 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
         return 1
     template_only = getattr(args, "template_only", False)
     merged = merge_modelfile_with_reference_template(current, reference, base, template_only=template_only)
+    if getattr(args, "dry_run", False):
+        out_path = getattr(args, "out_modelfile", None)
+        if out_path:
+            Path(out_path).write_text(merged, encoding="utf-8")
+            log.info("Wrote Modelfile to %s (dry run)", out_path)
+        else:
+            print(merged)
+        return 0
     return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
 
 
@@ -263,8 +315,14 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     """Download a GGUF from Hugging Face and create an Ollama model (one command)."""
     repo_id = getattr(args, "repo_id", None)
     name = getattr(args, "name", None)
+    non_interactive = getattr(args, "non_interactive", False)
     if repo_id is None or name is None:
-        if sys.stdin.isatty():
+        if (non_interactive or not sys.stdin.isatty()):
+            if repo_id is None:
+                repo_id = "TheBloke/Llama-2-7B-GGUF"
+            if name is None:
+                name = "my-model"
+        elif sys.stdin.isatty():
             if repo_id is None:
                 repo_id = _prompt_for_value(
                     "Repo ID [TheBloke/Llama-2-7B-GGUF]: ",
@@ -277,7 +335,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 "repo_id and --name are required",
                 next_steps=[
                     "Run: ollama-forge fetch <repo_id> --name <name>",
-                    "Or run interactively (from a TTY) to be prompted for missing values",
+                    "Or use --non-interactive to use defaults (repo: TheBloke/Llama-2-7B-GGUF, name: my-model)",
                 ],
             )
             return 1
@@ -288,6 +346,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         return exit_code
     try:
         if args.gguf_file:
+            downloaded_gguf_filename = args.gguf_file
             gguf_path = download_gguf(
                 args.repo_id,
                 args.gguf_file,
@@ -305,13 +364,26 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 )
                 return 1
             chosen = pick_one_gguf(gguf_files, prefer_quant=getattr(args, "quant", None))
+            downloaded_gguf_filename = chosen
             if len(gguf_files) > 1:
                 print(
                     f"We auto-picked {chosen!r}; use --gguf-file <filename> to override.",
                     file=sys.stderr,
                 )
             gguf_path = download_gguf(args.repo_id, chosen, revision=args.revision)
-        print(f"Downloaded to {gguf_path}", file=sys.stderr)
+        log.info("Downloaded to %s", gguf_path)
+        if getattr(args, "verify_checksum", False):
+            try:
+                verify_gguf_checksum(
+                    args.repo_id,
+                    downloaded_gguf_filename,
+                    gguf_path,
+                    revision=args.revision,
+                )
+                log.info("Checksum verified.")
+            except ValueError as e:
+                print_actionable_error("checksum verification failed", cause=str(e), next_steps=["Re-download or omit --verify-checksum"])
+                return 1
     except Exception as e:
         print_actionable_error(
             "download failed",
@@ -365,39 +437,37 @@ def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     elif system is None:
         system_source = "none"
     if not getattr(args, "json", False):
-        print("Quickstart plan:", file=sys.stderr)
-        print(f"  model name: {name}", file=sys.stderr)
-        print(f"  repo: {repo_id}@{getattr(args, 'revision', 'main')}", file=sys.stderr)
-        print(f"  profile/task: {profile} / {task or 'none'}", file=sys.stderr)
+        log.info("Quickstart plan:")
+        log.info("  model name: %s", name)
+        log.info("  repo: %s@%s", repo_id, getattr(args, "revision", "main"))
+        log.info("  profile/task: %s / %s", profile, task or "none")
         print(
             f"  quant/temp/ctx/top_p/repeat: {quant} / {temperature} / {num_ctx} / {top_p} / {repeat_penalty}",
             file=sys.stderr,
         )
-        print(f"  system prompt source: {system_source}", file=sys.stderr)
+        log.info("  system prompt source: %s", system_source)
     if getattr(args, "plan", False):
         action = f"ollama-forge fetch {repo_id} --name {name} --quant {quant}"
         if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "route": "quickstart",
-                        "source": repo_id,
-                        "name": name,
-                        "profile": profile,
-                        "task": task,
-                        "revision": getattr(args, "revision", "main"),
-                        "quant": quant,
-                        "temperature": temperature,
-                        "num_ctx": num_ctx,
-                        "top_p": top_p,
-                        "repeat_penalty": repeat_penalty,
-                        "system_source": system_source,
-                        "action": action,
-                    }
-                )
-            )
+            plan_obj = {
+                "route": "quickstart",
+                "source": repo_id,
+                "name": name,
+                "profile": profile,
+                "task": task,
+                "revision": getattr(args, "revision", "main"),
+                "quant": quant,
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "top_p": top_p,
+                "repeat_penalty": repeat_penalty,
+                "system_source": system_source,
+                "action": action,
+            }
+            _save_last_plan("quickstart", plan_obj)
+            print(json.dumps(plan_obj))
         else:
-            print(f"  action: {action}", file=sys.stderr)
+            log.info("  action: %s", action)
         return 0
     fake = argparse.Namespace(
         repo_id=repo_id,
@@ -517,6 +587,56 @@ def _cmd_plan_adapters_apply(parser: argparse.ArgumentParser, args: argparse.Nam
     return _cmd_adapters_recommend(parser, fake)
 
 
+def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Show or execute the last persisted plan (from plan ... --json)."""
+    path = _plan_file_path()
+    if not path.is_file():
+        print_actionable_error(
+            "No saved plan found",
+            next_steps=[
+                f"Run a plan with --json first, e.g.: ollama-forge plan quickstart --json",
+                f"Plan file path: {path}",
+            ],
+        )
+        return 1
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print_actionable_error("Invalid or unreadable plan file", cause=str(e), next_steps=[f"Remove or fix: {path}"])
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(data))
+        return 0
+    saved_at = data.get("saved_at", "unknown")
+    plan_cmd = data.get("plan_command", "unknown")
+    print(f"Last plan ({plan_cmd}, saved at {saved_at}):", file=sys.stderr)
+    if "action" in data:
+        action = data["action"]
+        print(f"  {action}", file=sys.stderr)
+        if getattr(args, "execute", False):
+            # Strip optional "Run: " prefix
+            cmd = action.strip()
+            if cmd.lower().startswith("run:"):
+                cmd = cmd[4:].strip()
+            code = subprocess.run(cmd, shell=True)
+            return code.returncode
+    elif "actions" in data:
+        for step in data["actions"]:
+            print(f"  - {step}", file=sys.stderr)
+        if getattr(args, "execute", False):
+            last_code = 0
+            for step in data["actions"]:
+                cmd = step.strip()
+                if cmd.lower().startswith("run:"):
+                    cmd = cmd[4:].strip()
+                code = subprocess.run(cmd, shell=True)
+                last_code = code.returncode
+            return last_code
+    else:
+        log.warning("Saved plan has no 'action' or 'actions'; nothing to run.")
+    return 0
+
+
 def _detect_auto_source(source: str) -> str:
     """
     Detect source type for auto workflow.
@@ -587,15 +707,9 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         if not plan_only:
             return False
         if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "route": route,
-                        "source": source,
-                        "action": detail,
-                    }
-                )
-            )
+            plan_obj = {"route": route, "source": source, "action": detail}
+            _save_last_plan("auto", plan_obj)
+            print(json.dumps(plan_obj))
         else:
             print("Auto plan:")
             print(f"  route: {route}")
@@ -760,7 +874,7 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
             revision=args.revision,
             local_dir=adapter_dir,
         )
-        print(f"Downloaded adapter to {adapter_dir}", file=sys.stderr)
+        log.info("Downloaded adapter to %s", adapter_dir)
     except Exception as e:
         print_actionable_error(
             "adapter download failed",
@@ -772,6 +886,17 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
             ],
         )
         return 1
+    resolved_adapter, verify_err, verify_steps = _verify_adapter_and_base(str(adapter_dir), args.base)
+    if verify_err:
+        print_actionable_error(
+            "downloaded adapter format invalid",
+            cause=verify_err,
+            next_steps=verify_steps or [
+                "Repo should contain PEFT files (adapter_config.json + adapter_model.*) or a single .bin/.gguf",
+                "See wiki/Adapters.md for supported formats",
+            ],
+        )
+        return 1
     fake = argparse.Namespace(
         base=args.base,
         name=args.name,
@@ -780,7 +905,7 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
         num_ctx=args.num_ctx,
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
-        adapter=str(adapter_dir),
+        adapter=resolved_adapter or str(adapter_dir),
         out_modelfile=args.out_modelfile,
     )
     return _cmd_create_from_base(parser, fake)
@@ -820,8 +945,18 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         )
         if code != 0:
             return code
-        print(f"Quantized to {out_gguf}", file=sys.stderr)
+        log.info("Quantized to %s", out_gguf)
         gguf_to_use = str(out_gguf)
+    adapter_path: str | None = None
+    if getattr(args, "adapter", None):
+        ap = Path(args.adapter).resolve()
+        if not ap.exists():
+            print_actionable_error(
+                f"Adapter path not found: {ap}",
+                next_steps=["Check --adapter path (directory or .bin/.gguf file)"],
+            )
+            return 1
+        adapter_path = str(ap)
     content = build_modelfile(
         gguf_to_use,
         system=args.system,
@@ -829,12 +964,50 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
         num_ctx=args.num_ctx,
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
+        adapter=adapter_path,
     )
     return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
 
+def _training_data_schema_json() -> dict:
+    """Return JSON schema for accepted training data (Alpaca + messages)."""
+    return {
+        "description": "Training data: one JSON object per line (JSONL). Alpaca or messages format.",
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["instruction", "output"],
+                "properties": {
+                    "instruction": {"type": "string", "description": "Required. The user/task prompt."},
+                    "output": {"type": "string", "description": "Required. The desired assistant response."},
+                    "input": {"type": "string", "description": "Optional. Additional context."},
+                },
+                "additionalProperties": True,
+            },
+            {
+                "type": "object",
+                "required": ["messages"],
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "description": "At least one user and one assistant message with string content.",
+                        "items": {
+                            "type": "object",
+                            "properties": {"role": {"type": "string"}, "content": {"type": "string"}},
+                        },
+                    },
+                },
+                "additionalProperties": True,
+            },
+        ],
+    }
+
+
 def _cmd_validate_training_data(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Validate JSONL training data (instruction/input/output format)."""
+    if getattr(args, "schema", False):
+        print(json.dumps(_training_data_schema_json(), indent=2))
+        return 0
     paths = get_jsonl_paths_or_exit(
         args.data,
         next_steps=[
@@ -862,6 +1035,15 @@ def _cmd_validate_training_data(parser: argparse.ArgumentParser, args: argparse.
 
 def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Convert JSONL training data to plain text for trainers (e.g. llama.cpp)."""
+    if getattr(args, "list_formats", False):
+        print(
+            "Supported formats (use with --format <name> or comma-separated for multiple):\n"
+            "  llama.cpp   - ### Instruction / ### Input / ### Response blocks (llama.cpp finetune --train-data)\n"
+            "  alpaca_plain - instruction\\noutput per sample (minimal; some scripts)\n"
+            "When multiple formats are given, each is written to <output_stem>_<format>.txt",
+            file=sys.stderr,
+        )
+        return 0
     paths = get_jsonl_paths_or_exit(
         args.data,
         next_steps=[
@@ -883,24 +1065,39 @@ def _cmd_prepare_training_data(parser: argparse.ArgumentParser, args: argparse.N
             ],
         )
         return 1
-    out = Path(args.output)
-    try:
-        n_samples = convert_jsonl_to_plain_text(paths, out, format_name=args.format)
-    except OSError as e:
-        print_actionable_error(
-            "failed to write output file",
-            cause=str(e),
-            next_steps=[
-                "Check parent directory exists and is writable",
-                "Try a different output path with -o/--output",
-            ],
+    formats = [f.strip() for f in getattr(args, "format", "llama.cpp").split(",") if f.strip()]
+    if not formats:
+        formats = ["llama.cpp"]
+    out_path = Path(args.output)
+    written: list[tuple[str, Path, int]] = []
+    for fmt in formats:
+        dest = out_path
+        if len(formats) > 1:
+            stem = out_path.stem
+            suffix = out_path.suffix
+            parent = out_path.parent
+            dest = parent / f"{stem}_{fmt.replace('.', '_')}{suffix}"
+        try:
+            n_samples = convert_jsonl_to_plain_text(paths, dest, format_name=fmt)
+            written.append((fmt, dest, n_samples))
+        except OSError as e:
+            print_actionable_error(
+                "failed to write output file",
+                cause=str(e),
+                next_steps=[
+                    "Check parent directory exists and is writable",
+                    "Try a different output path with -o/--output",
+                ],
+            )
+            return 1
+    for fmt, dest, n_samples in written:
+        size = dest.stat().st_size if dest.is_file() else 0
+        print(f"Wrote {n_samples} sample(s) → {dest} ({size} bytes) [{fmt}]")
+    if written and written[0][0] == "llama.cpp":
+        print(
+            "Use with llama.cpp finetune: --train-data ... --sample-start '### Instruction'",
+            file=sys.stderr,
         )
-        return 1
-    print(f"Wrote {n_samples} sample(s) from {len(paths)} file(s) → {out} ({out.stat().st_size} bytes)")
-    print(
-        "Use with llama.cpp finetune: --train-data ... --sample-start '### Instruction'",
-        file=sys.stderr,
-    )
     return 0
 
 
@@ -937,6 +1134,7 @@ def _cmd_train_data_init(parser: argparse.ArgumentParser, args: argparse.Namespa
     """Create a directory with README and sample.jsonl for training data."""
     out_dir = Path(getattr(args, "out", "./data")).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    template = getattr(args, "template", "alpaca")
     readme = """# Training data
 
 Use JSONL (one JSON object per line). Each line must have:
@@ -947,13 +1145,19 @@ Use JSONL (one JSON object per line). Each line must have:
 Validate: `ollama-forge validate-training-data ./data/`
 Prepare: `ollama-forge prepare-training-data ./data/ -o train_prepared.txt --format llama.cpp`
 """
-    sample = """{"instruction": "What is 2+2?", "input": "", "output": "4."}
+    if template == "chat":
+        sample = """{"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]}
+{"messages": [{"role": "user", "content": "Say hello."}, {"role": "assistant", "content": "Hello! How can I help you?"}]}
+{"messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Summarize briefly."}, {"role": "assistant", "content": "Short summary."}]}
+"""
+    else:
+        sample = """{"instruction": "What is 2+2?", "input": "", "output": "4."}
 {"instruction": "Say hello.", "output": "Hello! How can I help you?"}
 {"instruction": "Summarize in one sentence.", "input": "Long document text here...", "output": "Short summary."}
 """
     (out_dir / "README.md").write_text(readme, encoding="utf-8")
     (out_dir / "sample.jsonl").write_text(sample, encoding="utf-8")
-    print(f"Created {out_dir}/README.md and {out_dir}/sample.jsonl")
+    print(f"Created {out_dir}/README.md and {out_dir}/sample.jsonl (template={template})")
     print("Add your own .jsonl files, then run: ollama-forge validate-training-data", str(out_dir))
     return 0
 
@@ -962,8 +1166,8 @@ def _cmd_train_resolve_base(parser: argparse.ArgumentParser, args: argparse.Name
     """Suggest how to get a base GGUF for finetune/train-run (model name → GGUF path)."""
     base_name = (getattr(args, "base_name", None) or "").strip()
     if not base_name:
-        print("Usage: ollama-forge train-resolve-base <base_model_name>", file=sys.stderr)
-        print("Example: ollama-forge train-resolve-base llama3.2", file=sys.stderr)
+        log.info("Usage: ollama-forge train-resolve-base <base_model_name>")
+        log.info("Example: ollama-forge train-resolve-base llama3.2")
         return 1
     print(f"For --base-gguf you need a GGUF file matching the base model '{base_name}'.")
     print("")
@@ -1042,6 +1246,35 @@ echo "  ollama-forge retrain --base $BASE --adapter $ADAPTER_DIR --name $NAME"
 echo ""
 echo "Then: ollama run $NAME"
 """
+    if getattr(args, "execute", False):
+        data_list = data_input if isinstance(data_input, list) else [data_input]
+        code = subprocess.run(
+            ["ollama-forge", "validate-training-data"] + data_list,
+            shell=False,
+        )
+        if code.returncode != 0:
+            return code.returncode
+        code = subprocess.run(
+            ["ollama-forge", "prepare-training-data"] + data_list + ["-o", "train_prepared.txt", "--format", "llama.cpp"],
+            shell=False,
+        )
+        if code.returncode != 0:
+            return code.returncode
+        if base_gguf and run_trainer:
+            code = subprocess.run(
+                [
+                    "finetune",
+                    "--train-data", "train_prepared.txt",
+                    "--sample-start", "### Instruction",
+                    "--model-base", base_gguf,
+                    "--lora-out", "./adapter_out",
+                ],
+                shell=False,
+            )
+            if code.returncode != 0:
+                log.warning("finetune exited with %s; adapter may be incomplete.", code.returncode)
+        print("Next: ollama-forge retrain --base", base, "--adapter ./adapter_out --name", name)
+        return 0
     if getattr(args, "write_script", None):
         out_path = Path(args.write_script)
         out_path.write_text(script, encoding="utf-8")
@@ -1052,8 +1285,39 @@ echo "Then: ollama run $NAME"
     return 0
 
 
+_TRAIN_RUN_DEFAULTS: dict[str, object] = {
+    "data": None,
+    "base": None,
+    "name": None,
+    "base_gguf": None,
+    "prepared_output": None,
+    "adapter_output": None,
+    "format": "llama.cpp",
+    "trainer": "llama.cpp",
+    "system": None,
+    "temperature": None,
+    "num_ctx": None,
+    "top_p": None,
+    "repeat_penalty": None,
+    "out_modelfile": None,
+    "skip_retrain": False,
+}
+
+
 def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Run the full pipeline: validate → prepare → (finetune if available) → retrain."""
+    config_path = getattr(args, "config", None)
+    if config_path:
+        try:
+            cfg = load_config(config_path)
+            apply_config_to_args(args, cfg, only_if_default=_TRAIN_RUN_DEFAULTS)
+        except (FileNotFoundError, ValueError, ImportError) as e:
+            print_actionable_error(
+                "Failed to load config file",
+                cause=str(e),
+                next_steps=["Check --config path and file format (YAML/JSON)"],
+            )
+            return 1
     paths = get_jsonl_paths_or_exit(
         args.data,
         error_msg="Error: no .jsonl files found at --data.",
@@ -1091,7 +1355,7 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             next_steps=["Use --prepared-output <path> or fix permissions"],
         )
         return 1
-    print(f"Prepared {n_samples} sample(s) → {prepared_path}", file=sys.stderr)
+    log.info("Prepared %s sample(s) → %s", n_samples, prepared_path)
     print(
         "Next: run your trainer (e.g. llama.cpp finetune) or use --base-gguf to run it automatically.",
         file=sys.stderr,
@@ -1113,7 +1377,7 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
                 "--lora-out",
                 str(adapter_dir.resolve()),
             ]
-            print("Running finetune (llama.cpp)...", file=sys.stderr)
+            log.info("Running finetune (llama.cpp)...")
             result = subprocess.run(cmd)  # stdout/stderr inherited; progress visible
             if result.returncode != 0:
                 print_actionable_error(
@@ -1126,11 +1390,14 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
                 return 1
             ran_finetune = True
         else:
-            print("finetune not on PATH; skipping. Run: ollama-forge setup-llama-cpp", file=sys.stderr)
+            log.info("finetune not on PATH; skipping. Run: ollama-forge setup-llama-cpp")
     if not ran_finetune:
         intro = "Skipped finetune (need --base-gguf and finetune on PATH). After training:"
         cmd = f"ollama-forge retrain --base {base} --adapter {adapter_dir} --name {name}"
-        print(intro, cmd, file=sys.stderr)
+        log.info("%s %s", intro, cmd)
+        return 0
+    if getattr(args, "skip_retrain", False):
+        log.info("Skipping retrain (--skip-retrain). Adapter at %s; run: ollama-forge retrain --base %s --adapter %s --name %s", adapter_dir, base, adapter_dir, name)
         return 0
     # Step 4: retrain (create-from-base with adapter)
     fake = argparse.Namespace(
@@ -1142,6 +1409,7 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         num_ctx=getattr(args, "num_ctx", None),
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
+        template_from=getattr(args, "template_from", None),
         out_modelfile=getattr(args, "out_modelfile", None),
     )
     return _cmd_create_from_base(parser, fake)
@@ -1195,6 +1463,7 @@ def _namespace_for_create_from_base(recipe: dict, out_modelfile: str | None) -> 
         top_p=recipe.get("top_p"),
         repeat_penalty=recipe.get("repeat_penalty"),
         adapter=recipe.get("adapter"),
+        template_from=recipe.get("template_from"),
         out_modelfile=out_modelfile,
     )
 
@@ -1243,15 +1512,24 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
 
 def _cmd_validate_recipe(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Validate a recipe file (schema and paths) without building."""
+    report: dict = {"valid": False, "errors": [], "fields": {}}
     try:
         recipe = load_recipe(args.recipe)
     except FileNotFoundError as e:
+        report["errors"].append(str(e))
+        if getattr(args, "json", False):
+            print(json.dumps(report))
+            return 1
         print_actionable_error(
             str(e),
             next_steps=["Check recipe path and retry: ollama-forge validate-recipe <recipe.yaml>"],
         )
         return 1
     except (ValueError, ImportError) as e:
+        report["errors"].append(str(e))
+        if getattr(args, "json", False):
+            print(json.dumps(report))
+            return 1
         print_actionable_error(
             "invalid recipe",
             cause=str(e),
@@ -1261,13 +1539,55 @@ def _cmd_validate_recipe(parser: argparse.ArgumentParser, args: argparse.Namespa
             ],
         )
         return 1
+
     source = "base" if "base" in recipe else ("gguf" if "gguf" in recipe else "hf_repo")
+    for key in ("name", "base", "gguf", "hf_repo", "system", "temperature", "quant", "revision", "gguf_file"):
+        if key not in recipe:
+            continue
+        val = recipe[key]
+        field_report: dict = {"value": val, "valid": True}
+        if key == "gguf" and source == "gguf":
+            p = Path(val).resolve()
+            if not p.is_file():
+                field_report["valid"] = False
+                field_report["message"] = f"File not found: {p}"
+                report["errors"].append(field_report["message"])
+        report["fields"][key] = field_report
+
+    if getattr(args, "validate_remote", False) and source == "hf_repo":
+        repo_id = recipe.get("hf_repo")
+        if repo_id:
+            try:
+                from huggingface_hub import HfApi
+                HfApi().repo_info(repo_id=repo_id, repo_type="model")
+                report["fields"].setdefault("hf_repo", {"value": repo_id, "valid": True})["remote"] = True
+            except Exception as e:
+                report["errors"].append(f"Remote repo check failed: {e}")
+                report["fields"].setdefault("hf_repo", {"value": repo_id, "valid": True})["valid"] = False
+                report["fields"]["hf_repo"]["message"] = str(e)
+                report["fields"]["hf_repo"]["remote"] = False
+
+    report["valid"] = len(report["errors"]) == 0
+    report["source"] = source
+
+    if getattr(args, "json", False):
+        print(json.dumps(report))
+        return 0 if report["valid"] else 1
     print(f"Recipe valid: name={recipe['name']!r}, source={source}")
     return 0
 
 
 def _cmd_check(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Verify ollama, HF, optional deps, and llama.cpp; print what's missing."""
+    if getattr(args, "fix", False):
+        fake = argparse.Namespace(
+            fix=True,
+            plan=False,
+            fix_llama_cpp=getattr(args, "fix_llama_cpp", False),
+            llama_cpp_dir=getattr(args, "llama_cpp_dir", None),
+            json=getattr(args, "json", False),
+        )
+        return _cmd_doctor(parser, fake)
     if getattr(args, "json", False):
         status = _env_status()
         print(json.dumps(status))
@@ -1416,14 +1736,16 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         if not planned:
             planned.append("No fix actions needed.")
         if getattr(args, "json", False):
-            print(json.dumps({"route": "doctor-fix", "actions": planned}))
+            plan_obj = {"route": "doctor-fix", "actions": planned}
+            _save_last_plan("doctor-fix", plan_obj)
+            print(json.dumps(plan_obj))
         else:
             print("\nFix plan:")
             for step in planned:
                 print(f"  - {step}")
         return 0
 
-    print("\nApplying fixes...", file=sys.stderr)
+    log.info("Applying fixes...")
     if not status["huggingface_hub"] or not status["pyyaml"]:
         code = run_cmd(
             ["uv", "sync"],
@@ -1434,7 +1756,7 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         )
         if code != 0:
             return code
-        print("Applied: uv sync", file=sys.stderr)
+        log.info("Applied: uv sync")
 
     if getattr(args, "fix_llama_cpp", False) and (not status["finetune"] or not status["quantize"]):
         code = _cmd_setup_llama_cpp(
@@ -1444,16 +1766,10 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         if code != 0:
             return code
     elif (not status["finetune"] or not status["quantize"]) and not getattr(args, "fix_llama_cpp", False):
-        print(
-            "Tip: add --fix-llama-cpp to auto-install llama.cpp tools.",
-            file=sys.stderr,
-        )
+        log.info("Tip: add --fix-llama-cpp to auto-install llama.cpp tools.")
 
     if not status["ollama"]:
-        print(
-            "Cannot auto-install Ollama here. Install from https://ollama.com, then rerun doctor.",
-            file=sys.stderr,
-        )
+        log.info("Cannot auto-install Ollama here. Install from https://ollama.com, then rerun doctor.")
         return 1
 
     final_status = _env_status()
@@ -1465,15 +1781,32 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
 def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Clone and build llama.cpp; print instructions to add to PATH."""
+    if getattr(args, "use_conda", False):
+        print(
+            "Use conda to install llama.cpp: conda install -c conda-forge llama-cpp\n"
+            "Ensure finetune and quantize (or llama-finetune, llama-quantize) are on PATH.\n"
+            "For convert/quantize you need GGUF support; see wiki or --help for CMake options.",
+            file=sys.stderr,
+        )
+        return 0
+    if getattr(args, "use_system", False):
+        q = _which_quantize()
+        ft = shutil.which("finetune") or shutil.which("llama-finetune")
+        if q and ft:
+            print("finetune and quantize are on PATH. No setup needed.")
+            return 0
+        print("finetune or quantize not found on PATH.", file=sys.stderr)
+        print("Install llama.cpp (system package or build from source) and add its bin dir to PATH.", file=sys.stderr)
+        return 1
     target_dir = Path(args.dir or "llama.cpp").resolve()
     if target_dir.exists() and any(target_dir.iterdir()):
-        print(
-            f"Directory already exists and is non-empty: {target_dir}. Use --dir <other> or remove it.",
-            file=sys.stderr,
+        log.warning(
+            "Directory already exists and is non-empty: %s. Use --dir <other> or remove it.",
+            target_dir,
         )
         return 1
     url = "https://github.com/ggerganov/llama.cpp"
-    print(f"Cloning {url} into {target_dir}...", file=sys.stderr)
+    log.info("Cloning %s into %s...", url, target_dir)
     code = run_cmd(
         ["git", "clone", "--depth", "1", url, str(target_dir)],
         not_found_message="Error: git not found. Install git and try again.",
@@ -1483,7 +1816,7 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
         return code
     build_dir = target_dir / "build"
     build_dir.mkdir(exist_ok=True)
-    print("Building (cmake)...", file=sys.stderr)
+    log.info("Building (cmake)...")
     code = run_cmd(
         ["cmake", ".."],
         not_found_message="Error: cmake not found. Install cmake and try again.",
@@ -1505,6 +1838,7 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
         bin_dir = build_dir  # some layouts put binaries in build/
     print(f'\nDone. Add to PATH: export PATH="{bin_dir}:$PATH"')
     print("Then you can use: finetune, quantize, and other llama.cpp tools.")
+    print("Minimal CMake options (if needed): cmake .. -DGGUF_BUILD_TESTS=OFF")
     return 0
 
 
@@ -1556,6 +1890,13 @@ def _score_adapter_repo(repo_id: str, base: str | None) -> int:
     return score
 
 
+def _adapters_recommend_cache_path(query: str, base: str | None, limit: int) -> Path:
+    """Path for caching adapter recommendations (keyed by query, base, limit)."""
+    key = hashlib.sha256(f"{query}|{base or ''}|{limit}".encode()).hexdigest()[:16]
+    cache_dir = Path(os.environ.get("OLLAMA_FORGE_CACHE", Path.home() / ".cache" / "ollama-forge"))
+    return cache_dir / "adapters-recommend" / f"{key}.json"
+
+
 def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Recommend adapter repos and optionally apply the top one."""
     from huggingface_hub import HfApi
@@ -1564,29 +1905,56 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
     query = getattr(args, "query", None) or (f"{base} lora adapter" if base else "lora adapter")
     limit = max(1, int(getattr(args, "limit", 5)))
     json_mode = bool(getattr(args, "json", False))
-    api = HfApi()
-    if not json_mode:
-        print(f"Finding adapter recommendations for query: {query!r}", file=sys.stderr)
-    try:
-        candidates = list(api.list_models(search=query, limit=max(limit * 4, 20)))
-    except Exception as e:
-        print_actionable_error(
-            "failed to search adapter recommendations",
-            cause=str(e),
-            next_steps=[
-                "Check internet/Hugging Face connectivity",
-                'Try a broader query: ollama-forge adapters recommend --query "lora adapter"',
-            ],
-        )
-        return 1
-    if not candidates:
-        print("No adapter recommendations found.")
-        return 0
-    ranked = sorted(
-        ((m.id, _score_adapter_repo(m.id, base)) for m in candidates),
-        key=lambda item: item[1],
-        reverse=True,
-    )[:limit]
+    cache_ttl = int(getattr(args, "cache_ttl", 3600))
+    ranked: list[tuple[str, int]] = []
+    if cache_ttl > 0:
+        cache_path = _adapters_recommend_cache_path(query, base, limit)
+        if cache_path.is_file():
+            try:
+                age = cache_path.stat().st_mtime
+                if (datetime.now(timezone.utc).timestamp() - age) <= cache_ttl:
+                    data = json.loads(cache_path.read_text(encoding="utf-8"))
+                    if data.get("query") == query and data.get("base") == base and data.get("limit") == limit:
+                        ranked = [tuple(x) for x in data.get("ranked", [])]
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+    if not ranked:
+        api = HfApi()
+        if not json_mode:
+            print(f"Finding adapter recommendations for query: {query!r}", file=sys.stderr)
+        try:
+            candidates = list(api.list_models(search=query, limit=max(limit * 4, 20)))
+        except Exception as e:
+            print_actionable_error(
+                "failed to search adapter recommendations",
+                cause=str(e),
+                next_steps=[
+                    "Check internet/Hugging Face connectivity",
+                    'Try a broader query: ollama-forge adapters recommend --query "lora adapter"',
+                ],
+            )
+            return 1
+        if not candidates:
+            print("No adapter recommendations found.")
+            return 0
+        ranked = sorted(
+            ((m.id, _score_adapter_repo(m.id, base)) for m in candidates),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:limit]
+        if cache_ttl > 0:
+            cache_path = _adapters_recommend_cache_path(query, base, limit)
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(
+                    json.dumps(
+                        {"query": query, "base": base, "limit": limit, "ranked": [list(p) for p in ranked]},
+                        indent=0,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
     if not json_mode:
         print("Recommended adapters:\n")
         for repo, score in ranked:
@@ -1622,17 +1990,15 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
     if getattr(args, "plan", False):
         action = f"ollama-forge fetch-adapter {top_repo} --base {base} --name {target_name}"
         if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {
-                        "route": "adapters-apply",
-                        "top_repo": top_repo,
-                        "base": base,
-                        "name": target_name,
-                        "action": action,
-                    }
-                )
-            )
+            plan_obj = {
+                "route": "adapters-apply",
+                "top_repo": top_repo,
+                "base": base,
+                "name": target_name,
+                "action": action,
+            }
+            _save_last_plan("adapters-apply", plan_obj)
+            print(json.dumps(plan_obj))
         else:
             print("\nApply plan:")
             print(f"  top repo: {top_repo}")
@@ -1679,6 +2045,16 @@ def _cmd_hf_cache_ls(parser: argparse.ArgumentParser, args: argparse.Namespace) 
             ],
         )
         return 1
+    if getattr(args, "size", False):
+        total = getattr(cache_info, "size_on_disk", 0) or 0
+        if total >= 1024**3:
+            size_str = f"{total / 1024**3:.1f} GiB"
+        elif total >= 1024**2:
+            size_str = f"{total / 1024**2:.1f} MiB"
+        else:
+            size_str = f"{total} B"
+        print(f"Total cache size: {size_str}")
+        return 0
     verbosity = 1 if getattr(args, "revisions", False) else 0
     print(cache_info.export_as_table(verbosity=verbosity))
     return 0
@@ -1756,6 +2132,15 @@ def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) 
 
 def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Run security eval: load prompt set, query model, score, print KPIs and optionally write CSV/JSON."""
+    if getattr(args, "schema", False):
+        schema_text = """Prompt set schema:
+- .txt: one prompt per line; lines starting with # are skipped. category=default.
+- .jsonl: one JSON object per line. Required: "prompt" (or "text"). Optional:
+  category, expected_refusal (bool), target_for_extraction (string to extract),
+  context, system, turns (multi-turn), tools, dangerous_tool_names, image (path/URL/data URL).
+See wiki or security_eval/loader.py for full field list."""
+        print(schema_text)
+        return 0
     try:
         from ollama_forge.security_eval.run import run_eval
     except ImportError as e:
@@ -1839,6 +2224,31 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
             ],  # noqa: E501
         )
         return 1
+    baseline_model = getattr(args, "baseline", None)
+    if baseline_model:
+        try:
+            run_baseline = run_eval(
+                prompt_set,
+                base_url=base_url,
+                model=baseline_model,
+                output_csv=None,
+                output_json=None,
+                save_to_history=False,
+                use_chat=use_chat,
+                system=system,
+                timeout=timeout,
+                verbose=verbose,
+                retries=getattr(args, "retries", 2),
+                max_prompts=getattr(args, "max_prompts", None),
+                refusal_keywords_path=getattr(args, "refusal_keywords", None),
+            )
+        except Exception as e:
+            print(f"Baseline run failed: {e}", file=sys.stderr)
+            run_baseline = None
+        kpis_base = (run_baseline or {}).get("kpis") or {}
+        print("\n--- Baseline KPIs ---", file=sys.stderr)
+        print(f"  Model: {baseline_model}", file=sys.stderr)
+        print(f"  ASR %: {kpis_base.get('asr_pct', 0):.1f}  Refusal %: {kpis_base.get('refusal_rate_pct', 0):.1f}", file=sys.stderr)
     kpis = run_meta.get("kpis") or {}
     print("\n--- KPIs ---", file=sys.stderr)
     print(f"  Total:        {kpis.get('total', 0)}", file=sys.stderr)
@@ -1846,6 +2256,10 @@ def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Names
     print(f"  Refusal %:    {kpis.get('refusal_rate_pct', 0):.1f}", file=sys.stderr)
     print(f"  Extraction %: {kpis.get('extraction_rate_pct', 0):.1f}", file=sys.stderr)
     print(f"  Errors:       {kpis.get('errors', 0)}", file=sys.stderr)
+    if baseline_model and run_baseline:
+        print("\n--- Comparison (baseline vs model) ---", file=sys.stderr)
+        print(f"  ASR:      {kpis_base.get('asr_pct', 0):.1f}% → {kpis.get('asr_pct', 0):.1f}%", file=sys.stderr)
+        print(f"  Refusal:  {kpis_base.get('refusal_rate_pct', 0):.1f}% → {kpis.get('refusal_rate_pct', 0):.1f}%", file=sys.stderr)
     if kpis.get("avg_latency_sec") is not None:
         print(f"  Avg latency:  {kpis['avg_latency_sec']:.2f}s", file=sys.stderr)
     if kpis.get("expected_refusal_accuracy_pct") is not None:
@@ -1951,6 +2365,46 @@ def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.N
             else (f"{vb:.2f}" if isinstance(vb, float) else str(vb) if vb is not None else "—")
         )  # noqa: E501
         print(f"  {name:<28} {sa:<24} {sb:<24}", file=sys.stderr)
+    export_path = getattr(args, "export", None)
+    if export_path:
+        out = Path(export_path)
+        if out.suffix.lower() == ".csv":
+            with out.open("w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["KPI", label_a, label_b])
+                for key, name in [
+                    ("total", "Total"),
+                    ("asr_pct", "ASR %"),
+                    ("refusal_rate_pct", "Refusal %"),
+                    ("extraction_rate_pct", "Extraction %"),
+                    ("errors", "Errors"),
+                    ("avg_latency_sec", "Avg latency (s)"),
+                    ("expected_refusal_accuracy_pct", "Expected-refusal acc %"),
+                    ("benign_refusal_rate_pct", "Benign refusal %"),
+                ]:
+                    w.writerow([name, kpis_a.get(key, ""), kpis_b.get(key, "")])
+            print(f"Exported comparison to {out}", file=sys.stderr)
+        elif out.suffix.lower() in (".html", ".htm"):
+            rows_html = "".join(
+                f"<tr><td>{name}</td><td>{kpis_a.get(key, '')}</td><td>{kpis_b.get(key, '')}</td></tr>"
+                for key, name in [
+                    ("total", "Total"),
+                    ("asr_pct", "ASR %"),
+                    ("refusal_rate_pct", "Refusal %"),
+                    ("extraction_rate_pct", "Extraction %"),
+                    ("errors", "Errors"),
+                    ("avg_latency_sec", "Avg latency (s)"),
+                    ("expected_refusal_accuracy_pct", "Expected-refusal acc %"),
+                    ("benign_refusal_rate_pct", "Benign refusal %"),
+                ]
+            )
+            html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Security Eval Compare</title></head><body>
+<h1>Compare</h1><table border="1"><tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>
+{rows_html}</table></body></html>"""
+            out.write_text(html, encoding="utf-8")
+            print(f"Exported comparison to {out}", file=sys.stderr)
+        else:
+            print(f"Unknown export format (use .csv or .html): {out}", file=sys.stderr)
     return 0
 
 
@@ -2227,24 +2681,43 @@ def _cmd_abliterate_download_lists(parser: argparse.ArgumentParser, args: argpar
     out_dir.mkdir(parents=True, exist_ok=True)
     harmful_path = out_dir / "harmful.txt"
     harmless_path = out_dir / "harmless.txt"
-    try:
-        harmful_lines = _abliterate_merge_harmful_sources()
-        harmless_lines = _abliterate_merge_harmless_sources()
+    curated_only = getattr(args, "curated_only", False)
+    if curated_only:
+        data_dir = Path(__file__).resolve().parent / "data"
+        curated_h = data_dir / "abliterate_harmful_curated.txt"
+        curated_l = data_dir / "abliterate_harmless_curated.txt"
+        if not curated_h.is_file() or not curated_l.is_file():
+            print_actionable_error(
+                "curated list files not found",
+                next_steps=[
+                    "Ensure abliterate_harmful_curated.txt and abliterate_harmless_curated.txt exist in the package data/ dir",
+                    "Or run without --curated-only to download the full merged lists",
+                ],
+            )
+            return 1
+        harmful_lines = _collect_instructions_from_path(curated_h)
+        harmless_lines = _collect_instructions_from_path(curated_l)
         harmful_path.write_text("\n".join(harmful_lines) + "\n", encoding="utf-8")
         harmless_path.write_text("\n".join(harmless_lines) + "\n", encoding="utf-8")
-    except Exception as e:
-        print_actionable_error(
-            "failed to download harmful/harmless lists",
-            cause=str(e),
-            next_steps=[
-                "Check network access and list URLs in ollama_forge/data/",
-                "Or pass --harmful <path> --harmless <path> to use local files",
-            ],
-        )
-        return 1
-    print(f"Saved harmful list:  {harmful_path} ({len(harmful_lines)} instructions)")
-    print(f"Saved harmless list: {harmless_path} ({len(harmless_lines)} instructions)")
-    print("Use with: --harmful", harmful_path, "--harmless", harmless_path)
+    else:
+        try:
+            harmful_lines = _abliterate_merge_harmful_sources()
+            harmless_lines = _abliterate_merge_harmless_sources()
+            harmful_path.write_text("\n".join(harmful_lines) + "\n", encoding="utf-8")
+            harmless_path.write_text("\n".join(harmless_lines) + "\n", encoding="utf-8")
+        except Exception as e:
+            print_actionable_error(
+                "failed to download harmful/harmless lists",
+                cause=str(e),
+                next_steps=[
+                    "Check network access and list URLs in ollama_forge/data/",
+                    "Or pass --harmful <path> --harmless <path> to use local files",
+                ],
+            )
+            return 1
+    log.info("Saved harmful list:  %s (%s instructions)", harmful_path, len(harmful_lines))
+    log.info("Saved harmless list: %s (%s instructions)", harmless_path, len(harmless_lines))
+    log.info("Use with: --harmful %s --harmless %s", harmful_path, harmless_path)
     return 0
 
 
@@ -2314,7 +2787,7 @@ def _cmd_abliterate_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         ):
             return 0
         # Serve unreachable or model mismatch; fall back to local load
-        print("No serve at that URL (or model mismatch). Using local checkpoint.", file=sys.stderr)
+        log.info("No serve at that URL (or model mismatch). Using local checkpoint.")
 
     try:
         run_chat(
@@ -2670,7 +3143,10 @@ def _cmd_abliterate_evaluate(parser: argparse.ArgumentParser, args: argparse.Nam
             num_prompts=getattr(args, "num_prompts", 50),
             max_new_tokens=getattr(args, "max_new_tokens", 256),
         )
-        print(f"Refusals: {metrics['refusal_count']} / {metrics['total']} ({metrics['refusal_rate']:.1%})")
+        if getattr(args, "json", False):
+            print(json.dumps(metrics))
+        else:
+            print(f"Refusals: {metrics['refusal_count']} / {metrics['total']} ({metrics['refusal_rate']:.1%})")
         return 0
     except FileNotFoundError as e:
         print_actionable_error(
@@ -2714,10 +3190,12 @@ def _cmd_abliterate_optimize(parser: argparse.ArgumentParser, args: argparse.Nam
             args.harmful,
             Path(args.output_dir),
             harmless_path=getattr(args, "harmless", None),
-            n_trials=getattr(args, "n_trials", 20),
+            n_trials=getattr(args, "max_evals", None) or getattr(args, "n_trials", 20),
+            timeout=getattr(args, "timeout", None),
             num_eval_prompts=getattr(args, "num_eval_prompts", 30),
             refusal_markers_path=getattr(args, "refusal_markers", None),
             gguf_file=gguf_file,
+            n_jobs=getattr(args, "max_parallel", 1),
         )
         print(f"Best refusal_rate: {best['refusal_rate']:.2%}", file=sys.stderr)
         print("Best params:", best)
@@ -2829,8 +3307,16 @@ def _cmd_abliterate_fix_ollama_template(parser: argparse.ArgumentParser, args: a
     if stop_tokens:
         content = modelfile_append_stop_parameters(content, stop_tokens)
     content = modelfile_append_num_predict(content, 2048)
-    print("Updating Ollama model with chat template derived from checkpoint...", file=sys.stderr)
-    return run_ollama_create(name, content)
+    if getattr(args, "dry_run", False):
+        out_path = getattr(args, "out_modelfile", None)
+        if out_path:
+            Path(out_path).write_text(content, encoding="utf-8")
+            log.info("Wrote Modelfile to %s (dry run)", out_path)
+        else:
+            print(content)
+        return 0
+    log.info("Updating Ollama model with chat template derived from checkpoint...")
+    return run_ollama_create(name, content, out_path=getattr(args, "out_modelfile", None))
 
 
 def _abliterate_resolve_model(model_id: str) -> str:
@@ -2864,22 +3350,29 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
     gguf_file_for_load = str(model_id) if str(model_id).lower().endswith(".gguf") else None
     if gguf_file_for_load:
         print(f"Using local GGUF at {model_id}", file=sys.stderr)
+    layer_fracs: tuple[float, ...]
+    if getattr(args, "layer_frac", None) is not None:
+        layer_fracs = (float(args.layer_frac),)
+    else:
+        layer_fracs = tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6]))
     try:
         harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
         try:
-            compute_refusal_dir(
+            summary = compute_refusal_dir(
                 model_id,
                 str(harmful_path),
                 str(harmless_path),
                 args.output,
                 num_instructions=args.num_instructions,
-                layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
+                layer_fracs=layer_fracs,
                 n_directions=getattr(args, "num_directions", 1),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load,
                 per_layer_directions=getattr(args, "per_layer_directions", False),
             )
-            print(f"Saved refusal direction to {args.output}")
+            log.info("Saved refusal direction to %s", args.output)
+            if getattr(args, "json", False) and summary is not None:
+                print(json.dumps(summary))
             return 0
         finally:
             for t in temp_files:
@@ -2906,8 +3399,50 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
         return 1
 
 
+# Defaults for abliterate run (used so --config only fills in when value is default; CLI overrides)
+_ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
+    "model": None,
+    "output_dir": None,
+    "llama_cpp_dir": None,
+    "harmful": None,
+    "harmless": None,
+    "harmful_dir": None,
+    "harmless_dir": None,
+    "num_instructions": 32,
+    "layer_fracs": [0.4, 0.5, 0.6],
+    "num_directions": 1,
+    "per_layer_directions": False,
+    "load_in_8bit": False,
+    "no_verify": False,
+    "strength": 1.0,
+    "atten_strength": None,
+    "mlp_strength": None,
+    "skip_begin_layers": 0,
+    "skip_end_layers": 0,
+    "direction_index": None,
+    "strength_kernel": "constant",
+    "kernel_center_frac": 0.5,
+    "kernel_width_frac": 0.4,
+    "no_requantize": False,
+    "quant": "Q4_K_M",
+    "template_from": None,
+}
+
+
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
+    config_path = getattr(args, "config", None)
+    if config_path:
+        try:
+            cfg = load_config(config_path)
+            apply_config_to_args(args, cfg, only_if_default=_ABLITERATE_RUN_DEFAULTS)
+        except (FileNotFoundError, ValueError, ImportError) as e:
+            print_actionable_error(
+                "Failed to load config file",
+                cause=str(e),
+                next_steps=["Check --config path and file format (YAML/JSON)"],
+            )
+            return 1
     from_checkpoint_dir = getattr(args, "from_checkpoint", None)
     name = getattr(args, "name", None)
     if not name:
@@ -2962,14 +3497,24 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             )
             return 1
         checkpoint_dir = output_dir = gguf_path = None  # set below
-    exit_code = require_ollama()
-    if exit_code is not None:
-        return exit_code
+    only_compute = getattr(args, "only_compute", False)
+    only_apply = getattr(args, "only_apply", False)
+    only_export = getattr(args, "only_export", False)
+    if sum([only_compute, only_apply, only_export]) > 1:
+        print_actionable_error(
+            "Use at most one of --only-compute, --only-apply, --only-export",
+            next_steps=["Run: ollama-forge abliterate run --help"],
+        )
+        return 1
+    if not (only_compute or only_apply or only_export):
+        exit_code = require_ollama()
+        if exit_code is not None:
+            return exit_code
     if not from_checkpoint_dir:
         model_id = _abliterate_resolve_model(model_id)
         gguf_file_for_load_run = str(model_id) if str(model_id).lower().endswith(".gguf") else None
         if gguf_file_for_load_run:
-            print(f"Using local GGUF at {model_id}", file=sys.stderr)
+            log.info("Using local GGUF at %s", model_id)
         default_out = Path(_abliterate_output_dir_from_name(name)) if name else None
         output_dir = Path(
             getattr(args, "output_dir", None)
@@ -2986,23 +3531,90 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if (candidate / "convert_hf_to_gguf.py").is_file():
                 llama_cpp_dir = candidate
                 break
-    if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
-        print_actionable_error(
-            "convert_hf_to_gguf.py not found",
-            next_steps=[
-                "Clone llama.cpp and set --llama-cpp-dir to the clone path",
-                "Or run: ollama-forge setup-llama-cpp",
-                "Then: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
-            ],
+    if not only_compute and not only_apply:
+        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+            print_actionable_error(
+                "convert_hf_to_gguf.py not found",
+                next_steps=[
+                    "Clone llama.cpp and set --llama-cpp-dir to the clone path",
+                    "Or run: ollama-forge setup-llama-cpp",
+                    "Then: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
+                ],
+            )
+            return 1
+    if only_compute and not from_checkpoint_dir:
+        harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
+        try:
+            log.info("Computing refusal direction...")
+            compute_refusal_dir(
+                model_id,
+                str(harmful_path),
+                str(harmless_path),
+                str(refusal_pt),
+                num_instructions=getattr(args, "num_instructions", 32),
+                layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
+                n_directions=getattr(args, "num_directions", 1),
+                load_in_8bit=getattr(args, "load_in_8bit", False),
+                gguf_file=gguf_file_for_load_run,
+                per_layer_directions=getattr(args, "per_layer_directions", False),
+            )
+        finally:
+            for t in temp_files:
+                Path(t).unlink(missing_ok=True)
+        log.info("Saved refusal direction to %s", refusal_pt)
+        return 0
+    if only_apply and not from_checkpoint_dir:
+        if not refusal_pt.is_file():
+            print_actionable_error(
+                "refusal_dir.pt not found in output dir",
+                next_steps=[
+                    "Run with --only-compute first to create refusal_dir.pt",
+                    "Or run full abliterate run without --only-apply",
+                ],
+            )
+            return 1
+        log.info("Baking ablation into weights and saving checkpoint...")
+        apply_refusal_dir_and_save(
+            model_id,
+            refusal_pt,
+            checkpoint_dir,
+            verify=not getattr(args, "no_verify", False),
+            gguf_file=gguf_file_for_load_run,
+            strength=getattr(args, "strength", 1.0),
+            atten_strength=getattr(args, "atten_strength", None),
+            mlp_strength=getattr(args, "mlp_strength", None),
+            direction_index=getattr(args, "direction_index", None),
+            strength_kernel=getattr(args, "strength_kernel", "constant"),
+            kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
+            kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
+            skip_begin_layers=getattr(args, "skip_begin_layers", 0),
+            skip_end_layers=getattr(args, "skip_end_layers", 0),
         )
-        return 1
+        log.info("Checkpoint saved to %s", checkpoint_dir)
+        return 0
+    if only_export and not from_checkpoint_dir:
+        checkpoint_dir = output_dir / "checkpoint"
+        if not checkpoint_dir.is_dir() or not (checkpoint_dir / "config.json").is_file():
+            print_actionable_error(
+                "--only-export requires an existing checkpoint at <output-dir>/checkpoint",
+                next_steps=[
+                    "Run with --only-apply first, or use --from-checkpoint <dir>",
+                ],
+            )
+            return 1
+        from_checkpoint_dir = True
+        gguf_path = output_dir / "model.gguf"
+        model_id = getattr(args, "model", None)
+        exit_code = require_ollama()
+        if exit_code is not None:
+            return exit_code
     if from_checkpoint_dir:
-        print("Resuming from checkpoint: converting to GGUF...", file=sys.stderr)
+        log.info("Resuming from checkpoint: converting to GGUF...")
     else:
         try:
             harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
             try:
-                print("Computing refusal direction...", file=sys.stderr)
+                log.info("Computing refusal direction...")
                 compute_refusal_dir(
                     model_id,
                     str(harmful_path),
@@ -3026,7 +3638,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                         torch.cuda.empty_cache()
                 except ImportError:
                     pass
-                print("Baking ablation into weights and saving checkpoint...", file=sys.stderr)
+                log.info("Baking ablation into weights and saving checkpoint...")
                 apply_refusal_dir_and_save(
                     model_id,
                     refusal_pt,
@@ -3161,18 +3773,18 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             content = merge_modelfile_with_reference_template(
                 content, ref_content, base=str(gguf_for_modelfile), template_only=True
             )
-            print(
-                f"Using chat template from Ollama model {template_from!r} (for tool/Chat API support)", file=sys.stderr
+            log.info(
+                "Using chat template from Ollama model %r (for tool/Chat API support)",
+                template_from,
             )
         else:
-            print(
-                f"Note: no Ollama model {template_from!r} found; pull it first for tool support.",
-                file=sys.stderr,
+            log.info(
+                "Note: no Ollama model %r found; pull it first for tool support.",
+                template_from,
             )
     elif _is_local_hf:
-        print(
-            "Note: using local HF path; pass --template-from <ollama_model> for tool support.",
-            file=sys.stderr,
+        log.info(
+            "Note: using local HF path; pass --template-from <ollama_model> for tool support."
         )
     # Detect model family for better diagnostics and template selection
     try:
@@ -3180,7 +3792,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
 
         family_name = get_family_name(checkpoint_dir)
         if family_name:
-            print(f"Detected model family: {family_name}", file=sys.stderr)
+            log.info("Detected model family: %s", family_name)
     except ImportError:
         family_name = None
 
@@ -3193,7 +3805,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if stop_tokens:
                 content = modelfile_append_stop_parameters(content, stop_tokens)
             content = modelfile_append_num_predict(content, 2048)
-            print("Using chat template derived from checkpoint (HF format) for Ollama.", file=sys.stderr)
+            log.info("Using chat template derived from checkpoint (HF format) for Ollama.")
     if not getattr(args, "output_dir", None):
         print(
             f"To chat with correct tokenization (HF tokenizer): ollama-forge abliterate chat --name {name}",
@@ -3229,6 +3841,12 @@ def main() -> int:
         description="Create, retrain, ablate, and convert models for local Ollama.",
         epilog="Quick start: ollama-forge fetch <HF_REPO> --name my-model",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose (debug) output",
+    )
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # check (environment)
@@ -3240,6 +3858,21 @@ def main() -> int:
         "--json",
         action="store_true",
         help="Output machine-readable status (same shape as doctor --json)",
+    )
+    p_check.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply fixes (same as doctor --fix: uv sync, optional setup-llama-cpp)",
+    )
+    p_check.add_argument(
+        "--fix-llama-cpp",
+        action="store_true",
+        help="With --fix, also run setup-llama-cpp when finetune/quantize missing",
+    )
+    p_check.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="With --fix --fix-llama-cpp, directory for llama.cpp clone",
     )
     p_check.set_defaults(handler=_cmd_check)
 
@@ -3425,6 +4058,22 @@ def main() -> int:
     )
     p_plan_adapters.set_defaults(handler=_cmd_plan_adapters_apply)
 
+    p_plan_continue = plan_sub.add_parser(
+        "continue",
+        help="Show or run the last saved plan (save with e.g. plan quickstart --json)",
+    )
+    p_plan_continue.add_argument(
+        "--execute",
+        action="store_true",
+        help="Run the planned command(s) instead of only showing them",
+    )
+    p_plan_continue.add_argument(
+        "--json",
+        action="store_true",
+        help="Output saved plan as JSON only",
+    )
+    p_plan_continue.set_defaults(handler=_cmd_plan_continue)
+
     # quickstart (beginner one-command flow)
     p_quickstart = subparsers.add_parser(
         "quickstart",
@@ -3470,6 +4119,11 @@ def main() -> int:
         "--repeat-penalty",
         type=float,
         help="Repeat penalty (e.g. 1.1)",
+    )
+    p_quickstart.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Skip any prompts; use defaults (exit code 0 = success, 1 = error)",
     )
     p_quickstart.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_quickstart.set_defaults(handler=_cmd_quickstart)
@@ -3519,6 +4173,11 @@ def main() -> int:
         "--repeat-penalty",
         type=float,
         help="Repeat penalty (e.g. 1.1)",
+    )
+    p_start.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Skip any prompts; use defaults (exit code 0 = success, 1 = error)",
     )
     p_start.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_start.set_defaults(handler=_cmd_start)
@@ -3588,6 +4247,16 @@ def main() -> int:
         default=None,
         help="Directory to clone into (default: ./llama.cpp)",
     )
+    p_setup.add_argument(
+        "--use-system",
+        action="store_true",
+        help="Do not clone/build; verify finetune/quantize on PATH (use system-installed llama.cpp)",
+    )
+    p_setup.add_argument(
+        "--use-conda",
+        action="store_true",
+        help="Print instructions for using conda-installed llama.cpp (e.g. conda install -c conda-forge llama-cpp)",
+    )
     p_setup.set_defaults(handler=_cmd_setup_llama_cpp)
 
     # create-from-base
@@ -3611,13 +4280,18 @@ def main() -> int:
         help="Repeat penalty (e.g. 1.1)",
     )
     p_create.add_argument("--adapter", help="Path to LoRA/adapter directory")
+    p_create.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Ollama model to copy chat template from (for tool/Chat API support)",
+    )
     p_create.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_create.set_defaults(handler=_cmd_create_from_base)
 
     # refresh-template (recreate model with base's latest chat template)
     p_refresh = subparsers.add_parser(
         "refresh-template",
-        help="Recreate a model using the base model's latest chat template (fixes Chat API issues)",
+        help="Recreate a model using the base model's latest chat template (fixes Chat API issues). Replaces the existing model when --output-name equals --name.",
     )
     p_refresh.add_argument(
         "--name",
@@ -3637,6 +4311,11 @@ def main() -> int:
         "--template-only",
         action="store_true",
         help="Only replace TEMPLATE; keep weights. Use when updating old model's template for tools/Chat API.",
+    )
+    p_refresh.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print merged Modelfile (or write to --out-modelfile) and exit without running ollama create",
     )
     p_refresh.add_argument(
         "--out-modelfile",
@@ -3667,6 +4346,10 @@ def main() -> int:
     p_convert.add_argument(
         "--quantize",
         help="Quantize the GGUF first (e.g. Q4_K_M); requires llama.cpp 'quantize' on PATH",
+    )
+    p_convert.add_argument(
+        "--adapter",
+        help="Path to adapter to stack on the GGUF base (directory or .bin/.gguf); adds ADAPTER to Modelfile",
     )
     p_convert.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_convert.set_defaults(handler=_cmd_convert)
@@ -3704,6 +4387,16 @@ def main() -> int:
         "--repeat-penalty",
         type=float,
         help="Repeat penalty (e.g. 1.1)",
+    )
+    p_fetch.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Use defaults for missing repo/name (no TTY prompts); exit code 0 = success, 1 = error",
+    )
+    p_fetch.add_argument(
+        "--verify-checksum",
+        action="store_true",
+        help="After download, verify file SHA256 against Hub ETag when available (LFS files)",
     )
     p_fetch.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_fetch.set_defaults(handler=_cmd_fetch)
@@ -3772,6 +4465,16 @@ def main() -> int:
         "recipe",
         help="Path to recipe file (.yaml, .yml, or .json)",
     )
+    p_validate_recipe.add_argument(
+        "--json",
+        action="store_true",
+        help="Output per-field validation result as JSON",
+    )
+    p_validate_recipe.add_argument(
+        "--validate-remote",
+        action="store_true",
+        help="When recipe uses hf_repo, check that the Hugging Face repo exists",
+    )
     p_validate_recipe.set_defaults(handler=_cmd_validate_recipe)
 
     # validate-training-data
@@ -3781,8 +4484,13 @@ def main() -> int:
     )
     p_validate.add_argument(
         "data",
-        nargs="+",
+        nargs="*",
         help="Path(s) to .jsonl file(s) or a directory of .jsonl files",
+    )
+    p_validate.add_argument(
+        "--schema",
+        action="store_true",
+        help="Print expected JSON schema (Alpaca + messages) and exit",
     )
     p_validate.set_defaults(handler=_cmd_validate_training_data)
 
@@ -3796,11 +4504,19 @@ def main() -> int:
         nargs="+",
         help="Path(s) to .jsonl file(s) or a directory",
     )
-    p_prepare.add_argument("-o", "--output", required=True, help="Output file path")
+    p_prepare.add_argument(
+        "-o", "--output", required=True, help="Output file path (or directory when using multiple --format)",
+    )
     p_prepare.add_argument(
         "--format",
+        dest="format",
         default="llama.cpp",
-        help="Output format (default: llama.cpp)",
+        help="Output format(s), comma-separated (e.g. llama.cpp,alpaca_plain); each writes <output_stem>_<format>.txt",
+    )
+    p_prepare.add_argument(
+        "--list-formats",
+        action="store_true",
+        help="List supported formats and which trainer expects them, then exit",
     )
     p_prepare.set_defaults(handler=_cmd_prepare_training_data)
 
@@ -3837,6 +4553,12 @@ def main() -> int:
         default="./data",
         metavar="DIR",
         help="Output directory (default: ./data)",
+    )
+    p_train_data_init.add_argument(
+        "--template",
+        choices=["alpaca", "chat"],
+        default="alpaca",
+        help="Sample template: alpaca (instruction/input/output) or chat (messages); default: alpaca",
     )
     p_train_data_init.set_defaults(handler=_cmd_train_data_init)
 
@@ -3885,6 +4607,11 @@ def main() -> int:
         metavar="PATH",
         help="Write the pipeline script to this file",
     )
+    p_train.add_argument(
+        "--execute",
+        action="store_true",
+        help="Run validate → prepare → (finetune if --base-gguf and --run-trainer); then print retrain command",
+    )
     p_train.set_defaults(handler=_cmd_train)
 
     # retrain (base + adapter → Ollama model)
@@ -3907,6 +4634,11 @@ def main() -> int:
         "--repeat-penalty",
         type=float,
         help="Repeat penalty (e.g. 1.1)",
+    )
+    p_retrain.add_argument(
+        "--template-from",
+        metavar="OLLAMA_MODEL",
+        help="Ollama model to copy chat template from (for tool/Chat API support)",
     )
     p_retrain.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_retrain.set_defaults(handler=_cmd_retrain)
@@ -3936,6 +4668,16 @@ def main() -> int:
     p_train_run.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
     p_train_run.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
     p_train_run.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_train_run.add_argument(
+        "--skip-retrain",
+        action="store_true",
+        help="Stop after prepare (and finetune if run); do not create Ollama model (run retrain manually later)",
+    )
+    p_train_run.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
+    )
     p_train_run.set_defaults(handler=_cmd_train_run)
 
     # finetune (alias for train-run: one command to run the full pipeline)
@@ -3957,6 +4699,16 @@ def main() -> int:
     p_finetune.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
     p_finetune.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
     p_finetune.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_finetune.add_argument(
+        "--skip-retrain",
+        action="store_true",
+        help="Stop after prepare/finetune; do not create Ollama model",
+    )
+    p_finetune.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
+    )
     p_finetune.set_defaults(handler=_cmd_train_run)
 
     # abliterate (refusal removal)
@@ -4002,12 +4754,24 @@ def main() -> int:
         help="Number of instructions to sample (default: 32)",
     )
     p_compute.add_argument(
+        "--layer-frac",
+        type=float,
+        default=None,
+        metavar="F",
+        help="Use a single layer fraction (e.g. 0.5); overrides --layer-fracs for faster runs",
+    )
+    p_compute.add_argument(
         "--layer-fracs",
         type=float,
         nargs="+",
         default=[0.4, 0.5, 0.6],
         metavar="F",
         help="Layer fractions to try; best layer by gap norm is used (default: 0.4 0.5 0.6)",
+    )
+    p_compute.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a JSON summary (layer_frac, layer_index, gap_norm) to stdout; ignored if --per-layer-directions",
     )
     p_compute.add_argument(
         "--num-directions",
@@ -4165,6 +4929,26 @@ def main() -> int:
         metavar="OLLAMA_MODEL",
         help="Ollama model to copy chat template from (default: same as --model; pull first for tools)",
     )
+    p_run.add_argument(
+        "--only-compute",
+        action="store_true",
+        help="Only compute refusal direction (.pt); skip apply, GGUF, and create (resumable run)",
+    )
+    p_run.add_argument(
+        "--only-apply",
+        action="store_true",
+        help="Only apply direction to weights and save checkpoint; requires existing refusal_dir.pt in output dir",
+    )
+    p_run.add_argument(
+        "--only-export",
+        action="store_true",
+        help="Only convert checkpoint to GGUF and create Ollama model; use with --from-checkpoint or existing checkpoint",
+    )
+    p_run.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
+    )
     p_run.set_defaults(handler=_cmd_abliterate_run)
 
     p_download = abliterate_sub.add_parser(
@@ -4175,6 +4959,11 @@ def main() -> int:
         "--output-dir",
         default=".",
         help="Directory to write harmful.txt and harmless.txt (default: current dir)",
+    )
+    p_download.add_argument(
+        "--curated-only",
+        action="store_true",
+        help="Copy only the small curated lists from the package (no network); requires package data files",
     )
     p_download.set_defaults(handler=_cmd_abliterate_download_lists)
 
@@ -4287,6 +5076,11 @@ def main() -> int:
         metavar="N",
         help="Max new tokens per response (default: 256)",
     )
+    p_evaluate.add_argument(
+        "--json",
+        action="store_true",
+        help="Output metrics as JSON (refusal_count, total, refusal_rate) for CI",
+    )
     p_evaluate.set_defaults(handler=_cmd_abliterate_evaluate)
 
     p_optimize = abliterate_sub.add_parser(
@@ -4330,6 +5124,27 @@ def main() -> int:
         help="Number of Optuna trials (default: 20)",
     )
     p_optimize.add_argument(
+        "--max-evals",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max evaluations (overrides --n-trials when set)",
+    )
+    p_optimize.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Stop optimization after this many seconds (optional)",
+    )
+    p_optimize.add_argument(
+        "--max-parallel",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Max parallel Optuna trials (default: 1; increase only if enough CPU/memory)",
+    )
+    p_optimize.add_argument(
         "--num-eval-prompts",
         type=int,
         default=30,
@@ -4371,7 +5186,7 @@ def main() -> int:
 
     p_fix_template = abliterate_sub.add_parser(
         "fix-ollama-template",
-        help="Update an existing Ollama abliterated model's chat template from checkpoint (fix garbled ollama run)",
+        help="Recreate the Ollama model with chat template from checkpoint (fix garbled ollama run). Destructive: replaces the existing model.",
     )
     p_fix_template.add_argument(
         "--name",
@@ -4388,6 +5203,15 @@ def main() -> int:
         "--template-from",
         metavar="OLLAMA_MODEL",
         help="Use template from this Ollama model (e.g. gemma3:270m) instead of deriving from checkpoint",
+    )
+    p_fix_template.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print or write Modelfile and exit without running ollama create",
+    )
+    p_fix_template.add_argument(
+        "--out-modelfile",
+        help="With --dry-run, write Modelfile to this path",
     )
     p_fix_template.set_defaults(handler=_cmd_abliterate_fix_ollama_template)
 
@@ -4484,6 +5308,13 @@ def main() -> int:
         help="Max recommendations to show (default: 5)",
     )
     p_adapters_recommend.add_argument(
+        "--cache-ttl",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="Cache recommendations for this many seconds (0 = disable; default: 3600)",
+    )
+    p_adapters_recommend.add_argument(
         "--apply",
         action="store_true",
         help="Apply top recommendation via fetch-adapter (requires --base)",
@@ -4544,6 +5375,11 @@ def main() -> int:
         action="store_true",
         help="Show one row per revision (default: one row per repo)",
     )
+    p_hf_cache_ls.add_argument(
+        "--size",
+        action="store_true",
+        help="Print total disk usage of the cache (human-readable)",
+    )
     p_hf_cache_ls.set_defaults(handler=_cmd_hf_cache_ls)
     p_hf_cache_rm = hf_cache_sub.add_parser(
         "rm",
@@ -4567,8 +5403,10 @@ def main() -> int:
     p_se_run = se_sub.add_parser("run", help="Run eval: load prompt set, query model, score, write CSV/JSON")
     p_se_run.add_argument(
         "prompt_set",
+        nargs="?",
+        default=None,
         metavar="PROMPT_SET",
-        help="Path to .txt (one prompt/line) or .jsonl (prompt, category, target_for_extraction)",
+        help="Path to .txt (one prompt/line) or .jsonl (omit with --schema to print schema only)",
     )
     p_se_run.add_argument(
         "--model",
@@ -4639,6 +5477,16 @@ def main() -> int:
         metavar="PATH",
         help="Path to file with custom refusal keywords (one per line, # comments). Default: built-in list.",
     )
+    p_se_run.add_argument(
+        "--baseline",
+        metavar="MODEL",
+        help="Also run the same prompt set against this model and print comparison (e.g. base model vs abliterated)",
+    )
+    p_se_run.add_argument(
+        "--schema",
+        action="store_true",
+        help="Print prompt set schema (TXT and JSONL formats) and exit",
+    )
     p_se_run.set_defaults(handler=_cmd_security_eval_run)
     p_se_ui = se_sub.add_parser(
         "ui", help="Launch Streamlit UI for security evaluation (requires: uv sync --extra security-eval-ui)"
@@ -4657,6 +5505,11 @@ def main() -> int:
         "run_b",
         metavar="RUN_B.json",
         help="Path to second run JSON",
+    )
+    p_se_compare.add_argument(
+        "--export",
+        metavar="PATH",
+        help="Export comparison to CSV or HTML (suffix .csv or .html)",
     )
     p_se_compare.set_defaults(handler=_cmd_security_eval_compare)
 
@@ -4694,6 +5547,7 @@ def main() -> int:
     p_ds_pipeline.set_defaults(handler=_cmd_downsize_pipeline)
 
     parsed = parser.parse_args()
+    set_verbose(getattr(parsed, "verbose", False))
     if not parsed.command:
         parser.print_help()
         return 0

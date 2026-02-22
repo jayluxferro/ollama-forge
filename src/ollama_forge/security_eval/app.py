@@ -6,6 +6,8 @@ Or: uv run ollama-forge security-eval ui  (with uv sync --extra security-eval-ui
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sys
 from pathlib import Path
@@ -29,6 +31,17 @@ def main() -> None:
     st.title("LLM Security Evaluation")
     st.markdown("Run prompt sets against Ollama or abliterate serve, view KPIs and per-category results.")
 
+    tab_run, tab_compare, tab_history = st.tabs(["Run evaluation", "Compare runs", "Run history"])
+
+    with tab_run:
+        _render_run_tab(st)
+    with tab_compare:
+        _render_compare_runs_tab(st)
+    with tab_history:
+        _render_history_tab(st)
+
+
+def _render_run_tab(st) -> None:
     base_url = st.text_input(
         "Base URL (Ollama or abliterate serve)",
         value="http://127.0.0.1:11434",
@@ -413,7 +426,8 @@ def main() -> None:
             }
         )
 
-    st.divider()
+
+def _render_history_tab(st) -> None:
     st.subheader("Run history")
     try:
         runs = load_runs(limit=50)
@@ -450,6 +464,8 @@ def main() -> None:
         st.info("Run history is not available. Save a run with «Save run to history» to enable history and plots.")
         st.caption(f"Details: {e}")
 
+
+def _render_compare_runs_tab(st) -> None:
     st.subheader("Compare two runs")
     try:
         runs_compare = load_runs(limit=50)
@@ -475,7 +491,7 @@ def main() -> None:
                     st.metric("Run A", r_a.get("model", "—"), r_a.get("timestamp_iso", "")[:16])
                 with c3:
                     st.metric("Run B", r_b.get("model", "—"), r_b.get("timestamp_iso", "")[:16])
-                for key, label in [
+                kpi_rows = [
                     ("total", "Total"),
                     ("asr_pct", "ASR %"),
                     ("refusal_rate_pct", "Refusal %"),
@@ -484,7 +500,10 @@ def main() -> None:
                     ("errors", "Errors"),
                     ("avg_latency_sec", "Avg latency (s)"),
                     ("avg_turns_to_success", "Avg turns to success"),
-                ]:
+                    ("expected_refusal_accuracy_pct", "Expected-refusal acc %"),
+                    ("benign_refusal_rate_pct", "Benign refusal %"),
+                ]
+                for key, label in kpi_rows:
                     va = kpis_a.get(key)
                     vb = kpis_b.get(key)
                     c1, c2, c3 = st.columns(3)
@@ -494,6 +513,34 @@ def main() -> None:
                         st.write(f"{va:.1f}" if isinstance(va, float) else str(va) if va is not None else "—")
                     with c3:
                         st.write(f"{vb:.1f}" if isinstance(vb, float) else str(vb) if vb is not None else "—")
+                # Export comparison (same format as CLI security-eval compare --export)
+                label_a = r_a.get("model", "A") + " @ " + (r_a.get("timestamp_iso", "")[:16] or "?")
+                label_b = r_b.get("model", "B") + " @ " + (r_b.get("timestamp_iso", "")[:16] or "?")
+                export_rows = [
+                    ("total", "Total"),
+                    ("asr_pct", "ASR %"),
+                    ("refusal_rate_pct", "Refusal %"),
+                    ("extraction_rate_pct", "Extraction %"),
+                    ("errors", "Errors"),
+                    ("avg_latency_sec", "Avg latency (s)"),
+                    ("expected_refusal_accuracy_pct", "Expected-refusal acc %"),
+                    ("benign_refusal_rate_pct", "Benign refusal %"),
+                ]
+                buf_csv = io.StringIO()
+                w = csv.writer(buf_csv)
+                w.writerow(["KPI", label_a, label_b])
+                for key, name in export_rows:
+                    w.writerow([name, kpis_a.get(key, ""), kpis_b.get(key, "")])
+                csv_data = buf_csv.getvalue()
+                rows_html = "".join(
+                    f"<tr><td>{name}</td><td>{kpis_a.get(key, '')}</td><td>{kpis_b.get(key, '')}</td></tr>"
+                    for key, name in export_rows
+                )
+                html_data = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Security Eval Compare</title></head><body>
+<h1>Compare</h1><table border="1"><tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>
+{rows_html}</table></body></html>"""
+                st.download_button("Download comparison (CSV)", data=csv_data, file_name="security_eval_compare.csv", mime="text/csv", key="compare_dl_csv")
+                st.download_button("Download comparison (HTML)", data=html_data, file_name="security_eval_compare.html", mime="text/html", key="compare_dl_html")
         else:
             st.caption("Save at least two runs to history to compare them here.")
     except Exception:

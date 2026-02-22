@@ -143,6 +143,9 @@ uv run ollama-forge abliterate optimize --model <hf_id> --refusal-pt refusal.pt 
 - `--harmful` — harmful prompts file for evaluation.
 - `--output-dir` — directory for `optimize_best_params.json` (default: current dir).
 - `--n-trials` — number of Optuna trials (default: 20).
+- `--max-evals` — overrides `--n-trials` when set.
+- `--timeout` — stop after this many seconds (optional).
+- `--max-parallel` — run up to N trials in parallel (default: 1; use only if enough CPU/memory).
 - `--num-eval-prompts` — prompts per evaluation (default: 30).
 
 **Output:** Best params (strength, atten_strength, mlp_strength, skip_begin_layers, skip_end_layers, refusal_rate) printed and written to `optimize_best_params.json`. Requires the `abliterate` extra (includes `optuna`).

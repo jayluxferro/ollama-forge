@@ -14,7 +14,9 @@ from typing import Any
 from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
 
 
-def _load_model_and_tokenizer(checkpoint_dir: str | bytes, device: str | None = None):
+def _load_model_and_tokenizer(
+    checkpoint_dir: str | bytes, device: str | None = None
+) -> tuple[Any, Any]:
     """Load model and tokenizer from abliterated checkpoint. Returns (model, tokenizer)."""
     import tempfile
     from pathlib import Path
@@ -244,7 +246,12 @@ def _messages_to_input_ids(
     return input_ids, attention_mask
 
 
-def _prompt_system_to_input_ids(tokenizer, prompt: str, system: str | None, format_instruction: str | None = None):
+def _prompt_system_to_input_ids(
+    tokenizer: Any,
+    prompt: str,
+    system: str | None,
+    format_instruction: str | None = None,
+) -> Any:
     """Build input_ids from prompt and optional system (for /api/generate)."""
     import torch
 
@@ -280,7 +287,9 @@ def _prompt_system_to_input_ids(tokenizer, prompt: str, system: str | None, form
     return encoded["input_ids"], attn
 
 
-def _compute_logprobs(tokenizer, scores_tuple, generated_ids, top_logprobs: int = 0) -> list[dict]:
+def _compute_logprobs(
+    tokenizer: Any, scores_tuple: Any, generated_ids: Any, top_logprobs: int = 0
+) -> list[dict]:
     """Build Ollama-style logprobs from HF generate output. scores_tuple is per-token (batch, vocab_size)."""
     import torch
 
@@ -373,7 +382,9 @@ def _generate(
     return text, prompt_len, new_ids.shape[0], logprobs
 
 
-def _generate_stream(model, tokenizer, input_ids, attention_mask, **gen_kw):
+def _generate_stream(
+    model: Any, tokenizer: Any, input_ids: Any, attention_mask: Any, **gen_kw: Any
+) -> Any:
     """Stream generated tokens. Yields (chunk_text, done)."""
     from transformers import TextIteratorStreamer
 
@@ -399,7 +410,7 @@ def _generate_stream(model, tokenizer, input_ids, attention_mask, **gen_kw):
     yield "", True
 
 
-def _embed_text(model, tokenizer, text: str):
+def _embed_text(model: Any, tokenizer: Any, text: str) -> Any:
     """Return L2-normalized embedding vector for text (mean-pool last hidden state)."""
     import torch
 

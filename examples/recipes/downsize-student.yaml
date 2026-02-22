@@ -1,0 +1,12 @@
+# Minimal recipe: create Ollama model from a downsize student GGUF.
+# After distillation (e.g. TRL GKD), export student to GGUF and set gguf path below,
+# or use variables: gguf: "{{ student_gguf }}" and run:
+#   export student_gguf=/path/to/student.gguf
+#   uv run ollama-forge build examples/recipes/downsize-student.yaml
+name: my-downsized
+gguf: /path/to/student.gguf
+# optional: variables for env substitution
+# variables:
+#   student_gguf: /path/to/student.gguf
+temperature: 0.6
+num_ctx: 4096

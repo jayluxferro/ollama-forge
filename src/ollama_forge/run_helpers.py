@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Iterator
 
 from ollama_forge.http_util import normalize_base_url
+from ollama_forge.log import get_logger
 from ollama_forge.training_data import collect_jsonl_paths
+
+log = get_logger()
 
 OLLAMA_MISSING_MSG = "Error: ollama not found. Install Ollama and ensure it is on PATH."
 
@@ -93,14 +96,14 @@ def run_ollama_create(
     if out_path is not None:
         path = Path(out_path)
         path.write_text(modelfile_content, encoding="utf-8")
-        print(f"Wrote Modelfile to {path}", file=sys.stderr)
+        log.info("Wrote Modelfile to %s", path)
         try:
             subprocess.run(
                 ["ollama", "create", name, "-f", str(path)],
                 check=True,
                 timeout=OLLAMA_CREATE_TIMEOUT,
             )
-            print(f"Created model {name!r}. Run with: ollama run {name}")
+            log.info("Created model %r. Run with: ollama run %s", name, name)
             return 0
         except FileNotFoundError:
             print_actionable_error(
@@ -126,7 +129,7 @@ def run_ollama_create(
                 check=True,
                 timeout=OLLAMA_CREATE_TIMEOUT,
             )
-            print(f"Created model {name!r}. Run with: ollama run {name}")
+            log.info("Created model %r. Run with: ollama run %s", name, name)
             return 0
         except FileNotFoundError:
             print_actionable_error(
