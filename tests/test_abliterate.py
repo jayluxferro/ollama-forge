@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -456,3 +455,112 @@ class TestApplyRefusalDirPerLayer:
             )
         q_after = model.model.layers[1].self_attn.q_proj.weight
         assert not torch.allclose(q_before, q_after), "Per-layer ablation should modify weights"
+
+
+# ---------------------------------------------------------------------------
+# Edge-case: 1-layer model and clamped skip values
+# ---------------------------------------------------------------------------
+
+
+class TestLayerSkipEdgeCases:
+    """Edge-case tests for layer-skip clamping and 1-layer models."""
+
+    def test_single_layer_model_is_modified(self, tmp_path: Path) -> None:
+        """A 1-layer model with no skips should still have its layer ablated."""
+        model = _FakeModel(hidden=HIDDEN, n_layers=1)
+        q_before = model.model.layers[0].self_attn.q_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        q_after = model.model.layers[0].self_attn.q_proj.weight
+        assert not torch.allclose(q_before, q_after), "Single layer should be ablated"
+
+    def test_single_layer_skip_end_triggers_zero_layer_warning(self, tmp_path: Path) -> None:
+        """1-layer model + skip_end=1 → end_idx=max(0,0)=0 == start_idx → warning."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModel(hidden=HIDDEN, n_layers=1)
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "ckpt_1layer"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch("ollama_forge.abliterate.log") as mock_log,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            apply_refusal_dir_and_save(
+                "fake/model",
+                pt,
+                out,
+                verify=False,
+                skip_begin_layers=0,
+                skip_end_layers=1,
+                norm_preserving=False,
+            )
+        assert mock_log.warning.called, "Warning expected when skip_end >= n_layers on 1-layer model"
+
+    def test_skip_begin_clamped_to_last_layer(self, tmp_path: Path) -> None:
+        """skip_begin_layers=100 is clamped to n_layers-1; only the last layer is ablated."""
+        model = _FakeModel(hidden=HIDDEN, n_layers=N_LAYERS)
+        # Capture state of all layers before
+        q_before = [layer.self_attn.q_proj.weight.clone() for layer in model.model.layers]
+        _apply_fake(tmp_path, model, skip_begin=100, skip_end=0)
+        # All layers except the last should be unchanged
+        for i in range(N_LAYERS - 1):
+            assert torch.allclose(q_before[i], model.model.layers[i].self_attn.q_proj.weight), (
+                f"Layer {i} should be untouched when skip_begin=100"
+            )
+        # The last layer should be modified (start_idx=n-1, end_idx=n)
+        assert not torch.allclose(
+            q_before[N_LAYERS - 1], model.model.layers[N_LAYERS - 1].self_attn.q_proj.weight
+        ), "Last layer should be ablated when skip_begin is clamped to n_layers-1"
+
+    def test_skip_end_clamped_triggers_warning(self, tmp_path: Path) -> None:
+        """skip_end_layers=100 makes end_idx=max(0, n-100)=0 == start_idx=0 → warning."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModel(hidden=HIDDEN, n_layers=N_LAYERS)
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "ckpt_skipend"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch("ollama_forge.abliterate.log") as mock_log,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            apply_refusal_dir_and_save(
+                "fake/model",
+                pt,
+                out,
+                verify=False,
+                skip_begin_layers=0,
+                skip_end_layers=100,
+                norm_preserving=False,
+            )
+        assert mock_log.warning.called, "Warning expected when skip_end_layers > n_layers"
+
+    def test_skip_begin_plus_skip_end_equals_n_layers_warns(self, tmp_path: Path) -> None:
+        """When skip_begin + skip_end == n_layers exactly, zero layers are ablated → warning."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModel(hidden=HIDDEN, n_layers=N_LAYERS)
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "ckpt_exact"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+            patch("ollama_forge.abliterate.log") as mock_log,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            # skip_begin=2, skip_end=2, n_layers=4:
+            # start_idx=min(2,3)=2, end_idx=max(2,4-2)=2 → 2>=2 → warning
+            apply_refusal_dir_and_save(
+                "fake/model",
+                pt,
+                out,
+                verify=False,
+                skip_begin_layers=N_LAYERS // 2,
+                skip_end_layers=N_LAYERS // 2,
+                norm_preserving=False,
+            )
+        assert mock_log.warning.called, (
+            "Warning expected when skip_begin + skip_end == n_layers"
+        )

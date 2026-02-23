@@ -196,8 +196,8 @@ def _parse_tool_calls_from_text(text: str) -> list[dict]:
                                     "function": {"name": name, "arguments": args},
                                 }
                             )
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+                    except (json.JSONDecodeError, TypeError) as e:
+                        log.debug("Skipping malformed tool-call arguments in serve response: %s", e)
                     i = j + 1
                     break
             j += 1
@@ -1332,8 +1332,8 @@ def _checkpoint_dir_size(checkpoint_dir: str) -> int:
         for f in path.rglob("*"):
             if f.is_file():
                 total += f.stat().st_size
-    except OSError:
-        pass
+    except OSError as e:
+        log.debug("Could not fully traverse checkpoint dir for size estimate: %s", e)
     return total
 
 

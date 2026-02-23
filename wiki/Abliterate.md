@@ -105,6 +105,12 @@ uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --skip-
 
 Keep `--strength 1` (default) for full ablation strength. Use `--strength 0.7` or similar only if quality degrades.
 
+**Norm-preserving and small models:** By default, each weight matrix is Frobenius-norm rescaled after the direction is projected out (`--norm-preserving`, on by default). On small models (≤1B) or base models (not `-it`), this rescaling compounds across all layers and can cause activation explosion — symptoms include gibberish output or repeated `<image_soft_token>`. Disable it with:
+
+```bash
+uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --no-norm-preserving --strength 0.8
+```
+
 **Attention vs MLP strength (Heretic-style):** The pipeline ablates both **attention** (q, k, v, o) and **MLP** (gate, up, down projections). You can set different strengths with **`--atten-strength`** and **`--mlp-strength`**; if unset, both use `--strength`. Softer MLP ablation can preserve coherence while still reducing refusals, e.g. `--strength 1 --mlp-strength 0.5`.
 
 **Advanced options (Heretic integration):** Per-layer refusal directions (`--per-layer-directions`, `--direction-index`), layer-dependent strength kernel (`--strength-kernel`, `--kernel-center-frac`, `--kernel-width-frac`), refusal-rate evaluation (`abliterate evaluate`), and Optuna-based parameter search (`abliterate optimize`) are documented in [Heretic integration](Heretic-Integration).

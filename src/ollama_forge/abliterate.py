@@ -378,7 +378,7 @@ def compute_refusal_dir(
         shutil.rmtree(offload_folder, ignore_errors=True)
     return {
         "layer_frac": best_layer_frac,
-        "layer_index": layer_idx,
+        "layer_index": best_layer_idx,
         "gap_norm": best_gap_norm,
     }
 
@@ -559,12 +559,12 @@ def apply_refusal_dir_and_save(
             n_layers,
         )
 
-    def _get_D_for_layer(layer_idx: int):
+    def _get_D_for_layer(layer_idx: int) -> torch.Tensor:
         return get_D_for_layer(
             layer_idx, per_layer, directions_tensor, d, direction_index
         )
 
-    def _get_attn_input_linears(attn):
+    def _get_attn_input_linears(attn: object) -> list:
         """Input-side attention projections (right-multiply to ablate input space): q, k, v.
         Also handles fused qkv variants (Phi-3, Falcon, GPT-NeoX, etc.)."""
         # Standard separate projections
@@ -577,12 +577,12 @@ def apply_refusal_dir_and_save(
                 return [getattr(attn, fused_name)]
         return []
 
-    def _get_attn_output_linears(attn):
+    def _get_attn_output_linears(attn: object) -> list:
         """Output-side attention projections (left-multiply to ablate output space): o_proj.
         Handles naming variants: o_proj (LLaMA), out_proj (OPT/BERT), dense (Falcon/GPT-NeoX), c_proj (GPT-2)."""
         return [getattr(attn, n) for n in ("o_proj", "out_proj", "dense", "c_proj") if hasattr(attn, n)]
 
-    def _apply_right(linear, I_minus_DDT):
+    def _apply_right(linear: object, I_minus_DDT: torch.Tensor) -> None:
         w = linear.weight.data.float()
         if w.shape[1] != hidden_size:
             return
@@ -595,7 +595,7 @@ def apply_refusal_dir_and_save(
                     new_w = new_w * (orig_norm / new_norm)
             linear.weight.data.copy_(new_w)
 
-    def _apply_left(linear, I_minus_DDT):
+    def _apply_left(linear: object, I_minus_DDT: torch.Tensor) -> None:
         w = linear.weight.data.float()
         if w.shape[0] != hidden_size:
             return

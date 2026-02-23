@@ -1,6 +1,6 @@
 [project]
 name = "ollama-forge"
-version = "1.0.0"
+version = "1.0.1"
 description = "Create, retrain, ablate, and convert models for local Ollama"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,4 +45,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "C4", "SIM"]
-ignore = []  # E501: long lines fixed or noqa'd per line
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Ollama template strings contain fixed protocol text that cannot be wrapped
+"src/ollama_forge/model_family.py" = ["E501"]

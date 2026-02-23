@@ -210,8 +210,8 @@ def _parse_tool_calls(text: str) -> list[dict] | None:
                         },
                     }
                 )
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            log.debug("Skipping malformed tool-call JSON in proxy response: %s", e)
     return tool_calls if tool_calls else None
 
 

@@ -7,7 +7,6 @@ Requires torch; skipped automatically if torch is not installed.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -332,3 +331,48 @@ class TestFullPipeline:
             )
 
         assert (out_dir / "config.json").is_file(), "Checkpoint not saved after apply"
+
+
+    def test_compute_returns_best_layer_index(self, tmp_path: Path) -> None:
+        """compute_refusal_dir must return the layer with the best gap norm, not the last iterated one."""
+        from ollama_forge.abliterate import compute_refusal_dir
+
+        harmful  = tmp_path / "harmful.txt"
+        harmless = tmp_path / "harmless.txt"
+        harmful.write_text("\n".join(f"Harm {i}" for i in range(6)))
+        harmless.write_text("\n".join(f"Safe {i}" for i in range(6)))
+        pt_path = tmp_path / "direction.pt"
+
+        # Use two distinct fracs so the best vs last distinction is testable
+        fracs = (0.25, 0.75)
+        fake_model     = _FakeModel()
+        fake_tokenizer = _FakeTokenizer()
+
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=fake_model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
+            mock_tok.from_pretrained.return_value = fake_tokenizer
+            result = compute_refusal_dir(
+                "fake/model",
+                str(harmful),
+                str(harmless),
+                str(pt_path),
+                num_instructions=4,
+                layer_fracs=fracs,
+            )
+
+        # layer_index must be the layer computed from best_layer_frac, not always the last frac
+        expected_last_idx = min(int(N_LAYERS * fracs[-1]), N_LAYERS - 1)
+        expected_first_idx = min(int(N_LAYERS * fracs[0]), N_LAYERS - 1)
+        assert result["layer_index"] in (expected_first_idx, expected_last_idx), (
+            f"layer_index {result['layer_index']} is not one of the candidate layers"
+        )
+        # The returned layer_frac must correspond to the returned layer_index
+        returned_frac = result["layer_frac"]
+        assert returned_frac in fracs, f"layer_frac {returned_frac} not in input fracs"
+        expected_idx_for_frac = min(int(N_LAYERS * returned_frac), N_LAYERS - 1)
+        assert result["layer_index"] == expected_idx_for_frac, (
+            f"layer_index {result['layer_index']} does not match layer_frac {returned_frac} "
+            f"(expected {expected_idx_for_frac})"
+        )

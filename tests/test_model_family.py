@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ollama_forge.model_family import (
     _MODEL_FAMILIES,
+    _auto_family_from_config,
     _normalize,
     detect_model_family,
     get_family_name,
@@ -271,5 +272,184 @@ class TestGetFamilyName:
             config = {"model_type": "qwen2"}
             (Path(d) / "config.json").write_text(json.dumps(config))
             assert get_family_name(d) == "qwen2"
+
+
+# ---------------------------------------------------------------------------
+# _auto_family_from_config
+# ---------------------------------------------------------------------------
+
+
+class TestAutoFamilyFromConfig:
+    """Tests for _auto_family_from_config."""
+
+    def test_no_model_type_returns_none(self) -> None:
+        """Returns None when config has no model_type."""
+        assert _auto_family_from_config({}, {}) is None
+
+    def test_creates_family_from_model_type(self) -> None:
+        """Creates minimal ModelFamily from model_type."""
+        family = _auto_family_from_config({"model_type": "novel_arch"}, {})
+        assert family is not None
+        assert family.name == "novel_arch"
+        assert family.template_override is None
+
+    def test_eos_token_string_becomes_stop(self) -> None:
+        """String eos_token in tokenizer config becomes stop token."""
+        family = _auto_family_from_config(
+            {"model_type": "novel_arch"},
+            {"eos_token": "<|endoftext|>"},
+        )
+        assert family is not None
+        assert "<|endoftext|>" in family.stop_tokens
+
+    def test_eos_token_dict_content_becomes_stop(self) -> None:
+        """Dict eos_token with 'content' key is extracted as stop token."""
+        family = _auto_family_from_config(
+            {"model_type": "novel_arch"},
+            {"eos_token": {"content": "<|eos|>"}},
+        )
+        assert family is not None
+        assert "<|eos|>" in family.stop_tokens
+
+    def test_empty_eos_token_ignored(self) -> None:
+        """Empty eos_token string produces no stop tokens."""
+        family = _auto_family_from_config(
+            {"model_type": "novel_arch"},
+            {"eos_token": ""},
+        )
+        assert family is not None
+        assert len(family.stop_tokens) == 0
+
+    def test_architectures_passed_through(self) -> None:
+        """Architectures from config are reflected in the auto family."""
+        family = _auto_family_from_config(
+            {"model_type": "novel_arch", "architectures": ["NovelArchForCausalLM"]},
+            {},
+        )
+        assert family is not None
+        assert "NovelArchForCausalLM" in family.architectures
+
+
+# ---------------------------------------------------------------------------
+# Additional detect_model_family cases
+# ---------------------------------------------------------------------------
+
+
+class TestDetectModelFamilyAdditional:
+    """Additional detection tests for newer model types and edge cases."""
+
+    def test_detect_qwen2_5_maps_to_qwen2(self) -> None:
+        """qwen2_5 model_type maps to qwen2 family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "qwen2_5"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "qwen2"
+
+    def test_detect_qwen3_maps_to_qwen2(self) -> None:
+        """qwen3 model_type maps to qwen2 family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "qwen2"
+
+    def test_detect_phi4_maps_to_phi3(self) -> None:
+        """phi4 model_type maps to phi3 family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "phi4"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "phi3"
+
+    def test_detect_gemma3_maps_to_gemma(self) -> None:
+        """gemma3 model_type maps to gemma family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "gemma3"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "gemma"
+
+    def test_unknown_model_type_auto_family(self) -> None:
+        """Unknown model_type returns auto-detected minimal family, not None."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "totally_new_arch"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "totally_new_arch"
+            assert family.template_override is None
+
+    def test_no_config_json_and_no_tokenizer_config_returns_none(self) -> None:
+        """Completely empty directory (no config.json, no tokenizer_config) returns None."""
+        with tempfile.TemporaryDirectory() as d:
+            family = detect_model_family(d)
+            assert family is None
+
+    def test_no_config_json_but_tokenizer_config_matches_via_tokenizer_class(self) -> None:
+        """Without config.json, a recognised tokenizer_class in tokenizer_config is still matched."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "tokenizer_config.json").write_text(json.dumps({"tokenizer_class": "LlamaTokenizer"}))
+            family = detect_model_family(d)
+            # Tokenizer-class priority 3 kicks in; LlamaTokenizer → llama3 family
+            assert family is not None
+            assert family.name == "llama3"
+
+    def test_architecture_fallback_when_model_type_missing(self) -> None:
+        """When model_type absent (empty string), architecture match is used."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"architectures": ["MistralForCausalLM"]}  # no model_type key
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "mistral"
+
+    def test_qwen2_moe_maps_to_qwen2(self) -> None:
+        """qwen2_moe model_type maps to qwen2 family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "qwen2_moe"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "qwen2"
+
+    def test_deepseek_v2_maps_to_deepseek(self) -> None:
+        """deepseek_v2 model_type maps to deepseek family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "deepseek_v2"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "deepseek"
+
+
+# ---------------------------------------------------------------------------
+# Additional template-override coverage
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateOverrideContent:
+    """Verify template override content for key families with tool support."""
+
+    def test_llama3_template_has_tool_sections(self) -> None:
+        """Llama3 template override includes tool-call and ipython role sections."""
+        llama = next(f for f in _MODEL_FAMILIES if f.name == "llama3")
+        assert llama.template_override is not None
+        assert ".ToolCalls" in llama.template_override
+        assert "ipython" in llama.template_override
+
+    def test_qwen2_template_has_tool_sections(self) -> None:
+        """Qwen2 template override includes tool_call blocks."""
+        qwen = next(f for f in _MODEL_FAMILIES if f.name == "qwen2")
+        assert qwen.template_override is not None
+        assert "tool_call" in qwen.template_override
+
+    def test_mistral_template_has_tool_calls(self) -> None:
+        """Mistral template override includes TOOL_CALLS section."""
+        mistral = next(f for f in _MODEL_FAMILIES if f.name == "mistral")
+        assert mistral.template_override is not None
+        assert "TOOL_CALLS" in mistral.template_override
+
+    def test_llama3_stop_tokens_include_header(self) -> None:
+        """Llama3 stop tokens include <|start_header_id|> to prevent runaway generation."""
+        llama = next(f for f in _MODEL_FAMILIES if f.name == "llama3")
+        assert "<|start_header_id|>" in llama.stop_tokens
 
 

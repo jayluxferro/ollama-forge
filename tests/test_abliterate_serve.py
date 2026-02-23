@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import HTTPServer
@@ -31,7 +33,6 @@ from ollama_forge.abliterate_serve import (
     _strip_trailing_role_lines,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -39,6 +40,18 @@ from ollama_forge.abliterate_serve import (
 class _ThreadedTestServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+
+def _wait_for_server(port: int, timeout: float = 3.0) -> None:
+    """Poll until the server accepts a TCP connection (avoids race between thread start and first request)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.05):
+                return
+        except OSError:
+            time.sleep(0.01)
+    raise RuntimeError(f"Server on port {port} did not become ready within {timeout}s")
 
 
 def _make_server(model_name: str = "test-model") -> _ThreadedTestServer:
@@ -451,6 +464,7 @@ class TestOllamaCompatHandlerGet:
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         port = server.server_address[1]
+        _wait_for_server(port)
         yield server, port
         server.shutdown()
 
@@ -512,6 +526,7 @@ class TestOllamaCompatHandlerPost:
         t = threading.Thread(target=server.serve_forever, daemon=True)
         t.start()
         port = server.server_address[1]
+        _wait_for_server(port)
         yield server, port
         server.shutdown()
 

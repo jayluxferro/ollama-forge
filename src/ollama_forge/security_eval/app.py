@@ -536,11 +536,22 @@ def _render_compare_runs_tab(st) -> None:
                     f"<tr><td>{name}</td><td>{kpis_a.get(key, '')}</td><td>{kpis_b.get(key, '')}</td></tr>"
                     for key, name in export_rows
                 )
-                html_data = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Security Eval Compare</title></head><body>
-<h1>Compare</h1><table border="1"><tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>
-{rows_html}</table></body></html>"""
-                st.download_button("Download comparison (CSV)", data=csv_data, file_name="security_eval_compare.csv", mime="text/csv", key="compare_dl_csv")
-                st.download_button("Download comparison (HTML)", data=html_data, file_name="security_eval_compare.html", mime="text/html", key="compare_dl_html")
+                html_data = (
+                    '<!DOCTYPE html><html><head>'
+                    '<meta charset="utf-8">'
+                    '<title>Security Eval Compare</title></head><body>'
+                    '<h1>Compare</h1><table border="1">'
+                    f"<tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>"
+                    f"{rows_html}</table></body></html>"
+                )
+                st.download_button(
+                    "Download comparison (CSV)", data=csv_data,
+                    file_name="security_eval_compare.csv", mime="text/csv", key="compare_dl_csv",
+                )
+                st.download_button(
+                    "Download comparison (HTML)", data=html_data,
+                    file_name="security_eval_compare.html", mime="text/html", key="compare_dl_html",
+                )
         else:
             st.caption("Save at least two runs to history to compare them here.")
     except Exception:

@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import csv
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from urllib.request import urlopen
 
 from dotenv import load_dotenv
 
+from ollama_forge.config_loader import apply_config_to_args, load_config
 from ollama_forge.hf_fetch import (
     download_adapter,
     download_gguf,
@@ -24,6 +26,7 @@ from ollama_forge.hf_fetch import (
     pick_one_gguf,
     verify_gguf_checksum,
 )
+from ollama_forge.log import get_logger, set_verbose
 from ollama_forge.modelfile import (
     build_modelfile,
     get_stop_tokens_from_checkpoint,
@@ -35,9 +38,7 @@ from ollama_forge.modelfile import (
     template_from_hf_checkpoint,
     template_from_hf_checkpoint_with_reason,
 )
-from ollama_forge.config_loader import apply_config_to_args, load_config
 from ollama_forge.recipe import load_recipe
-from ollama_forge.log import get_logger, set_verbose
 from ollama_forge.run_helpers import (
     check_item,
     get_jsonl_paths_or_exit,
@@ -383,7 +384,11 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 )
                 log.info("Checksum verified.")
             except ValueError as e:
-                print_actionable_error("checksum verification failed", cause=str(e), next_steps=["Re-download or omit --verify-checksum"])
+                print_actionable_error(
+                    "checksum verification failed",
+                    cause=str(e),
+                    next_steps=["Re-download or omit --verify-checksum"],
+                )
                 return 1
     except Exception as e:
         print_actionable_error(
@@ -595,7 +600,7 @@ def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace
         print_actionable_error(
             "No saved plan found",
             next_steps=[
-                f"Run a plan with --json first, e.g.: ollama-forge plan quickstart --json",
+                "Run a plan with --json first, e.g.: ollama-forge plan quickstart --json",
                 f"Plan file path: {path}",
             ],
         )
@@ -1147,10 +1152,15 @@ Validate: `ollama-forge validate-training-data ./data/`
 Prepare: `ollama-forge prepare-training-data ./data/ -o train_prepared.txt --format llama.cpp`
 """
     if template == "chat":
-        sample = """{"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]}
-{"messages": [{"role": "user", "content": "Say hello."}, {"role": "assistant", "content": "Hello! How can I help you?"}]}
-{"messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Summarize briefly."}, {"role": "assistant", "content": "Short summary."}]}
-"""
+        sample = (
+            '{"messages": [{"role": "user", "content": "What is 2+2?"},'
+            ' {"role": "assistant", "content": "4."}]}\n'
+            '{"messages": [{"role": "user", "content": "Say hello."},'
+            ' {"role": "assistant", "content": "Hello! How can I help you?"}]}\n'
+            '{"messages": [{"role": "system", "content": "You are helpful."},'
+            ' {"role": "user", "content": "Summarize briefly."},'
+            ' {"role": "assistant", "content": "Short summary."}]}\n'
+        )
     else:
         sample = """{"instruction": "What is 2+2?", "input": "", "output": "4."}
 {"instruction": "Say hello.", "output": "Hello! How can I help you?"}
@@ -1256,7 +1266,9 @@ echo "Then: ollama run $NAME"
         if code.returncode != 0:
             return code.returncode
         code = subprocess.run(
-            ["ollama-forge", "prepare-training-data"] + data_list + ["-o", "train_prepared.txt", "--format", "llama.cpp"],
+            ["ollama-forge", "prepare-training-data"]
+            + data_list
+            + ["-o", "train_prepared.txt", "--format", "llama.cpp"],
             shell=False,
         )
         if code.returncode != 0:
@@ -1398,7 +1410,11 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         log.info("%s %s", intro, cmd)
         return 0
     if getattr(args, "skip_retrain", False):
-        log.info("Skipping retrain (--skip-retrain). Adapter at %s; run: ollama-forge retrain --base %s --adapter %s --name %s", adapter_dir, base, adapter_dir, name)
+        log.info(
+            "Skipping retrain (--skip-retrain). Adapter at %s; "
+            "run: ollama-forge retrain --base %s --adapter %s --name %s",
+            adapter_dir, base, adapter_dir, name,
+        )
         return 0
     # Step 4: retrain (create-from-base with adapter)
     fake = argparse.Namespace(
@@ -1917,8 +1933,8 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
                     data = json.loads(cache_path.read_text(encoding="utf-8"))
                     if data.get("query") == query and data.get("base") == base and data.get("limit") == limit:
                         ranked = [tuple(x) for x in data.get("ranked", [])]
-            except (json.JSONDecodeError, OSError, TypeError):
-                pass
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                log.debug("Could not load adapter recommendations cache: %s", e)
     if not ranked:
         api = HfApi()
         if not json_mode:
@@ -1954,8 +1970,8 @@ def _cmd_adapters_recommend(parser: argparse.ArgumentParser, args: argparse.Name
                     ),
                     encoding="utf-8",
                 )
-            except OSError:
-                pass
+            except OSError as e:
+                log.debug("Could not write adapter recommendations cache: %s", e)
     if not json_mode:
         print("Recommended adapters:\n")
         for repo, score in ranked:
@@ -2249,7 +2265,11 @@ See wiki or security_eval/loader.py for full field list."""
         kpis_base = (run_baseline or {}).get("kpis") or {}
         print("\n--- Baseline KPIs ---", file=sys.stderr)
         print(f"  Model: {baseline_model}", file=sys.stderr)
-        print(f"  ASR %: {kpis_base.get('asr_pct', 0):.1f}  Refusal %: {kpis_base.get('refusal_rate_pct', 0):.1f}", file=sys.stderr)
+        print(
+            f"  ASR %: {kpis_base.get('asr_pct', 0):.1f}"
+            f"  Refusal %: {kpis_base.get('refusal_rate_pct', 0):.1f}",
+            file=sys.stderr,
+        )
     kpis = run_meta.get("kpis") or {}
     print("\n--- KPIs ---", file=sys.stderr)
     print(f"  Total:        {kpis.get('total', 0)}", file=sys.stderr)
@@ -2260,7 +2280,11 @@ See wiki or security_eval/loader.py for full field list."""
     if baseline_model and run_baseline:
         print("\n--- Comparison (baseline vs model) ---", file=sys.stderr)
         print(f"  ASR:      {kpis_base.get('asr_pct', 0):.1f}% → {kpis.get('asr_pct', 0):.1f}%", file=sys.stderr)
-        print(f"  Refusal:  {kpis_base.get('refusal_rate_pct', 0):.1f}% → {kpis.get('refusal_rate_pct', 0):.1f}%", file=sys.stderr)
+        print(
+            f"  Refusal:  {kpis_base.get('refusal_rate_pct', 0):.1f}%"
+            f" → {kpis.get('refusal_rate_pct', 0):.1f}%",
+            file=sys.stderr,
+        )
     if kpis.get("avg_latency_sec") is not None:
         print(f"  Avg latency:  {kpis['avg_latency_sec']:.2f}s", file=sys.stderr)
     if kpis.get("expected_refusal_accuracy_pct") is not None:
@@ -2399,9 +2423,11 @@ def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.N
                     ("benign_refusal_rate_pct", "Benign refusal %"),
                 ]
             )
-            html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Security Eval Compare</title></head><body>
-<h1>Compare</h1><table border="1"><tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>
-{rows_html}</table></body></html>"""
+            html = (  # noqa: E501
+                f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Security Eval Compare</title></head><body>'
+                f"<h1>Compare</h1><table border=\"1\"><tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>"
+                f"{rows_html}</table></body></html>"
+            )
             out.write_text(html, encoding="utf-8")
             print(f"Exported comparison to {out}", file=sys.stderr)
         else:
@@ -2693,7 +2719,8 @@ def _cmd_abliterate_download_lists(parser: argparse.ArgumentParser, args: argpar
             print_actionable_error(
                 "curated list files not found",
                 next_steps=[
-                    "Ensure abliterate_harmful_curated.txt and abliterate_harmless_curated.txt exist in the package data/ dir",
+                    "Ensure abliterate_harmful_curated.txt and abliterate_harmless_curated.txt"
+                    " exist in the package data/ dir",
                     "Or run without --curated-only to download the full merged lists",
                 ],
             )
@@ -3536,8 +3563,9 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if (candidate / "convert_hf_to_gguf.py").is_file():
                 llama_cpp_dir = candidate
                 break
-    if not only_compute and not only_apply:
-        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+    if not only_compute and not only_apply and (
+        not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file()
+    ):
             print_actionable_error(
                 "convert_hf_to_gguf.py not found",
                 next_steps=[
@@ -3647,7 +3675,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     if getattr(torch, "mps", None) and getattr(torch.mps, "empty_cache", None):
                         torch.mps.empty_cache()
                 except ImportError:
-                    pass
+                    pass  # torch not available; cache flush is best-effort
                 log.info("Baking ablation into weights and saving checkpoint...")
                 apply_refusal_dir_and_save(
                     model_id,
@@ -4191,7 +4219,8 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         type=int,
         default=1,
         metavar="N",
-        help="Number of layers to skip at the end (default: 1; skipping the last layer reduces output distribution shift).",
+        help="Number of layers to skip at the end (default: 1; "
+             "skipping the last layer reduces output distribution shift).",
     )
     p_run.add_argument(
         "--no-norm-preserving",
@@ -4257,14 +4286,17 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     p_run.add_argument(
         "--only-export",
         action="store_true",
-        help="Only convert checkpoint to GGUF and create Ollama model; use with --from-checkpoint or existing checkpoint",
+        help="Only convert checkpoint to GGUF and create Ollama model; "
+             "use with --from-checkpoint or existing checkpoint",
     )
     p_run.add_argument(
         "--device",
         choices=("auto", "cpu", "mps", "cuda"),
         default="auto",
-        help="Device for the direction-computation forward pass (default: auto — MPS on Apple Silicon, CUDA if available). "
-             "The apply/bake step always runs on CPU. Use 'cpu' if you hit unsupported-op errors on MPS.",
+        help="Device for the direction-computation forward pass "
+             "(default: auto — MPS on Apple Silicon, CUDA if available). "
+             "The apply/bake step always runs on CPU. "
+             "Use 'cpu' if you hit unsupported-op errors on MPS.",
     )
     p_run.add_argument(
         "--config",
@@ -4508,7 +4540,8 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
 
     p_fix_template = abliterate_sub.add_parser(
         "fix-ollama-template",
-        help="Recreate the Ollama model with chat template from checkpoint (fix garbled ollama run). Destructive: replaces the existing model.",
+        help="Recreate the Ollama model with chat template from checkpoint (fix garbled ollama run). "
+             "Destructive: replaces the existing model.",
     )
     p_fix_template.add_argument(
         "--name",
@@ -4880,7 +4913,8 @@ def main() -> int:
     # refresh-template (recreate model with base's latest chat template)
     p_refresh = subparsers.add_parser(
         "refresh-template",
-        help="Recreate a model using the base model's latest chat template (fixes Chat API issues). Replaces the existing model when --output-name equals --name.",
+        help="Recreate a model using the base model's latest chat template (fixes Chat API issues). "
+             "Replaces the existing model when --output-name equals --name.",
     )
     p_refresh.add_argument(
         "--name",

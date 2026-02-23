@@ -1,7 +1,9 @@
 """Tests for abliterate_proxy module (lightweight prompt proxy)."""
 
 import json
+import socket
 import threading
+import time
 
 import pytest
 
@@ -14,6 +16,18 @@ from ollama_forge.abliterate_proxy import (
     _parse_tool_calls,
 )
 from ollama_forge.chat_util import ollama_tools_to_hf
+
+
+def _wait_for_server(port: int, timeout: float = 3.0) -> None:
+    """Poll until the server accepts a TCP connection (avoids race between thread start and first request)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.05):
+                return
+        except OSError:
+            time.sleep(0.01)
+    raise RuntimeError(f"Server on port {port} did not become ready within {timeout}s")
 
 
 class TestNormalizeMessage:
@@ -299,6 +313,7 @@ class TestProxyUnknownModel:
             server_thread = threading.Thread(target=server.serve_forever, daemon=True)
             server_thread.start()
             port = server.server_address[1]
+            _wait_for_server(port)
             try:
                 req = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/chat",
@@ -338,6 +353,7 @@ class TestProxyHealthEndpoint:
             server_thread = threading.Thread(target=server.serve_forever, daemon=True)
             server_thread.start()
             port = server.server_address[1]
+            _wait_for_server(port)
             try:
                 for path in ("/", "/api/tags"):
                     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="GET")

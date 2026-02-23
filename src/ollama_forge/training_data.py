@@ -213,7 +213,10 @@ def convert_jsonl_to_plain_text(
                     )
                     lines_out.append(block)
     if skipped:
-        log.warning("convert_jsonl_to_plain_text: skipped %d record(s) with invalid JSON or unrecognised format.", skipped)
+        log.warning(
+            "convert_jsonl_to_plain_text: skipped %d record(s) with invalid JSON or unrecognised format.",
+            skipped,
+        )
     output.write_text("\n".join(lines_out), encoding="utf-8")
     return len(lines_out)
 
@@ -244,5 +247,8 @@ def convert_messages_to_alpaca_jsonl(path_in: Path, path_out: Path) -> int:
             fout.write(json.dumps(norm, ensure_ascii=False) + "\n")
             count += 1
     if skipped:
-        log.warning("convert_messages_to_alpaca_jsonl: skipped %d record(s) with invalid JSON or unrecognised format.", skipped)
+        log.warning(
+            "convert_messages_to_alpaca_jsonl: skipped %d record(s) with invalid JSON or unrecognised format.",
+            skipped,
+        )
     return count

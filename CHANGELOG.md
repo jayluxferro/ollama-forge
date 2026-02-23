@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The project version is 
 
 ---
 
-## [1.0.1] (unreleased)
+## [1.0.1]
 
 ### Plan
 
@@ -60,6 +60,19 @@ All notable changes to this project are documented here. The project version is 
 - **Logging** — Single logger (`ollama_forge.log`), `--verbose` / `-v`; many `print(..., sys.stderr)` replaced with logger.
 - **Type hints** — Filled in for abliterate, config_loader, and related modules.
 - **Unit tests** — `tests/test_abliterate.py`: `_strength_kernel_scale`, `get_D_for_layer`. Recipe variable substitution tests.
+
+### Bug fixes (Feb 2026)
+
+- **o_proj left-multiply bug** — `o_proj` was silently skipped during ablation due to shape mismatch; now correctly left-multiplied. This was the primary cause of gibberish output.
+- **GGUF bf16 overflow** — `convert_hf_to_gguf.py` now called with `--outtype bf16`; previously defaulted to f16, causing overflow of renormalized weights.
+- **skip_begin/end_layers default 0** — Argparse defaults were `0`; corrected to `1` so embedding-adjacent layers are skipped by default.
+- **`--no-norm-preserving` flag** — Added CLI flag to disable Frobenius-norm rescaling; critical for small models where 18× compounding causes activation explosion.
+- **Per-layer direction: O(N×layers) → O(N) forward passes** — Single-pass hidden-state cache eliminates redundant forward passes (was 6400 passes for 32 layers × 100 instructions; now 200).
+- **`compute_refusal_dir` returned wrong `layer_index`** — Returned loop variable (always last frac) instead of `best_layer_idx`; JSON summary now shows the actual best layer.
+- **Tool-call templates stripped** — HF Jinja2 rendering dropped tool sections; priority-1 family `template_override` (Llama3, Mistral, Qwen2) now preserves full tool-calling support.
+- **Model family coverage** — Added phi4, qwen2_5, qwen3, gemma3_text; `_auto_family_from_config` fallback for unknown architectures.
+- **Live-server test race condition** — Added `_wait_for_server()` poll in test fixtures; eliminates socket `TimeoutError` on slow systems.
+- **386 tests passing** — Expanded test suite covering modelfile template derivation, model family detection, layer-skip edge cases, and pipeline return values.
 
 ---
 
