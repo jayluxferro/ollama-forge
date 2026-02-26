@@ -11,8 +11,10 @@ All notable changes to this project are documented here. The project version is 
 - **plan continue** — New subcommand: show or run the last saved plan. Save a plan with e.g. `plan quickstart --json`; then `plan continue` shows it and `plan continue --execute` runs the stored command(s).
 - Plan output (when using `--json`) is persisted to `.ollama-forge-last-plan.json` (or `OLLAMA_FORGE_PLAN_FILE`) so you can "continue from here" later.
 
-### Fetch & Convert
+### Fetch, Import & Convert
 
+- **import** — New command: download HF safetensors, convert to GGUF via llama.cpp, optionally quantize, derive chat template, and create an Ollama model in one step. Works with remote HF repos (`import meta-llama/Llama-3.2-1B-Instruct --name llama3.2-1b`) or local checkpoint directories. Key flags: `--quant`, `--no-requantize`, `--outtype`, `--template-from`, `--system`, `--temperature`, `--num-ctx`.
+- **auto** — Local directories with `config.json` now route to `import` (previously unsupported).
 - **fetch** — `--verify-checksum`: after download, verify file SHA256 against Hub ETag when available (LFS files).
 - **convert** — `--adapter <path>`: stack an adapter on the GGUF base; adds `ADAPTER` to the Modelfile (directory or .bin/.gguf).
 

@@ -18,6 +18,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **create-from-base** | Create a new model from a base model (Modelfile) |
 | **convert** | Create an Ollama model from a GGUF file |
 | **fetch** | Download a GGUF from Hugging Face and create an Ollama model |
+| **import** | Download HF safetensors, convert to GGUF, optionally quantize, and create an Ollama model |
 | **fetch-adapter** | Download an adapter from HF and create an Ollama model (base + adapter) |
 | **build** | Build an Ollama model from a recipe file (YAML or JSON) |
 | **validate-recipe** | Validate a recipe file (schema and paths) without building |
@@ -47,6 +48,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | Auto-detect source type | `auto <source> [--name my-model]` |
 | Preview operations | `plan <quickstart\|auto\|doctor-fix\|adapters-apply> ...` |
 | Get GGUF from HF and create model | `fetch <repo_id> --name <name>` |
+| HF safetensors → GGUF → Ollama | `import <repo_or_dir> --name <name>` |
 | GGUF file → Ollama model | `convert --gguf <path> --name <name>` |
 | Find adapters on HF | `adapters search "llama lora"` |
 | Adapter recommendations (optional auto-apply) | `adapters recommend [--base llama3.2] [--apply]` |

@@ -66,6 +66,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | Auto-detect source and run | `auto <source> [--name my-model]` |
 | Preview operations (dry-run) | `plan <quickstart\|auto\|doctor-fix\|adapters-apply> ...` |
 | GGUF from HF → Ollama | `fetch <repo_id> --name <name>` |
+| HF safetensors → GGUF → Ollama | `import <repo_or_dir> --name <name>` |
 | GGUF file → Ollama | `convert --gguf <path> --name <name>` |
 | Find / use adapters | `adapters search`, `adapters recommend`, `fetch-adapter`, `retrain` |
 | One-file config build | `build recipe.yaml` |

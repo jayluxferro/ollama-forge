@@ -86,6 +86,244 @@ def _which_quantize() -> str | None:
     return shutil.which("quantize") or shutil.which("llama-quantize")
 
 
+def _hf_checkpoint_to_ollama(
+    *,
+    checkpoint_dir: Path,
+    gguf_path: Path,
+    llama_cpp_dir: Path,
+    name: str,
+    outtype: str = "bf16",
+    requantize: bool = True,
+    quant_type: str = "Q4_K_M",
+    template_from: str | None = None,
+    system: str | None = None,
+    temperature: float | None = None,
+    num_ctx: int | None = None,
+    top_p: float | None = None,
+    repeat_penalty: float | None = None,
+    out_modelfile: str | Path | None = None,
+) -> int:
+    """Convert HF checkpoint → GGUF → (quantize) → derive template → ollama create. Returns exit code."""
+    # -- 1. Convert HF checkpoint to GGUF -----------------------------------------------
+    print("Converting to GGUF...", file=sys.stderr)
+    convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
+    checkpoint_abs = checkpoint_dir.resolve()
+    gguf_path_abs = gguf_path.resolve()
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(convert_script),
+                str(checkpoint_abs),
+                "--outfile",
+                str(gguf_path_abs),
+                "--outtype",
+                outtype,
+            ],
+            cwd=str(llama_cpp_dir.resolve()),
+            check=True,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired:
+        print_actionable_error(
+            "GGUF conversion timed out after 3600s",
+            next_steps=[
+                "Try a smaller model or increase system resources",
+                "Re-run with --llama-cpp-dir <path>",
+            ],
+        )
+        return 1
+    except subprocess.CalledProcessError as e:
+        print_actionable_error(
+            "GGUF conversion failed",
+            cause=str(e),
+            next_steps=[
+                "Ensure llama.cpp convert_hf_to_gguf.py runs in that directory",
+                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
+            ],
+        )
+        return 1
+    if not gguf_path.is_file():
+        print_actionable_error(
+            "GGUF file was not produced",
+            next_steps=[
+                "Check disk space and llama.cpp convert script output",
+            ],
+        )
+        return 1
+
+    # -- 2. Optionally requantize -------------------------------------------------------
+    gguf_to_use = gguf_path
+    if requantize:
+        quantize_bin = _which_quantize()
+        if not quantize_bin:
+            print_actionable_error(
+                "requantize (default) requires llama.cpp quantize on PATH",
+                next_steps=[
+                    "Run: ollama-forge setup-llama-cpp; add the build dir to PATH",
+                    "Or pass --no-requantize to keep full-size GGUF (no quantize step)",
+                ],
+            )
+            return 1
+        quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
+        print(f"Quantizing to {quant_type}...", file=sys.stderr)
+        try:
+            subprocess.run(
+                [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
+                check=True,
+                timeout=3600,
+            )
+        except subprocess.TimeoutExpired:
+            print_actionable_error(
+                "quantization timed out after 3600s",
+                next_steps=[
+                    "Try --no-requantize to skip quantize and use full-size GGUF",
+                    "Or re-run with more time / smaller quant type",
+                ],
+            )
+            return 1
+        except subprocess.CalledProcessError as e:
+            print_actionable_error(
+                "quantization failed",
+                cause=str(e),
+                next_steps=[
+                    "Ensure llama.cpp quantize (or llama-quantize) is on PATH",
+                    "Or pass --no-requantize to keep full-size GGUF",
+                ],
+            )
+            return 1
+        if quant_gguf.is_file():
+            gguf_to_use = quant_gguf
+
+    # -- 3. Build Modelfile with generation params --------------------------------------
+    gguf_for_modelfile = gguf_to_use.resolve()
+    content = build_modelfile(
+        str(gguf_for_modelfile),
+        system=system,
+        temperature=temperature,
+        num_ctx=num_ctx,
+        top_p=top_p,
+        repeat_penalty=repeat_penalty,
+    )
+
+    # -- 4. Template selection ----------------------------------------------------------
+    if template_from:
+        ref_content = run_ollama_show_modelfile(template_from)
+        if ref_content:
+            content = merge_modelfile_with_reference_template(
+                content, ref_content, base=str(gguf_for_modelfile), template_only=True
+            )
+            log.info("Using chat template from Ollama model %r (for tool/Chat API support)", template_from)
+        else:
+            log.info("Note: no Ollama model %r found; pull it first for tool support.", template_from)
+
+    # Detect model family for diagnostics
+    try:
+        from ollama_forge.model_family import get_family_name
+
+        family_name = get_family_name(checkpoint_dir)
+        if family_name:
+            log.info("Detected model family: %s", family_name)
+    except ImportError:
+        pass
+
+    # If still no TEMPLATE, derive from the checkpoint's HF tokenizer
+    if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
+        hf_template = template_from_hf_checkpoint(checkpoint_dir)
+        if hf_template:
+            content = modelfile_append_template(content, hf_template)
+            stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
+            if stop_tokens:
+                content = modelfile_append_stop_parameters(content, stop_tokens)
+            content = modelfile_append_num_predict(content, 2048)
+            log.info("Using chat template derived from checkpoint (HF format) for Ollama.")
+
+    # -- 5. Create Ollama model ---------------------------------------------------------
+    return run_ollama_create(name, content, out_path=out_modelfile)
+
+
+def _cmd_import(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Download HF safetensors → convert to GGUF → optionally quantize → create Ollama model."""
+    exit_code = require_ollama()
+    if exit_code is not None:
+        return exit_code
+
+    source: str = args.source
+    name: str = args.name
+    output_dir = Path(getattr(args, "output_dir", None) or tempfile.mkdtemp(prefix="ollama-forge-import-"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    revision = getattr(args, "revision", "main") or "main"
+
+    # -- Resolve llama.cpp dir ----------------------------------------------------------
+    llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
+    if not llama_cpp_dir:
+        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+            if (candidate / "convert_hf_to_gguf.py").is_file():
+                llama_cpp_dir = candidate
+                break
+    if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+        print_actionable_error(
+            "convert_hf_to_gguf.py not found",
+            next_steps=[
+                "Clone llama.cpp and set --llama-cpp-dir to the clone path",
+                "Or run: ollama-forge setup-llama-cpp",
+                "Then: ollama-forge import <source> --name <name> --llama-cpp-dir <path>",
+            ],
+        )
+        return 1
+
+    # -- Resolve source (local dir or HF repo) ------------------------------------------
+    source_path = Path(source)
+    if source_path.is_dir():
+        if not (source_path / "config.json").is_file():
+            print_actionable_error(
+                f"Local directory {source} does not contain config.json",
+                next_steps=[
+                    "Ensure the path is a valid HF model checkpoint with config.json",
+                    "For GGUF files, use: ollama-forge convert --gguf <path> --name <name>",
+                ],
+            )
+            return 1
+        checkpoint_dir = source_path
+        log.info("Using local checkpoint: %s", checkpoint_dir)
+    else:
+        # Treat as HF repo ID — download full snapshot
+        checkpoint_dir = output_dir / "checkpoint"
+        log.info("Downloading %s (revision=%s)...", source, revision)
+        try:
+            download_adapter(source, revision=revision, local_dir=checkpoint_dir)
+        except Exception as e:
+            print_actionable_error(
+                f"Failed to download {source} from Hugging Face",
+                cause=str(e),
+                next_steps=[
+                    "Check the repo ID is correct (e.g. meta-llama/Llama-3.2-1B-Instruct)",
+                    "Ensure you are logged in: huggingface-cli login",
+                    "Check network connectivity",
+                ],
+            )
+            return 1
+
+    gguf_path = output_dir / "model.gguf"
+
+    return _hf_checkpoint_to_ollama(
+        checkpoint_dir=checkpoint_dir,
+        gguf_path=gguf_path,
+        llama_cpp_dir=llama_cpp_dir,
+        name=name,
+        outtype=getattr(args, "outtype", "bf16") or "bf16",
+        requantize=not getattr(args, "no_requantize", False),
+        quant_type=getattr(args, "quant", "Q4_K_M") or "Q4_K_M",
+        template_from=getattr(args, "template_from", None),
+        system=getattr(args, "system", None),
+        temperature=getattr(args, "temperature", None),
+        num_ctx=getattr(args, "num_ctx", None),
+        top_p=getattr(args, "top_p", None),
+        repeat_penalty=getattr(args, "repeat_penalty", None),
+        out_modelfile=getattr(args, "out_modelfile", None),
+    )
+
+
 def _prompt_for_value(prompt: str, default: str) -> str:
     """When stdin is a TTY, prompt the user; return default if empty. When not TTY, return default."""
     if not sys.stdin.isatty():
@@ -772,11 +1010,37 @@ def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             ):
                 return 0
             return _cmd_retrain(parser, fake)
+        # HF checkpoint (config.json) → import
+        if (source_path / "config.json").is_file():
+            fake = argparse.Namespace(
+                source=str(source_path),
+                name=name,
+                llama_cpp_dir=None,
+                outtype="bf16",
+                quant=args.quant or "Q4_K_M",
+                no_requantize=False,
+                template_from=None,
+                output_dir=None,
+                revision="main",
+                system=args.system,
+                temperature=args.temperature,
+                num_ctx=args.num_ctx,
+                top_p=args.top_p,
+                repeat_penalty=args.repeat_penalty,
+                out_modelfile=args.out_modelfile,
+            )
+            if maybe_plan(
+                "import",
+                f"ollama-forge import {source_path} --name {name}",
+            ):
+                return 0
+            return _cmd_import(parser, fake)
         print_actionable_error(
             f"unsupported local directory source: {source_path}",
             next_steps=[
                 "Use auto with a recipe/.gguf/HF repo/base model",
                 "Or provide an adapter directory (with adapter_config.json)",
+                "Or provide an HF checkpoint directory (with config.json)",
             ],
         )
         return 1
@@ -4976,6 +5240,41 @@ def main() -> int:
     )
     p_convert.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
     p_convert.set_defaults(handler=_cmd_convert)
+
+    # import (HF safetensors → GGUF → Ollama)
+    p_import = subparsers.add_parser(
+        "import",
+        help="Download HF safetensors, convert to GGUF, and create an Ollama model (one command)",
+    )
+    p_import.add_argument(
+        "source",
+        help="Hugging Face repo ID (e.g. meta-llama/Llama-3.2-1B-Instruct) or local checkpoint directory",
+    )
+    p_import.add_argument("--name", required=True, help="Name for the new Ollama model")
+    p_import.add_argument("--llama-cpp-dir", help="Path to llama.cpp clone (auto-detected if omitted)")
+    p_import.add_argument(
+        "--outtype",
+        choices=["f32", "f16", "bf16", "q8_0", "auto"],
+        default="bf16",
+        help="GGUF output type (default: bf16)",
+    )
+    p_import.add_argument("--quant", default="Q4_K_M", help="Quantization type (default: Q4_K_M)")
+    p_import.add_argument(
+        "--no-requantize",
+        action="store_true",
+        default=False,
+        help="Skip quantization; keep full-size GGUF",
+    )
+    p_import.add_argument("--template-from", help="Copy chat template from an existing Ollama model")
+    p_import.add_argument("--output-dir", help="Download/output directory (default: auto temp dir)")
+    p_import.add_argument("--revision", default="main", help="HF repo revision (default: main)")
+    p_import.add_argument("--system", help="System message (role/instructions)")
+    p_import.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
+    p_import.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
+    p_import.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
+    p_import.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
+    p_import.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_import.set_defaults(handler=_cmd_import)
 
     # fetch (HF repo → download GGUF → create Ollama model)
     p_fetch = subparsers.add_parser(

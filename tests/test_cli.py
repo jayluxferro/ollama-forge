@@ -225,6 +225,26 @@ def test_auto_plan_does_not_execute() -> None:
     assert "route: convert" in result.stdout
 
 
+def test_auto_plan_local_checkpoint_routes_to_import() -> None:
+    """auto --plan with a local HF checkpoint dir routes to import."""
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "config.json").write_text("{}")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ollama_forge.cli",
+                "auto",
+                d,
+                "--plan",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    assert result.returncode == 0
+    assert "route: import" in result.stdout
+
+
 def test_fetch_adapter_help() -> None:
     """fetch-adapter --help lists repo_id, --base, --name."""
     result = subprocess.run(
@@ -552,6 +572,34 @@ def test_convert_training_data_format_runs() -> None:
     finally:
         Path(in_path).unlink(missing_ok=True)
         Path(out_path).unlink(missing_ok=True)
+
+
+def test_import_help() -> None:
+    """import --help lists source, --name, --quant, and template options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "import", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "source" in result.stdout
+    assert "--name" in result.stdout
+    assert "--quant" in result.stdout
+    assert "--template-from" in result.stdout
+    assert "--outtype" in result.stdout
+    assert "--no-requantize" in result.stdout
+    assert "--top-p" in result.stdout and "--repeat-penalty" in result.stdout
+
+
+def test_import_missing_name() -> None:
+    """import without --name exits non-zero with argparse error."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "import", "some/repo"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "--name" in result.stderr
 
 
 def test_train_help() -> None:

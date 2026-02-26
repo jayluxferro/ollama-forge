@@ -1,6 +1,6 @@
-# Fetch & Convert
+# Fetch, Import & Convert
 
-Get a GGUF from Hugging Face and create an Ollama model in one command, or turn a local GGUF file into an Ollama model.
+Get a model from Hugging Face and create an Ollama model in one command. Three paths depending on what you have:
 
 ---
 
@@ -25,6 +25,42 @@ uv run ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model --quant Q4_K_
 - `--gguf-file <filename>` — Use a specific file when the repo has many.
 - `--revision main` — Branch/tag/revision of the repo.
 - `--system "..."`, `--temperature 0.7`, `--num-ctx 4096`, `--top-p 0.9`, `--repeat-penalty 1.1` — Modelfile options.
+
+**Gated or private repos:** Set `HF_TOKEN` or run `huggingface-cli login`.
+
+---
+
+## import: HF safetensors → GGUF → Ollama (one command)
+
+Use when the Hugging Face repo has **safetensors/bin weights but no GGUF files** (e.g. `meta-llama/Llama-3.2-1B-Instruct`). Requires llama.cpp (`setup-llama-cpp`).
+
+```bash
+uv run ollama-forge import meta-llama/Llama-3.2-1B-Instruct --name llama3.2-1b
+ollama run llama3.2-1b
+```
+
+**From a local checkpoint directory:**
+
+```bash
+uv run ollama-forge import ./my-model-checkpoint --name my-model
+```
+
+**With options:**
+
+```bash
+uv run ollama-forge import Qwen/Qwen2.5-7B-Instruct --name qwen2.5 \
+  --quant Q5_K_M --template-from qwen2.5:7b --system "You are helpful."
+```
+
+**Key options:**
+
+- `--quant Q4_K_M` (default) — Quantization type. Use `--no-requantize` to keep full-size GGUF.
+- `--outtype bf16` (default) — GGUF output precision (`f32`/`f16`/`bf16`/`q8_0`/`auto`).
+- `--template-from <ollama_model>` — Copy chat template from an existing Ollama model (for tool support).
+- `--output-dir <path>` — Where to download/save files (default: auto temp dir).
+- `--revision main` — HF repo branch/tag.
+- `--system "..."`, `--temperature`, `--num-ctx`, `--top-p`, `--repeat-penalty` — Modelfile parameters.
+- `--llama-cpp-dir <path>` — Path to llama.cpp clone (auto-detected from `./llama.cpp` or `~/llama.cpp`).
 
 **Gated or private repos:** Set `HF_TOKEN` or run `huggingface-cli login`.
 
