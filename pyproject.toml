@@ -5,16 +5,26 @@ description = "Create, retrain, ablate, and convert models for local Ollama"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "huggingface_hub>=0.20.0",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0.0",
-    "hf-transfer>=0.1.0",  # fast Hugging Face downloads (auto-enabled)
+  "huggingface_hub>=0.20.0",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0.0",
+  "hf-transfer>=0.1.0",      # fast Hugging Face downloads (auto-enabled)
 ]
 
 [project.optional-dependencies]
-abliterate = ["torch>=2.0", "transformers>=4.36", "accelerate>=0.25", "gguf>=0.10.0", "protobuf>=3.20", "optuna>=3.0"]
+abliterate = [
+  "torch>=2.0",
+  "transformers>=5.2.0",
+  "accelerate>=0.25",
+  "gguf>=0.10.0",
+  "protobuf>=3.20",
+  "optuna>=3.0",
+]
+unsloth = ["unsloth"]
 security-eval-ui = ["streamlit>=1.28", "pandas>=2.0", "plotly>=5.18"]
-net = ["requests>=2.28"]  # nicer HTTP errors/retries for proxy, security-eval, download-lists
+net = [
+  "requests>=2.28",
+] # nicer HTTP errors/retries for proxy, security-eval, download-lists
 
 [project.scripts]
 ollama-forge = "ollama_forge.cli:main"
@@ -27,12 +37,7 @@ build-backend = "hatchling.build"
 packages = ["src/ollama_forge"]
 
 [dependency-groups]
-dev = [
-    "pytest>=7",
-    "pytest-cov>=4.0",
-    "ruff>=0.4",
-    "twine>=6.2.0",
-]
+dev = ["pytest>=7", "pytest-cov>=4.0", "ruff>=0.4", "twine>=6.2.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

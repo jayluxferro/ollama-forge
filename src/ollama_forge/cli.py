@@ -86,37 +86,23 @@ def _which_quantize() -> str | None:
     return shutil.which("quantize") or shutil.which("llama-quantize")
 
 
-def _hf_checkpoint_to_ollama(
-    *,
+def _convert_gguf_with_llama_cpp(
     checkpoint_dir: Path,
     gguf_path: Path,
     llama_cpp_dir: Path,
-    name: str,
     outtype: str = "bf16",
-    requantize: bool = True,
-    quant_type: str = "Q4_K_M",
-    template_from: str | None = None,
-    system: str | None = None,
-    temperature: float | None = None,
-    num_ctx: int | None = None,
-    top_p: float | None = None,
-    repeat_penalty: float | None = None,
-    out_modelfile: str | Path | None = None,
 ) -> int:
-    """Convert HF checkpoint → GGUF → (quantize) → derive template → ollama create. Returns exit code."""
-    # -- 1. Convert HF checkpoint to GGUF -----------------------------------------------
-    print("Converting to GGUF...", file=sys.stderr)
+    """Convert HF checkpoint to GGUF using llama.cpp convert_hf_to_gguf.py. Returns exit code."""
+    print("Converting to GGUF (llama.cpp)...", file=sys.stderr)
     convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
-    checkpoint_abs = checkpoint_dir.resolve()
-    gguf_path_abs = gguf_path.resolve()
     try:
         subprocess.run(
             [
                 sys.executable,
                 str(convert_script),
-                str(checkpoint_abs),
+                str(checkpoint_dir.resolve()),
                 "--outfile",
-                str(gguf_path_abs),
+                str(gguf_path.resolve()),
                 "--outtype",
                 outtype,
             ],
@@ -135,26 +121,174 @@ def _hf_checkpoint_to_ollama(
         return 1
     except subprocess.CalledProcessError as e:
         print_actionable_error(
-            "GGUF conversion failed",
+            "GGUF conversion failed (llama.cpp)",
             cause=str(e),
             next_steps=[
                 "Ensure llama.cpp convert_hf_to_gguf.py runs in that directory",
                 "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
+                "Or try --gguf-converter unsloth (requires: pip install unsloth)",
             ],
         )
         return 1
     if not gguf_path.is_file():
         print_actionable_error(
             "GGUF file was not produced",
+            next_steps=["Check disk space and llama.cpp convert script output"],
+        )
+        return 1
+    return 0
+
+
+def _convert_gguf_checkpoint(
+    *,
+    checkpoint_dir: Path,
+    gguf_path: Path,
+    llama_cpp_dir: Path | None,
+    outtype: str = "bf16",
+    quant_type: str = "Q4_K_M",
+    gguf_converter: str = "auto",
+) -> int:
+    """Dispatch GGUF conversion to llama-cpp, unsloth, or auto (try llama-cpp then unsloth). Returns exit code."""
+    if gguf_converter == "unsloth":
+        return _convert_gguf_with_unsloth(checkpoint_dir, gguf_path, quant_type=quant_type)
+
+    if gguf_converter == "llama-cpp":
+        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+            print_actionable_error(
+                "convert_hf_to_gguf.py not found",
+                next_steps=[
+                    "Clone llama.cpp and set --llama-cpp-dir to the clone path",
+                    "Or run: ollama-forge setup-llama-cpp",
+                ],
+            )
+            return 1
+        return _convert_gguf_with_llama_cpp(checkpoint_dir, gguf_path, llama_cpp_dir, outtype=outtype)
+
+    # auto: try llama-cpp first, fall back to unsloth
+    if llama_cpp_dir and (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+        rc = _convert_gguf_with_llama_cpp(checkpoint_dir, gguf_path, llama_cpp_dir, outtype=outtype)
+        if rc == 0:
+            return 0
+        log.info("llama.cpp conversion failed; trying unsloth fallback...")
+
+    # Try unsloth
+    try:
+        import unsloth  # noqa: F401
+    except ImportError:
+        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+            print_actionable_error(
+                "No GGUF converter available",
+                next_steps=[
+                    "Set up llama.cpp: ollama-forge setup-llama-cpp",
+                    "Or install unsloth: pip install unsloth",
+                ],
+            )
+        else:
+            print_actionable_error(
+                "llama.cpp conversion failed and unsloth is not installed for fallback",
+                next_steps=[
+                    "Install unsloth: pip install unsloth  (or: uv sync --extra unsloth)",
+                    "Or fix the llama.cpp error above",
+                ],
+            )
+        return 1
+    return _convert_gguf_with_unsloth(checkpoint_dir, gguf_path, quant_type=quant_type)
+
+
+def _convert_gguf_with_unsloth(
+    checkpoint_dir: Path,
+    gguf_path: Path,
+    quant_type: str = "Q4_K_M",
+) -> int:
+    """Convert HF checkpoint to GGUF using unsloth. Returns exit code (0=success)."""
+    try:
+        from unsloth import FastLanguageModel  # type: ignore[import-untyped]
+    except ImportError:
+        print_actionable_error(
+            "unsloth is not installed",
             next_steps=[
-                "Check disk space and llama.cpp convert script output",
+                "Install: pip install unsloth  (or: uv sync --extra unsloth)",
+                "Or use --gguf-converter llama-cpp to skip unsloth",
             ],
         )
         return 1
 
-    # -- 2. Optionally requantize -------------------------------------------------------
+    log.info("Converting to GGUF with unsloth...")
+    try:
+        model, tokenizer = FastLanguageModel.from_pretrained(str(checkpoint_dir.resolve()))
+        model.save_pretrained_gguf(
+            str(gguf_path.parent),
+            tokenizer,
+            quantization_method=quant_type,
+        )
+        # unsloth may produce files with varying names; find the .gguf in output dir
+        produced = list(gguf_path.parent.glob("*.gguf"))
+        if produced and not gguf_path.is_file():
+            # Rename the first produced GGUF to the expected path
+            produced[0].rename(gguf_path)
+        if gguf_path.is_file():
+            log.info("Unsloth GGUF conversion succeeded: %s", gguf_path)
+            return 0
+        print_actionable_error(
+            "unsloth did not produce a GGUF file",
+            next_steps=["Check unsloth output above for errors"],
+        )
+        return 1
+    except Exception as e:
+        print_actionable_error(
+            "unsloth GGUF conversion failed",
+            cause=str(e),
+            next_steps=[
+                "Check that unsloth supports this model architecture",
+                "Try --gguf-converter llama-cpp instead",
+            ],
+        )
+        return 1
+
+
+def _hf_checkpoint_to_ollama(
+    *,
+    checkpoint_dir: Path,
+    gguf_path: Path,
+    llama_cpp_dir: Path | None,
+    name: str,
+    outtype: str = "bf16",
+    requantize: bool = True,
+    quant_type: str = "Q4_K_M",
+    template_from: str | None = None,
+    system: str | None = None,
+    temperature: float | None = None,
+    num_ctx: int | None = None,
+    top_p: float | None = None,
+    repeat_penalty: float | None = None,
+    out_modelfile: str | Path | None = None,
+    gguf_converter: str = "auto",
+) -> int:
+    """Convert HF checkpoint → GGUF → (quantize) → derive template → ollama create. Returns exit code."""
+    from ollama_forge.model_family import remap_architecture_in_config
+
+    # -- 0. Remap architecture aliases in config.json before conversion --------------------
+    config_path = checkpoint_dir / "config.json"
+    if config_path.is_file():
+        orig_arch = remap_architecture_in_config(config_path)
+        if orig_arch:
+            log.info("Remapped architecture %r for GGUF conversion", orig_arch)
+
+    # -- 1. Convert HF checkpoint to GGUF -----------------------------------------------
+    rc = _convert_gguf_checkpoint(
+        checkpoint_dir=checkpoint_dir,
+        gguf_path=gguf_path,
+        llama_cpp_dir=llama_cpp_dir,
+        outtype=outtype,
+        quant_type=quant_type,
+        gguf_converter=gguf_converter,
+    )
+    if rc != 0:
+        return rc
+
+    # -- 2. Optionally requantize (skip when unsloth already quantized) -----------------
     gguf_to_use = gguf_path
-    if requantize:
+    if requantize and gguf_converter != "unsloth":
         quantize_bin = _which_quantize()
         if not quantize_bin:
             print_actionable_error(
@@ -254,20 +388,22 @@ def _cmd_import(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     output_dir.mkdir(parents=True, exist_ok=True)
     revision = getattr(args, "revision", "main") or "main"
 
-    # -- Resolve llama.cpp dir ----------------------------------------------------------
+    gguf_converter = getattr(args, "gguf_converter", "auto") or "auto"
+
+    # -- Resolve llama.cpp dir (optional when using unsloth-only) -----------------------
     llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
     if not llama_cpp_dir:
         for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
             if (candidate / "convert_hf_to_gguf.py").is_file():
                 llama_cpp_dir = candidate
                 break
-    if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+    if gguf_converter != "unsloth" and (not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file()):
         print_actionable_error(
             "convert_hf_to_gguf.py not found",
             next_steps=[
                 "Clone llama.cpp and set --llama-cpp-dir to the clone path",
                 "Or run: ollama-forge setup-llama-cpp",
-                "Then: ollama-forge import <source> --name <name> --llama-cpp-dir <path>",
+                "Or use --gguf-converter unsloth (requires: pip install unsloth)",
             ],
         )
         return 1
@@ -321,6 +457,7 @@ def _cmd_import(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         top_p=getattr(args, "top_p", None),
         repeat_penalty=getattr(args, "repeat_penalty", None),
         out_modelfile=getattr(args, "out_modelfile", None),
+        gguf_converter=gguf_converter,
     )
 
 
@@ -3722,6 +3859,7 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "quant": "Q4_K_M",
     "template_from": None,
     "device": "auto",
+    "gguf_converter": "auto",
 }
 
 
@@ -3821,24 +3959,41 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         refusal_pt = output_dir / "refusal_dir.pt"
         checkpoint_dir = output_dir / "checkpoint"
         gguf_path = output_dir / "model.gguf"
+    gguf_converter = getattr(args, "gguf_converter", "auto") or "auto"
     llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
     if not llama_cpp_dir:
         for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
             if (candidate / "convert_hf_to_gguf.py").is_file():
                 llama_cpp_dir = candidate
                 break
-    if not only_compute and not only_apply and (
+    if not only_compute and not only_apply and gguf_converter != "unsloth" and (
         not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file()
     ):
-            print_actionable_error(
-                "convert_hf_to_gguf.py not found",
-                next_steps=[
-                    "Clone llama.cpp and set --llama-cpp-dir to the clone path",
-                    "Or run: ollama-forge setup-llama-cpp",
-                    "Then: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
-                ],
-            )
-            return 1
+        print_actionable_error(
+            "convert_hf_to_gguf.py not found",
+            next_steps=[
+                "Clone llama.cpp and set --llama-cpp-dir to the clone path",
+                "Or run: ollama-forge setup-llama-cpp",
+                "Or use --gguf-converter unsloth (requires: pip install unsloth)",
+            ],
+        )
+        return 1
+    # Warn about multimodal models (abliteration only affects text decoder weights)
+    if not from_checkpoint_dir and model_id:
+        _model_path = Path(model_id)
+        _check_dir = _model_path if _model_path.is_dir() else None
+        if _check_dir:
+            try:
+                from ollama_forge.model_family import is_multimodal_checkpoint
+
+                if is_multimodal_checkpoint(_check_dir):
+                    log.warning(
+                        "Model appears to be multimodal (vision+text). Abliteration only modifies "
+                        "text decoder weights. Vision capabilities may be affected unpredictably."
+                    )
+            except ImportError:
+                pass
+
     if only_compute and not from_checkpoint_dir:
         harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
         try:
@@ -3907,6 +4062,19 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         exit_code = require_ollama()
         if exit_code is not None:
             return exit_code
+    # Also check for multimodal on checkpoint dir (covers --from-checkpoint and full run)
+    if checkpoint_dir and checkpoint_dir.is_dir():
+        try:
+            from ollama_forge.model_family import is_multimodal_checkpoint
+
+            if is_multimodal_checkpoint(checkpoint_dir):
+                log.warning(
+                    "Model appears to be multimodal (vision+text). Abliteration only modifies "
+                    "text decoder weights. Vision capabilities may be affected unpredictably."
+                )
+        except ImportError:
+            pass
+
     if from_checkpoint_dir:
         log.info("Resuming from checkpoint: converting to GGUF...")
     else:
@@ -3976,53 +4144,25 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if not str(e).strip():
                 traceback.print_exc(file=sys.stderr)
             return 1
-    print("Converting to GGUF...", file=sys.stderr)
-    convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
-    checkpoint_abs = checkpoint_dir.resolve()
-    gguf_path_abs = gguf_path.resolve()
-    try:
-        subprocess.run(
-            [
-                sys.executable,
-                str(convert_script),
-                str(checkpoint_abs),
-                "--outfile",
-                str(gguf_path_abs),
-                "--outtype",
-                "bf16",  # Preserve bfloat16 precision; avoids f16 overflow on abliterated weights
-            ],
-            cwd=str(llama_cpp_dir.resolve()),
-            check=True,
-            timeout=3600,
-        )
-    except subprocess.TimeoutExpired:
-        print_actionable_error(
-            "GGUF conversion timed out after 3600s",
-            next_steps=[
-                "Try a smaller model or increase system resources",
-                "Re-run: ollama-forge abliterate run --model <id> --name <name> --llama-cpp-dir <path>",
-            ],
-        )
-        return 1
-    except subprocess.CalledProcessError as e:
-        print_actionable_error(
-            "GGUF conversion failed",
-            cause=str(e),
-            next_steps=[
-                "Ensure llama.cpp convert_hf_to_gguf.py runs in that directory",
-                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
-            ],
-        )
-        return 1
-    if not gguf_path.is_file():
-        print_actionable_error(
-            "GGUF file was not produced",
-            next_steps=[
-                "Check disk space and llama.cpp convert script output",
-                "Re-run: ollama-forge abliterate run --model <id> --name <name>",
-            ],
-        )
-        return 1
+    # Remap architecture aliases before conversion
+    from ollama_forge.model_family import remap_architecture_in_config
+
+    config_path = checkpoint_dir / "config.json"
+    if config_path.is_file():
+        orig_arch = remap_architecture_in_config(config_path)
+        if orig_arch:
+            log.info("Remapped architecture %r for GGUF conversion", orig_arch)
+
+    rc = _convert_gguf_checkpoint(
+        checkpoint_dir=checkpoint_dir,
+        gguf_path=gguf_path,
+        llama_cpp_dir=llama_cpp_dir,
+        outtype="bf16",
+        quant_type=getattr(args, "quant", "Q4_K_M") or "Q4_K_M",
+        gguf_converter=gguf_converter,
+    )
+    if rc != 0:
+        return rc
     gguf_to_use = gguf_path
     requantize = not getattr(args, "no_requantize", False)
     if requantize:
@@ -4566,6 +4706,13 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         "--config",
         metavar="FILE",
         help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
+    )
+    p_run.add_argument(
+        "--gguf-converter",
+        choices=["llama-cpp", "unsloth", "auto"],
+        default="auto",
+        help="GGUF converter: llama-cpp (default subprocess), unsloth (requires unsloth package), "
+             "auto (try llama-cpp first, fall back to unsloth). Default: auto",
     )
     p_run.set_defaults(handler=_cmd_abliterate_run)
 
@@ -5274,6 +5421,13 @@ def main() -> int:
     p_import.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
     p_import.add_argument("--repeat-penalty", type=float, help="Repeat penalty (e.g. 1.1)")
     p_import.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_import.add_argument(
+        "--gguf-converter",
+        choices=["llama-cpp", "unsloth", "auto"],
+        default="auto",
+        help="GGUF converter: llama-cpp (default subprocess), unsloth (requires unsloth package), "
+             "auto (try llama-cpp first, fall back to unsloth). Default: auto",
+    )
     p_import.set_defaults(handler=_cmd_import)
 
     # fetch (HF repo → download GGUF → create Ollama model)

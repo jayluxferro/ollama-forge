@@ -87,16 +87,23 @@ def run_ollama_show_modelfile(model: str) -> str | None:
         return None
 
 
-def _run_ollama_create_from_path(name: str, path: Path) -> int:
-    """Run `ollama create -f <path>` and return exit code. Error handling only."""
+def _run_ollama_create_from_path(name: str, path: Path) -> tuple[int, str]:
+    """Run `ollama create -f <path>` and return (exit_code, stderr_text)."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["ollama", "create", name, "-f", str(path)],
             check=True,
             timeout=OLLAMA_CREATE_TIMEOUT,
+            capture_output=True,
+            text=True,
         )
+        # Print captured stdout/stderr so the user sees normal progress output
+        if result.stdout:
+            print(result.stdout, end="", file=sys.stdout)
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
         log.info("Created model %r. Run with: ollama run %s", name, name)
-        return 0
+        return 0, ""
     except FileNotFoundError:
         print_actionable_error(
             "ollama not found on PATH",
@@ -105,15 +112,25 @@ def _run_ollama_create_from_path(name: str, path: Path) -> int:
                 "Run: ollama-forge check",
             ],
         )
-        return 1
+        return 1, ""
     except subprocess.TimeoutExpired:
         print_actionable_error(
             f"ollama create timed out after {OLLAMA_CREATE_TIMEOUT}s",
             next_steps=["Try again or use a smaller model"],
         )
-        return 1
+        return 1, ""
     except subprocess.CalledProcessError as e:
-        return e.returncode
+        stderr = (e.stderr or "").strip()
+        if e.stdout:
+            print(e.stdout, end="", file=sys.stdout)
+        if stderr:
+            print(stderr, file=sys.stderr)
+        return e.returncode, stderr
+
+
+def _is_template_function_error(stderr: str) -> bool:
+    """True if stderr indicates a Go template function-not-defined error."""
+    return "function" in stderr and "not defined" in stderr
 
 
 def run_ollama_create(
@@ -121,14 +138,33 @@ def run_ollama_create(
     modelfile_content: str,
     out_path: str | Path | None = None,
 ) -> int:
-    """Write modelfile (to out_path or temp), run `ollama create`, cleanup. Returns exit code."""
-    if out_path is not None:
-        path = Path(out_path)
-        path.write_text(modelfile_content, encoding="utf-8")
-        log.info("Wrote Modelfile to %s", path)
-        return _run_ollama_create_from_path(name, path)
-    with temporary_text_file(modelfile_content, suffix=".Modelfile", prefix="") as path:
-        return _run_ollama_create_from_path(name, path)
+    """Write modelfile (to out_path or temp), run ``ollama create``, cleanup. Returns exit code.
+
+    If ``ollama create`` fails because the template uses Go template functions not available
+    in the installed Ollama version (e.g. ``json``), automatically retries with a simplified
+    fallback template that drops tool-call support.
+    """
+    from ollama_forge.modelfile import strip_tool_template
+
+    def _create(content: str) -> tuple[int, str]:
+        if out_path is not None:
+            path = Path(out_path)
+            path.write_text(content, encoding="utf-8")
+            log.info("Wrote Modelfile to %s", path)
+            return _run_ollama_create_from_path(name, path)
+        with temporary_text_file(content, suffix=".Modelfile", prefix="") as path:
+            return _run_ollama_create_from_path(name, path)
+
+    rc, stderr = _create(modelfile_content)
+    if rc != 0 and _is_template_function_error(stderr):
+        log.warning(
+            "Template uses functions not supported by this Ollama version. "
+            "Retrying with a basic template (no tool support). "
+            "Upgrade Ollama to v0.3.0+ for full tool-calling support."
+        )
+        stripped = strip_tool_template(modelfile_content)
+        rc, _ = _create(stripped)
+    return rc
 
 
 @contextmanager

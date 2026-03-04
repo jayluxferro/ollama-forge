@@ -12,6 +12,7 @@ from ollama_forge.modelfile import (
     modelfile_append_num_predict,
     modelfile_append_stop_parameters,
     modelfile_append_template,
+    strip_tool_template,
     template_body_from_modelfile,
     template_from_hf_checkpoint_with_reason,
 )
@@ -384,3 +385,41 @@ class TestGetStopTokensFromCheckpoint:
             mock_auto.from_pretrained.return_value = mock_tok
             tokens = get_stop_tokens_from_checkpoint(tmp_path)
         assert "<|custom_eos|>" in tokens
+
+
+# ---------------------------------------------------------------------------
+# strip_tool_template
+# ---------------------------------------------------------------------------
+
+
+class TestStripToolTemplate:
+    """Tests for strip_tool_template."""
+
+    def test_replaces_template_with_fallback(self) -> None:
+        """Replaces a tool template with a minimal fallback."""
+        content = 'FROM model.gguf\nTEMPLATE """{{- if .Tools }}{{ . | json }}{{ end }}{{ .Prompt }}"""'
+        result = strip_tool_template(content)
+        assert "FROM model.gguf" in result
+        assert "json" not in result
+        assert "{{ .Prompt }}" in result
+        assert "{{ .Response }}" in result
+
+    def test_preserves_from_line(self) -> None:
+        """FROM line is preserved."""
+        content = 'FROM /path/to/model.gguf\nTEMPLATE """{{ .Prompt }}"""'
+        result = strip_tool_template(content)
+        assert "FROM /path/to/model.gguf" in result
+
+    def test_no_template_adds_fallback(self) -> None:
+        """If no TEMPLATE block exists, appends fallback."""
+        content = "FROM model.gguf\nPARAMETER temperature 0.7"
+        result = strip_tool_template(content)
+        assert "TEMPLATE" in result
+        assert "{{ .Prompt }}" in result
+        assert "PARAMETER temperature 0.7" in result
+
+    def test_preserves_stop_parameters(self) -> None:
+        """PARAMETER stop lines are preserved."""
+        content = 'FROM m.gguf\nTEMPLATE """{{ . | json }}"""\nPARAMETER stop "<|im_end|>"'
+        result = strip_tool_template(content)
+        assert 'PARAMETER stop "<|im_end|>"' in result

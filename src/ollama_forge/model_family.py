@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,7 +66,7 @@ You have access to the following functions. To call a function, respond with JSO
 Do not use variables.
 
 {{ range .Tools }}
-{{- . | toJson }}
+{{- . | json }}
 {{ end }}
 {{- end }}<|eot_id|>
 {{- end }}
@@ -113,7 +116,7 @@ Do not use variables.
     ),
     ModelFamily(
         name="qwen2",
-        model_types=("qwen2", "qwen2_moe", "qwen2_5", "qwen3"),
+        model_types=("qwen2", "qwen2_moe", "qwen2_5", "qwen3", "qwen3_5"),
         tokenizer_classes=("qwen2tokenizer", "qwen2tokenizerfast"),
         architectures=("qwen2forcausallm", "qwen2moeforcausallm", "qwen25forcausallm"),
         # Tool-capable template for Qwen2/2.5 (ChatML format with tool call JSON blocks).
@@ -123,7 +126,7 @@ Do not use variables.
 {{- if .Tools }}<|im_start|>system
 You have access to the following tools:
 {{ range .Tools }}
-{{- . | toJson }}
+{{- . | json }}
 {{ end }}
 When you need to call a tool, respond with a JSON object inside <tool_call> tags:
 <tool_call>
@@ -179,6 +182,40 @@ When you need to call a tool, respond with a JSON object inside <tool_call> tags
         stop_tokens=("<|im_end|>", "<|endoftext|>"),
     ),
 )
+
+
+# Known architecture aliases for GGUF conversion (HF class name → llama.cpp registered name).
+# When llama.cpp's convert_hf_to_gguf.py doesn't recognise a model's architecture string,
+# we patch config.json in-place before conversion so the converter can proceed.
+_ARCHITECTURE_ALIASES: dict[str, str] = {
+    "Qwen3_5ForCausalLM": "Qwen3_5ForConditionalGeneration",
+}
+
+
+def remap_architecture_in_config(config_path: Path) -> str | None:
+    """If config.json has an unrecognized architecture with a known alias, patch it in-place.
+
+    Returns the original architecture name if remapped, None if no change.
+    """
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    archs = data.get("architectures")
+    if not archs or not isinstance(archs, list) or not archs:
+        return None
+
+    original = archs[0]
+    replacement = _ARCHITECTURE_ALIASES.get(original)
+    if not replacement:
+        return None
+
+    archs[0] = replacement
+    config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    log.info("Remapped architecture %r → %r in %s", original, replacement, config_path)
+    return original
 
 
 def _normalize(s: str | None) -> str:
@@ -307,5 +344,24 @@ def is_gemma_checkpoint(checkpoint_dir: str | Path) -> bool:
     """True if the checkpoint is detected as a Gemma model (Gemma 2/3)."""
     family = detect_model_family(checkpoint_dir)
     return family is not None and family.name == "gemma"
+
+
+def is_multimodal_checkpoint(checkpoint_dir: str | Path) -> bool:
+    """True if config.json indicates a multimodal (vision+text) model.
+
+    Checks for ``vision_config``, ``image_token_id``, or ``visual`` keys in config.json,
+    which are present in VL/multimodal architectures (Qwen3.5, Qwen2-VL, LLaVA, etc.).
+    """
+    config_path = Path(checkpoint_dir) / "config.json"
+    if not config_path.is_file():
+        return False
+    with contextlib.suppress(Exception):
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        return bool(
+            data.get("vision_config")
+            or data.get("image_token_id")
+            or data.get("visual")
+        )
+    return False
 
 

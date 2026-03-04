@@ -183,7 +183,7 @@ def test_run_ollama_show_modelfile_missing(mock_which: object) -> None:
 def test_run_ollama_create_success(mock_run: object, tmp_path: Path) -> None:
     """run_ollama_create writes modelfile and runs ollama create; returns 0."""
     modelfile_path = tmp_path / "M"
-    mock_run.return_value = None
+    mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     buf = StringIO()
     with patch("sys.stderr", buf):
         code = run_ollama_create("testmodel", "FROM x\n", out_path=modelfile_path)
@@ -197,7 +197,7 @@ def test_run_ollama_create_success(mock_run: object, tmp_path: Path) -> None:
 @patch("ollama_forge.run_helpers.subprocess.run")
 def test_run_ollama_create_temp_file_success(mock_run: object) -> None:
     """run_ollama_create with out_path=None uses temp file and returns 0."""
-    mock_run.return_value = None
+    mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     buf = StringIO()
     with patch("sys.stderr", buf):
         code = run_ollama_create("testmodel", "FROM x\n", out_path=None)
@@ -219,7 +219,7 @@ def test_run_ollama_create_timeout_returns_1(mock_run: object, tmp_path: Path) -
 @patch("ollama_forge.run_helpers.subprocess.run")
 def test_run_ollama_create_called_process_error_returns_code(mock_run: object, tmp_path: Path) -> None:
     """run_ollama_create returns subprocess return code on CalledProcessError."""
-    mock_run.side_effect = subprocess.CalledProcessError(3, "ollama")
+    mock_run.side_effect = subprocess.CalledProcessError(3, "ollama", stderr="some error")
     code = run_ollama_create("m", "FROM x\n", out_path=tmp_path / "M")
     assert code == 3
 

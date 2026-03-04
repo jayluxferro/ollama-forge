@@ -602,6 +602,32 @@ def test_import_missing_name() -> None:
     assert "--name" in result.stderr
 
 
+def test_import_gguf_converter_in_help() -> None:
+    """import --help lists --gguf-converter with choices."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "import", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--gguf-converter" in result.stdout
+    assert "llama-cpp" in result.stdout
+    assert "unsloth" in result.stdout
+    assert "auto" in result.stdout
+
+
+def test_abliterate_run_gguf_converter_in_help() -> None:
+    """abliterate run --help lists --gguf-converter."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--gguf-converter" in result.stdout
+    assert "unsloth" in result.stdout
+
+
 def test_train_help() -> None:
     """train --help lists --data, --base, --name."""
     result = subprocess.run(

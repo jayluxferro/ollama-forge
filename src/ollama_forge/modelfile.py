@@ -279,6 +279,17 @@ def template_from_hf_checkpoint(checkpoint_dir: str | Path) -> str | None:
     return template
 
 
+def strip_tool_template(modelfile_content: str) -> str:
+    """Replace the TEMPLATE block with a minimal fallback that uses no custom Go template functions.
+
+    Used when ``ollama create`` fails because the Ollama version is too old to support
+    the ``json`` template function (added in Ollama v0.3.0). The fallback template
+    preserves basic system-prompt + user/assistant chat but drops tool-calling support.
+    """
+    fallback = '{{ if .System }}{{ .System }}\n\n{{ end }}{{ .Prompt }}{{ .Response }}'
+    return modelfile_append_template(modelfile_content, fallback)
+
+
 def modelfile_append_template(modelfile_content: str, template_body: str) -> str:
     """Append or replace TEMPLATE block in modelfile content with the given template body."""
     # Do not escape quotes: inside """...""" content is literal; escaping would insert backslashes.

@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from ollama_forge.model_family import (
+    _ARCHITECTURE_ALIASES,
     _MODEL_FAMILIES,
     _auto_family_from_config,
     _normalize,
@@ -13,6 +14,8 @@ from ollama_forge.model_family import (
     get_family_stop_tokens,
     get_family_template_override,
     is_gemma_checkpoint,
+    is_multimodal_checkpoint,
+    remap_architecture_in_config,
 )
 
 
@@ -451,5 +454,151 @@ class TestTemplateOverrideContent:
         """Llama3 stop tokens include <|start_header_id|> to prevent runaway generation."""
         llama = next(f for f in _MODEL_FAMILIES if f.name == "llama3")
         assert "<|start_header_id|>" in llama.stop_tokens
+
+
+# ---------------------------------------------------------------------------
+# remap_architecture_in_config
+# ---------------------------------------------------------------------------
+
+
+class TestRemapArchitectureInConfig:
+    """Tests for remap_architecture_in_config."""
+
+    def test_remaps_known_alias(self) -> None:
+        """Known alias is remapped and original name returned."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"architectures": ["Qwen3_5ForCausalLM"], "model_type": "qwen3_5"}
+            p = Path(d) / "config.json"
+            p.write_text(json.dumps(config))
+            original = remap_architecture_in_config(p)
+            assert original == "Qwen3_5ForCausalLM"
+            data = json.loads(p.read_text())
+            assert data["architectures"][0] == "Qwen3_5ForConditionalGeneration"
+
+    def test_no_op_on_unknown_architecture(self) -> None:
+        """Unknown architecture returns None and config unchanged."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"architectures": ["LlamaForCausalLM"], "model_type": "llama"}
+            p = Path(d) / "config.json"
+            p.write_text(json.dumps(config))
+            result = remap_architecture_in_config(p)
+            assert result is None
+            data = json.loads(p.read_text())
+            assert data["architectures"][0] == "LlamaForCausalLM"
+
+    def test_no_op_when_already_target(self) -> None:
+        """Architecture already matching target returns None."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"architectures": ["Qwen3_5ForConditionalGeneration"]}
+            p = Path(d) / "config.json"
+            p.write_text(json.dumps(config))
+            result = remap_architecture_in_config(p)
+            assert result is None
+
+    def test_no_op_on_missing_file(self) -> None:
+        """Missing config file returns None."""
+        result = remap_architecture_in_config(Path("/nonexistent/config.json"))
+        assert result is None
+
+    def test_no_op_on_empty_architectures(self) -> None:
+        """Empty architectures list returns None."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.json"
+            p.write_text(json.dumps({"architectures": []}))
+            result = remap_architecture_in_config(p)
+            assert result is None
+
+    def test_aliases_dict_is_not_empty(self) -> None:
+        """Sanity: _ARCHITECTURE_ALIASES has at least one entry."""
+        assert len(_ARCHITECTURE_ALIASES) >= 1
+
+
+class TestDetectQwen35:
+    """Test that Qwen3.5 model_type maps to qwen2 family."""
+
+    def test_detect_qwen3_5_maps_to_qwen2(self) -> None:
+        """qwen3_5 model_type maps to qwen2 family."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text(json.dumps({"model_type": "qwen3_5"}))
+            family = detect_model_family(d)
+            assert family is not None
+            assert family.name == "qwen2"
+
+
+# ---------------------------------------------------------------------------
+# Template function names
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateUsesCorrectFunctionNames:
+    """Verify templates use Ollama's 'json' function, not Jinja2's 'toJson'."""
+
+    def test_no_toJson_in_any_template(self) -> None:
+        """No family template override should use 'toJson' (Ollama function is 'json')."""
+        for family in _MODEL_FAMILIES:
+            if family.template_override:
+                assert "toJson" not in family.template_override, (
+                    f"{family.name} template uses 'toJson' — should be 'json'"
+                )
+
+    def test_llama3_template_uses_json(self) -> None:
+        """Llama3 tool template uses '| json' function."""
+        llama = next(f for f in _MODEL_FAMILIES if f.name == "llama3")
+        assert "| json" in llama.template_override
+
+    def test_qwen2_template_uses_json(self) -> None:
+        """Qwen2 tool template uses '| json' function."""
+        qwen = next(f for f in _MODEL_FAMILIES if f.name == "qwen2")
+        assert "| json" in qwen.template_override
+
+
+# ---------------------------------------------------------------------------
+# is_multimodal_checkpoint
+# ---------------------------------------------------------------------------
+
+
+class TestIsMultimodalCheckpoint:
+    """Tests for is_multimodal_checkpoint."""
+
+    def test_nonexistent_returns_false(self) -> None:
+        """Non-existent path returns False."""
+        assert is_multimodal_checkpoint("/nonexistent") is False
+
+    def test_text_only_returns_false(self) -> None:
+        """Text-only model (no vision_config) returns False."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "qwen2", "architectures": ["Qwen2ForCausalLM"]}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_multimodal_checkpoint(d) is False
+
+    def test_vision_config_returns_true(self) -> None:
+        """Config with vision_config key returns True."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {
+                "model_type": "qwen3_5",
+                "vision_config": {"hidden_size": 768, "num_hidden_layers": 12},
+            }
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_multimodal_checkpoint(d) is True
+
+    def test_image_token_id_returns_true(self) -> None:
+        """Config with image_token_id returns True."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "qwen3_5", "image_token_id": 248056}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_multimodal_checkpoint(d) is True
+
+    def test_visual_key_returns_true(self) -> None:
+        """Config with 'visual' key (LLaVA-style) returns True."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "llava", "visual": {"model_name": "clip"}}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            assert is_multimodal_checkpoint(d) is True
+
+    def test_empty_config_returns_false(self) -> None:
+        """Empty config.json returns False."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text("{}")
+            assert is_multimodal_checkpoint(d) is False
 
 
