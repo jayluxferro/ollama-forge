@@ -394,3 +394,62 @@ def is_multimodal_checkpoint(checkpoint_dir: str | Path) -> bool:
     return False
 
 
+_GGUF_SUPPORTED_MODEL_TYPES: tuple[str, ...] = (
+    "llama",
+    "mistral",
+    "mixtral",
+    "qwen2",
+    "qwen2_5",
+    "qwen3",
+    "qwen3_5",
+    "gemma",
+    "gemma2",
+    "gemma3",
+    "phi3",
+    "phi4",
+    "yi",
+    "deepseek",
+)
+
+_GGUF_SUPPORTED_ARCHS: tuple[str, ...] = (
+    "llamaforcausallm",
+    "mistralforcausallm",
+    "mixtralforcausallm",
+    "qwen2forcausallm",
+    "qwen2moeforcausallm",
+    "qwen25forcausallm",
+    "qwen3forcausallm",
+    "gemmaforcausallm",
+    "gemma2forcausallm",
+    "gemma3forcausallm",
+    "phi3forcausallm",
+    "phiforcausallm",
+    "yiforcausallm",
+    "deepseekvforcausallm",
+)
+
+
+def gguf_support_status(checkpoint_dir: str | Path) -> tuple[bool, str]:
+    """Return (supported, reason)."""
+    checkpoint_dir = Path(checkpoint_dir)
+    config_path = checkpoint_dir / "config.json"
+    if not config_path.is_file():
+        return (False, "missing config.json")
+    with contextlib.suppress(Exception):
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        model_type = _normalize(data.get("model_type"))
+        archs = [_normalize(a) for a in data.get("architectures", [])]
+        if is_multimodal_checkpoint(checkpoint_dir):
+            # Multimodal models with native Ollama RENDERER/PARSER support are fine —
+            # we convert only the text decoder to GGUF and Ollama handles vision natively.
+            renderer, _ = get_native_renderer_parser(checkpoint_dir)
+            if renderer:
+                return (True, "multimodal with native RENDERER support")
+            return (False, "multimodal checkpoint")
+        if any(model_type.startswith(_normalize(mt)) for mt in _GGUF_SUPPORTED_MODEL_TYPES):
+            return (True, "model_type allowlist")
+        if any(a in _GGUF_SUPPORTED_ARCHS for a in archs):
+            return (True, "architecture allowlist")
+        return (False, f"unsupported model_type={model_type or 'unknown'}")
+    return (False, "unreadable config.json")
+

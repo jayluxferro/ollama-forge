@@ -241,6 +241,7 @@ def _apply_fake(
     skip_end: int = 0,
     norm_preserving: bool = False,
     strength: float = 1.0,
+    output_only: bool = False,
 ) -> None:
     from ollama_forge.abliterate import apply_refusal_dir_and_save
 
@@ -260,6 +261,7 @@ def _apply_fake(
             skip_end_layers=skip_end,
             norm_preserving=norm_preserving,
             strength=strength,
+            output_only=output_only,
         )
 
 
@@ -362,7 +364,7 @@ class TestApplyRefusalDirAndSaveUnit:
             )
 
     def test_invalid_strength_raises(self, tmp_path: Path) -> None:
-        """strength outside (0, 1] should raise ValueError immediately."""
+        """strength <= 0 should raise ValueError immediately."""
         pt = _make_direction_pt(tmp_path)
         out = tmp_path / "checkpoint_bad_strength"
         with pytest.raises(ValueError, match="strength"):
@@ -393,6 +395,148 @@ class TestApplyRefusalDirAndSaveUnit:
         down_after  = model.model.layers[1].mlp.down_proj.weight
         assert not torch.allclose(gate_before, gate_after), "gate_proj should be modified"
         assert not torch.allclose(down_before, down_after), "down_proj should be modified (left-multiply)"
+
+
+class _FakeLinearAttn:
+    """Fake linear attention module (Mamba / GatedDeltaNet style)."""
+
+    def __init__(self, h: int) -> None:
+        self.in_proj_qkv = _FakeLinear(h * 6, h)
+        self.in_proj_z = _FakeLinear(h * 2, h)
+        self.in_proj_a = _FakeLinear(16, h)
+        self.in_proj_b = _FakeLinear(16, h)
+        self.out_proj = _FakeLinear(h, h * 2)
+
+
+class _FakeLinearAttnLayer:
+    """Layer with linear_attn instead of self_attn (e.g. Qwen3.5 hybrid layers)."""
+
+    def __init__(self, h: int) -> None:
+        self.linear_attn = _FakeLinearAttn(h)
+        self.mlp = _FakeMLP(h)
+
+
+class _FakeHybridModelInner:
+    """Mix of standard and linear-attention layers (like Qwen3.5)."""
+
+    def __init__(self, h: int, n: int) -> None:
+        # Every 4th layer is standard attention, rest are linear attention
+        self.layers = []
+        for i in range(n):
+            if i % 4 == 3:
+                self.layers.append(_FakeLayer(h))
+            else:
+                self.layers.append(_FakeLinearAttnLayer(h))
+
+
+class _FakeHybridModel:
+    def __init__(self, hidden: int = HIDDEN, n_layers: int = 4) -> None:
+        self.model = _FakeHybridModelInner(hidden, n_layers)
+        self.device = torch.device("cpu")
+        self._h = hidden
+        self._n = n_layers
+        self.config = MagicMock()
+        self.config.hidden_size = hidden
+
+    def named_parameters(self):
+        for i, layer in enumerate(self.model.layers):
+            mlp = layer.mlp
+            yield (f"model.layers.{i}.mlp.gate_proj.weight", mlp.gate_proj.weight)
+            yield (f"model.layers.{i}.mlp.down_proj.weight", mlp.down_proj.weight)
+            attn = getattr(layer, "self_attn", None)
+            if attn:
+                yield (f"model.layers.{i}.self_attn.q_proj.weight", attn.q_proj.weight)
+                yield (f"model.layers.{i}.self_attn.o_proj.weight", attn.o_proj.weight)
+            lin = getattr(layer, "linear_attn", None)
+            if lin:
+                yield (f"model.layers.{i}.linear_attn.in_proj_qkv.weight", lin.in_proj_qkv.weight)
+                yield (f"model.layers.{i}.linear_attn.out_proj.weight", lin.out_proj.weight)
+
+    def save_pretrained(self, save_directory: str, **_kw: Any) -> None:
+        path = Path(save_directory)
+        path.mkdir(parents=True, exist_ok=True)
+        cfg = {"model_type": "fake", "hidden_size": self._h, "num_hidden_layers": self._n}
+        (path / "config.json").write_text(json.dumps(cfg))
+
+
+class TestLinearAttnAblation:
+    """Tests for linear attention (GatedDeltaNet/Mamba) layer ablation."""
+
+    def test_linear_attn_input_proj_modified(self, tmp_path: Path) -> None:
+        """in_proj_qkv (input-side linear attn) should be modified by ablation."""
+        model = _FakeHybridModel()
+        before = model.model.layers[0].linear_attn.in_proj_qkv.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        after = model.model.layers[0].linear_attn.in_proj_qkv.weight
+        assert not torch.allclose(before, after), "in_proj_qkv should be modified (right-multiply)"
+
+    def test_linear_attn_out_proj_modified(self, tmp_path: Path) -> None:
+        """out_proj (output-side linear attn) should be modified by ablation."""
+        model = _FakeHybridModel()
+        before = model.model.layers[0].linear_attn.out_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        after = model.model.layers[0].linear_attn.out_proj.weight
+        assert not torch.allclose(before, after), "out_proj should be modified (left-multiply)"
+
+    def test_standard_attn_still_ablated_in_hybrid(self, tmp_path: Path) -> None:
+        """Standard self_attn layers in hybrid model should also be ablated."""
+        model = _FakeHybridModel()
+        # Layer 3 is the standard attention layer (i % 4 == 3)
+        before = model.model.layers[3].self_attn.q_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        after = model.model.layers[3].self_attn.q_proj.weight
+        assert not torch.allclose(before, after), "q_proj in standard layer should be modified"
+
+    def test_linear_attn_mlp_also_ablated(self, tmp_path: Path) -> None:
+        """MLP in linear-attention layers should also be ablated."""
+        model = _FakeHybridModel()
+        before = model.model.layers[0].mlp.gate_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        after = model.model.layers[0].mlp.gate_proj.weight
+        assert not torch.allclose(before, after), "MLP gate_proj in linear_attn layer should be modified"
+
+
+class TestOutputOnlyAblation:
+    """Tests for output_only=True: only output projections modified, input projections untouched."""
+
+    def test_output_only_skips_input_projections(self, tmp_path: Path) -> None:
+        """With output_only=True, q_proj and gate_proj (input-side) should NOT be modified."""
+        model = _FakeModel()
+        q_before = model.model.layers[1].self_attn.q_proj.weight.clone()
+        gate_before = model.model.layers[1].mlp.gate_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0, output_only=True)
+        assert torch.allclose(q_before, model.model.layers[1].self_attn.q_proj.weight), (
+            "q_proj should NOT be modified with output_only=True"
+        )
+        assert torch.allclose(gate_before, model.model.layers[1].mlp.gate_proj.weight), (
+            "gate_proj should NOT be modified with output_only=True"
+        )
+
+    def test_output_only_modifies_output_projections(self, tmp_path: Path) -> None:
+        """With output_only=True, o_proj and down_proj (output-side) should still be modified."""
+        model = _FakeModel()
+        o_before = model.model.layers[1].self_attn.o_proj.weight.clone()
+        down_before = model.model.layers[1].mlp.down_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0, output_only=True)
+        assert not torch.allclose(o_before, model.model.layers[1].self_attn.o_proj.weight), (
+            "o_proj should be modified with output_only=True"
+        )
+        assert not torch.allclose(down_before, model.model.layers[1].mlp.down_proj.weight), (
+            "down_proj should be modified with output_only=True"
+        )
+
+    def test_output_only_hybrid_skips_linear_attn_input(self, tmp_path: Path) -> None:
+        """With output_only=True on hybrid model, linear_attn input projs should NOT be modified."""
+        model = _FakeHybridModel()
+        in_before = model.model.layers[0].linear_attn.in_proj_qkv.weight.clone()
+        out_before = model.model.layers[0].linear_attn.out_proj.weight.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0, output_only=True)
+        assert torch.allclose(in_before, model.model.layers[0].linear_attn.in_proj_qkv.weight), (
+            "in_proj_qkv should NOT be modified with output_only=True"
+        )
+        assert not torch.allclose(out_before, model.model.layers[0].linear_attn.out_proj.weight), (
+            "out_proj should be modified with output_only=True"
+        )
 
 
 class TestApplyRefusalDirPerLayer:
@@ -612,17 +756,21 @@ class TestLoadModelMultimodal:
     """Tests for model loading in _load_model_with_gguf_version_workaround."""
 
     def test_multimodal_uses_causal_lm(self, tmp_path: Path) -> None:
-        """Multimodal models use AutoModelForCausalLM (text decoder only)."""
+        """Multimodal models fall back to AutoModelForCausalLM when multimodal classes are unavailable."""
         from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
 
         config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 768}}
         (tmp_path / "config.json").write_text(json.dumps(config))
 
+        mock_text = MagicMock()
+        mock_text.generate = MagicMock()
+        mock_text.lm_head = MagicMock()
         mock_model = MagicMock()
+        mock_model.language_model = mock_text
         with patch("transformers.AutoModelForCausalLM") as mock_causal:
             mock_causal.from_pretrained.return_value = mock_model
             result = _load_model_with_gguf_version_workaround(str(tmp_path), {"trust_remote_code": True})
-        assert result is mock_model
+        assert result is mock_text
         mock_causal.from_pretrained.assert_called_once()
 
     def test_text_only_uses_causal_lm(self, tmp_path: Path) -> None:

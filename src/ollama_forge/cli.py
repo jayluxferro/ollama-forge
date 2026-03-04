@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 
+# Import unsloth early (before transformers) so its optimizations apply.
+# Optional dependency — ignore if not installed or no GPU available.
+with contextlib.suppress(ImportError, NotImplementedError):
+    import unsloth  # noqa: F401
+
 from dotenv import load_dotenv
 
 from ollama_forge.config_loader import apply_config_to_args, load_config
@@ -175,7 +180,7 @@ def _convert_gguf_checkpoint(
     # Try unsloth
     try:
         import unsloth  # noqa: F401
-    except ImportError:
+    except (ImportError, NotImplementedError):
         if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
             print_actionable_error(
                 "No GGUF converter available",
@@ -203,10 +208,11 @@ def _convert_gguf_with_unsloth(
 ) -> int:
     """Convert HF checkpoint to GGUF using unsloth. Returns exit code (0=success)."""
     try:
+        import unsloth  # noqa: F401
         from unsloth import FastLanguageModel  # type: ignore[import-untyped]
-    except ImportError:
+    except (ImportError, NotImplementedError) as exc:
         print_actionable_error(
-            "unsloth is not installed",
+            f"unsloth is not available: {exc}",
             next_steps=[
                 "Install: pip install unsloth  (or: uv sync --extra unsloth)",
                 "Or use --gguf-converter llama-cpp to skip unsloth",
@@ -3787,6 +3793,11 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
             ],  # noqa: E501
         )
         return 1
+    _apply_profile_and_config(
+        args,
+        _ABLITERATE_COMPUTE_DEFAULTS,
+        profile_name=getattr(args, "profile", None),
+    )
     model_id = _abliterate_resolve_model(args.model)
     gguf_file_for_load = str(model_id) if str(model_id).lower().endswith(".gguf") else None
     if gguf_file_for_load:
@@ -3807,9 +3818,12 @@ def _cmd_abliterate_compute_dir(parser: argparse.ArgumentParser, args: argparse.
                 num_instructions=args.num_instructions,
                 layer_fracs=layer_fracs,
                 n_directions=getattr(args, "num_directions", 1),
+                agg=getattr(args, "agg", "mean"),
+                pos=getattr(args, "pos", -1),
+                paired=getattr(args, "paired", None),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load,
-                per_layer_directions=getattr(args, "per_layer_directions", False),
+                per_layer_directions=getattr(args, "per_layer_directions", True),
             )
             log.info("Saved refusal direction to %s", args.output)
             if getattr(args, "json", False) and summary is not None:
@@ -3849,22 +3863,30 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "harmless": None,
     "harmful_dir": None,
     "harmless_dir": None,
-    "num_instructions": 32,
+    "num_instructions": 256,
     "layer_fracs": [0.4, 0.5, 0.6],
     "num_directions": 1,
-    "per_layer_directions": False,
+    "per_layer_directions": True,
+    "agg": "mean",
+    "pos": -1,
+    "paired": None,
     "load_in_8bit": False,
     "no_verify": False,
-    "strength": 1.0,
-    "atten_strength": None,
-    "mlp_strength": None,
+    "strength": 1.3,
+    "atten_strength": 1.3,
+    "mlp_strength": 1.2,
     "skip_begin_layers": 1,
     "skip_end_layers": 1,
-    "norm_preserving": True,
+    "norm_preserving": False,
+    "output_only": True,
     "direction_index": None,
     "strength_kernel": "constant",
     "kernel_center_frac": 0.5,
     "kernel_width_frac": 0.4,
+    "allow_multimodal_gguf": False,
+    "allow_unsupported_gguf": False,
+    "auto_fallback": False,
+    "checkpoint_only": False,
     "no_requantize": False,
     "quant": "Q4_K_M",
     "template_from": None,
@@ -3872,14 +3894,46 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "gguf_converter": "auto",
 }
 
+_ABLITERATE_COMPUTE_DEFAULTS: dict[str, object] = {
+    "num_instructions": 128,
+    "layer_fracs": [0.4, 0.5, 0.6],
+    "num_directions": 1,
+    "per_layer_directions": False,
+    "agg": "last",
+    "pos": -1,
+    "paired": None,
+    "load_in_8bit": False,
+}
+
+
+def _apply_profile_and_config(
+    args: argparse.Namespace,
+    defaults: dict[str, object],
+    *,
+    profile_name: str | None = None,
+    config: dict | None = None,
+) -> None:
+    from ollama_forge.abliterate_profiles import get_profile
+    if config:
+        apply_config_to_args(args, config, only_if_default=defaults)
+    profile = get_profile(profile_name)
+    for key, value in profile.items():
+        if not hasattr(args, key):
+            continue
+        current = getattr(args, key)
+        default = defaults.get(key)
+        if current != default:
+            continue
+        setattr(args, key, value)
+
 
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
     config_path = getattr(args, "config", None)
+    cfg: dict | None = None
     if config_path:
         try:
             cfg = load_config(config_path)
-            apply_config_to_args(args, cfg, only_if_default=_ABLITERATE_RUN_DEFAULTS)
         except (FileNotFoundError, ValueError, ImportError) as e:
             print_actionable_error(
                 "Failed to load config file",
@@ -3887,6 +3941,12 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 next_steps=["Check --config path and file format (YAML/JSON)"],
             )
             return 1
+    _apply_profile_and_config(
+        args,
+        _ABLITERATE_RUN_DEFAULTS,
+        profile_name=getattr(args, "profile", None),
+        config=cfg,
+    )
     from_checkpoint_dir = getattr(args, "from_checkpoint", None)
     name = getattr(args, "name", None)
     if not name:
@@ -4013,13 +4073,16 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                 str(harmful_path),
                 str(harmless_path),
                 str(refusal_pt),
-                num_instructions=getattr(args, "num_instructions", 32),
+                num_instructions=getattr(args, "num_instructions", 256),
                 layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
                 n_directions=getattr(args, "num_directions", 1),
+                agg=getattr(args, "agg", "mean"),
+                pos=getattr(args, "pos", -1),
+                paired=getattr(args, "paired", None),
                 device=None if getattr(args, "device", "auto") == "auto" else getattr(args, "device", None),
                 load_in_8bit=getattr(args, "load_in_8bit", False),
                 gguf_file=gguf_file_for_load_run,
-                per_layer_directions=getattr(args, "per_layer_directions", False),
+                per_layer_directions=getattr(args, "per_layer_directions", True),
             )
         finally:
             for t in temp_files:
@@ -4043,16 +4106,17 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             checkpoint_dir,
             verify=not getattr(args, "no_verify", False),
             gguf_file=gguf_file_for_load_run,
-            strength=getattr(args, "strength", 1.0),
-            atten_strength=getattr(args, "atten_strength", None),
-            mlp_strength=getattr(args, "mlp_strength", None),
+            strength=getattr(args, "strength", 1.3),
+            atten_strength=getattr(args, "atten_strength", 1.3),
+            mlp_strength=getattr(args, "mlp_strength", 1.2),
             direction_index=getattr(args, "direction_index", None),
             strength_kernel=getattr(args, "strength_kernel", "constant"),
             kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
             kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
             skip_begin_layers=getattr(args, "skip_begin_layers", 1),
             skip_end_layers=getattr(args, "skip_end_layers", 1),
-            norm_preserving=getattr(args, "norm_preserving", True),
+            norm_preserving=getattr(args, "norm_preserving", False),
+            output_only=getattr(args, "output_only", True),
         )
         log.info("Checkpoint saved to %s", checkpoint_dir)
         return 0
@@ -4097,13 +4161,16 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     str(harmful_path),
                     str(harmless_path),
                     str(refusal_pt),
-                    num_instructions=getattr(args, "num_instructions", 32),
+                    num_instructions=getattr(args, "num_instructions", 256),
                     layer_fracs=tuple(getattr(args, "layer_fracs", [0.4, 0.5, 0.6])),
                     n_directions=getattr(args, "num_directions", 1),
+                    agg=getattr(args, "agg", "mean"),
+                    pos=getattr(args, "pos", -1),
+                    paired=getattr(args, "paired", None),
                     device=None if getattr(args, "device", "auto") == "auto" else getattr(args, "device", None),
                     load_in_8bit=getattr(args, "load_in_8bit", False),
                     gguf_file=gguf_file_for_load_run,
-                    per_layer_directions=getattr(args, "per_layer_directions", False),
+                    per_layer_directions=getattr(args, "per_layer_directions", True),
                 )
                 # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
                 import gc
@@ -4125,16 +4192,17 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     checkpoint_dir,
                     verify=not getattr(args, "no_verify", False),
                     gguf_file=gguf_file_for_load_run,
-                    strength=getattr(args, "strength", 1.0),
-                    atten_strength=getattr(args, "atten_strength", None),
-                    mlp_strength=getattr(args, "mlp_strength", None),
+                    strength=getattr(args, "strength", 1.3),
+                    atten_strength=getattr(args, "atten_strength", 1.3),
+                    mlp_strength=getattr(args, "mlp_strength", 1.2),
                     direction_index=getattr(args, "direction_index", None),
                     strength_kernel=getattr(args, "strength_kernel", "constant"),
                     kernel_center_frac=getattr(args, "kernel_center_frac", 0.5),
                     kernel_width_frac=getattr(args, "kernel_width_frac", 0.4),
                     skip_begin_layers=getattr(args, "skip_begin_layers", 1),
                     skip_end_layers=getattr(args, "skip_end_layers", 1),
-                    norm_preserving=getattr(args, "norm_preserving", True),
+                    norm_preserving=getattr(args, "norm_preserving", False),
+                    output_only=getattr(args, "output_only", True),
                 )
             finally:
                 for t in temp_files:
@@ -4154,8 +4222,27 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if not str(e).strip():
                 traceback.print_exc(file=sys.stderr)
             return 1
-    # Remap architecture aliases before conversion
-    from ollama_forge.model_family import remap_architecture_in_config
+    if getattr(args, "checkpoint_only", False):
+        log.info("Checkpoint-only requested; skipping GGUF conversion.")
+        return 0
+    # Validate GGUF support before conversion
+    from ollama_forge.model_family import gguf_support_status, remap_architecture_in_config
+
+    ok, reason = gguf_support_status(checkpoint_dir)
+    if not ok and not getattr(args, "allow_unsupported_gguf", False):
+        if getattr(args, "auto_fallback", False):
+            log.warning(
+                "GGUF conversion unsupported (%s); leaving checkpoint for serve/proxy.", reason
+            )
+            return 0
+        print_actionable_error(
+            f"GGUF conversion unsupported: {reason}",
+            next_steps=[
+                "Use: ollama-forge abliterate serve/proxy with the checkpoint",
+                "Or re-run with --allow-unsupported-gguf to attempt conversion anyway",
+            ],
+        )
+        return 1
 
     config_path = checkpoint_dir / "config.json"
     if config_path.is_file():
@@ -4291,6 +4378,52 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             file=sys.stderr,
         )
     return run_ollama_create(name, content)
+
+
+def _cmd_abliterate_easy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Easy-mode wrapper around abliterate run with auto fallback."""
+    if not getattr(args, "profile", None):
+        args.profile = "aggressive"
+    args.auto_fallback = True
+    return _cmd_abliterate_run(parser, args)
+
+
+def _cmd_abliterate_wizard(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Interactive wizard for abliteration."""
+    prompt_enabled = sys.stdin.isatty() and not getattr(args, "non_interactive", False)
+
+    def ask(label: str, default: str) -> str:
+        if prompt_enabled:
+            return _prompt_with_default(label, default)
+        return default
+
+    model = getattr(args, "model", None)
+    if not model:
+        if prompt_enabled:
+            model = ask("Hugging Face model id or local path", "")
+        if not model:
+            print_actionable_error(
+                "--model is required",
+                next_steps=["Run: ollama-forge abliterate wizard --model <id> --name <name>"],
+            )
+            return 1
+    name = getattr(args, "name", None) or ask("Ollama model name", "abliterated")
+    profile = getattr(args, "profile", None) or ask("Profile (safe/balanced/aggressive)", "aggressive")
+    if profile not in ("safe", "balanced", "aggressive"):
+        profile = "balanced"
+
+    gguf_default = "yes"
+    gguf_answer = ask("Convert to GGUF and create Ollama model? (yes/no)", gguf_default)
+    do_gguf = gguf_answer.strip().lower() in ("y", "yes", "true", "1")
+
+    args.model = model
+    args.name = name
+    args.profile = profile
+    args.auto_fallback = True
+    if not do_gguf:
+        args.checkpoint_only = True
+
+    return _cmd_abliterate_run(parser, args)
 
 
 def _load_env() -> None:
@@ -4506,10 +4639,41 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         help="Output path for .pt file",
     )
     p_compute.add_argument(
+        "--profile",
+        choices=("safe", "balanced", "aggressive"),
+        default="aggressive",
+        help="Abliteration profile for defaults (default: aggressive).",
+    )
+    p_compute.add_argument(
         "--num-instructions",
         type=int,
-        default=32,
-        help="Number of instructions to sample (default: 32)",
+        default=256,
+        help="Number of instructions to sample (default: 256)",
+    )
+    p_compute.add_argument(
+        "--agg",
+        choices=("last", "mean", "last_non_special"),
+        default="mean",
+        help="Hidden state aggregation: last, mean (default, non-special tokens), last_non_special.",
+    )
+    p_compute.add_argument(
+        "--pos",
+        type=int,
+        default=-1,
+        help="Token position when agg=last (default: -1 for last token).",
+    )
+    p_compute.add_argument(
+        "--paired",
+        dest="paired",
+        action="store_true",
+        default=None,
+        help="Treat harmful/harmless lists as parallel and sample the same indices.",
+    )
+    p_compute.add_argument(
+        "--no-paired",
+        dest="paired",
+        action="store_false",
+        help="Disable paired sampling even when lists are same length.",
     )
     p_compute.add_argument(
         "--layer-frac",
@@ -4544,10 +4708,77 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     )
     p_compute.add_argument(
         "--per-layer-directions",
+        dest="per_layer_directions",
         action="store_true",
-        help="Compute one refusal direction per layer (Heretic-style); save format usable with --direction-index",
+        default=True,
+        help="Compute one refusal direction per layer (Heretic-style; default: enabled).",
+    )
+    p_compute.add_argument(
+        "--no-per-layer-directions",
+        dest="per_layer_directions",
+        action="store_false",
+        help="Compute a single global refusal direction (classic mode).",
     )
     p_compute.set_defaults(handler=_cmd_abliterate_compute_dir)
+
+    p_easy = abliterate_sub.add_parser(
+        "easy",
+        help="Easy mode: compute + apply, then export if supported (falls back to checkpoint for serve/proxy)",
+    )
+    p_easy.add_argument(
+        "--model",
+        required=True,
+        help="Hugging Face model id, or path to local HF-format dir or .gguf file",
+    )
+    p_easy.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_easy.add_argument(
+        "--profile",
+        choices=("safe", "balanced", "aggressive"),
+        default="aggressive",
+        help="Abliteration profile (default: aggressive).",
+    )
+    p_easy.add_argument(
+        "--output-dir",
+        help="Directory for checkpoint and GGUF (default: ./abliterate-<name>)",
+    )
+    p_easy.add_argument(
+        "--llama-cpp-dir",
+        help="Path to llama.cpp clone (for convert_hf_to_gguf.py); default: ./llama.cpp or ~/llama.cpp",
+    )
+    p_easy.add_argument("--harmful", help="Path to file with harmful instructions (one per line)")
+    p_easy.add_argument("--harmless", help="Path to file with harmless instructions (one per line)")
+    p_easy.add_argument("--harmful-dir", help="Directory of .txt files with harmful instructions")
+    p_easy.add_argument("--harmless-dir", help="Directory of .txt files with harmless instructions")
+    p_easy.add_argument(
+        "--allow-multimodal-gguf",
+        action="store_true",
+        help="Attempt GGUF conversion for multimodal checkpoints (not guaranteed to work).",
+    )
+    p_easy.add_argument(
+        "--allow-unsupported-gguf",
+        action="store_true",
+        help="Attempt GGUF conversion even if not on support allowlist.",
+    )
+    p_easy.set_defaults(handler=_cmd_abliterate_easy)
+
+    p_wizard = abliterate_sub.add_parser(
+        "wizard",
+        help="Interactive wizard for abliteration (prompts for model, name, profile, GGUF)",
+    )
+    p_wizard.add_argument("--model", help="Hugging Face model id or local path")
+    p_wizard.add_argument("--name", help="Ollama model name")
+    p_wizard.add_argument(
+        "--profile",
+        choices=("safe", "balanced", "aggressive"),
+        default="aggressive",
+        help="Abliteration profile (default: aggressive).",
+    )
+    p_wizard.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Disable prompts; requires --model and --name",
+    )
+    p_wizard.set_defaults(handler=_cmd_abliterate_wizard)
 
     p_run = abliterate_sub.add_parser(
         "run",
@@ -4556,6 +4787,12 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     p_run.add_argument(
         "--model",
         help="Hugging Face model id, or path to local HF-format dir or .gguf file (omit when using --from-checkpoint)",
+    )
+    p_run.add_argument(
+        "--profile",
+        choices=("safe", "balanced", "aggressive"),
+        default="aggressive",
+        help="Abliteration profile for defaults (default: aggressive).",
     )
     p_run.add_argument("--name", required=True, help="Name for the Ollama model")
     p_run.add_argument(
@@ -4578,8 +4815,33 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     p_run.add_argument(
         "--num-instructions",
         type=int,
-        default=32,
-        help="Number of instructions for direction (default: 32)",
+        default=256,
+        help="Number of instructions for direction (default: 256)",
+    )
+    p_run.add_argument(
+        "--agg",
+        choices=("last", "mean", "last_non_special"),
+        default="mean",
+        help="Hidden state aggregation: mean (default), last, last_non_special.",
+    )
+    p_run.add_argument(
+        "--pos",
+        type=int,
+        default=-1,
+        help="Token position when agg=last (default: -1 for last token).",
+    )
+    p_run.add_argument(
+        "--paired",
+        dest="paired",
+        action="store_true",
+        default=None,
+        help="Treat harmful/harmless lists as parallel and sample the same indices.",
+    )
+    p_run.add_argument(
+        "--no-paired",
+        dest="paired",
+        action="store_false",
+        help="Disable paired sampling even when lists are same length.",
     )
     p_run.add_argument(
         "--layer-fracs",
@@ -4597,8 +4859,16 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     )
     p_run.add_argument(
         "--per-layer-directions",
+        dest="per_layer_directions",
         action="store_true",
-        help="Compute one refusal direction per layer (Heretic-style); use with --direction-index on apply",
+        default=True,
+        help="Compute one refusal direction per layer (Heretic-style; default: enabled).",
+    )
+    p_run.add_argument(
+        "--no-per-layer-directions",
+        dest="per_layer_directions",
+        action="store_false",
+        help="Compute a single global refusal direction (classic mode).",
     )
     p_run.add_argument(
         "--load-in-8bit",
@@ -4613,9 +4883,9 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     p_run.add_argument(
         "--strength",
         type=float,
-        default=1.0,
+        default=1.3,
         metavar="ALPHA",
-        help="Ablation strength 0 < ALPHA <= 1 (default: 1.0). Use 0.5–0.7 on small models to reduce coherence loss.",
+        help="Ablation strength ALPHA > 0 (default: 1.3). Use 0.5–0.7 on small models to reduce coherence loss.",
     )
     p_run.add_argument(
         "--atten-strength",
@@ -4627,9 +4897,9 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
     p_run.add_argument(
         "--mlp-strength",
         type=float,
-        default=None,
+        default=1.2,
         metavar="ALPHA",
-        help="Strength for MLP layers only (default: same as --strength). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",  # noqa: E501
+        help="Strength for MLP layers only (default: 1.2). Use e.g. 0.5 to soften MLP ablation and reduce coherence loss.",  # noqa: E501
     )
     p_run.add_argument(
         "--skip-begin-layers",
@@ -4647,13 +4917,34 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
              "skipping the last layer reduces output distribution shift).",
     )
     p_run.add_argument(
+        "--norm-preserving",
+        dest="norm_preserving",
+        action="store_true",
+        default=False,
+        help="Enable Frobenius-norm rescaling after ablation. "
+             "Use cautiously -- norm rescaling amplifies weights per layer "
+             "and the effect compounds across many layers, especially on small models.",
+    )
+    p_run.add_argument(
         "--no-norm-preserving",
         dest="norm_preserving",
         action="store_false",
+        help="Disable Frobenius-norm rescaling (default: disabled).",
+    )
+    p_run.add_argument(
+        "--output-only",
+        dest="output_only",
+        action="store_true",
         default=True,
-        help="Disable Frobenius-norm rescaling after ablation (default: enabled). "
-             "Use on small models (<3B) or if the output is garbled -- norm rescaling "
-             "amplifies weights per layer and the effect compounds across many layers.",
+        help="Only modify output projections (o_proj, down_proj, out_proj) -- skip input projections "
+             "(q/k/v, gate/up, in_proj_*). More effective for thinking models (Qwen3.5, etc.) "
+             "as it preserves internal attention while removing refusal from layer outputs. (default: True)",
+    )
+    p_run.add_argument(
+        "--no-output-only",
+        dest="output_only",
+        action="store_false",
+        help="Modify both input and output projections (full ablation).",
     )
     p_run.add_argument(
         "--direction-index",
@@ -4696,6 +4987,27 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         "--template-from",
         metavar="OLLAMA_MODEL",
         help="Ollama model to copy chat template from (default: same as --model; pull first for tools)",
+    )
+    p_run.add_argument(
+        "--allow-multimodal-gguf",
+        action="store_true",
+        help="Attempt GGUF conversion for multimodal checkpoints (not guaranteed to work); "
+             "default is to stop and suggest serve/proxy instead.",
+    )
+    p_run.add_argument(
+        "--allow-unsupported-gguf",
+        action="store_true",
+        help="Attempt GGUF conversion even if not on support allowlist (default: stop and suggest serve/proxy).",
+    )
+    p_run.add_argument(
+        "--auto-fallback",
+        action="store_true",
+        help="If GGUF conversion is unsupported, stop after checkpoint and suggest serve/proxy instead.",
+    )
+    p_run.add_argument(
+        "--checkpoint-only",
+        action="store_true",
+        help="Stop after saving the abliterated checkpoint; skip GGUF conversion and create.",
     )
     p_run.add_argument(
         "--only-compute",

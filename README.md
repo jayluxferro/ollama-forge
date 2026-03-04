@@ -114,7 +114,7 @@ Use `--quant Q4_K_M` to pick size. For gated or private repos, set `HF_TOKEN` or
 ## Other topics
 
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
-- **Refusal removal (abliterate)** — `abliterate compute-dir`; optional deps: `uv sync --extra abliterate`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
+- **Refusal removal (abliterate)** — Quickstart: `abliterate easy --model <id> --name <name>` or `abliterate wizard` for prompts. Optional deps: `uv sync --extra abliterate`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).

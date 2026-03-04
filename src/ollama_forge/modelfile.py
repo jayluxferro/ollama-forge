@@ -414,6 +414,7 @@ def modelfile_append_stop_parameters(modelfile_content: str, stop_tokens: list[s
     return "\n".join(lines) + "\n"
 
 
+
 def modelfile_append_num_predict(modelfile_content: str, num_predict: int = 2048) -> str:
     """Append PARAMETER num_predict N so generation stops after N tokens even if stop sequences don't fire."""
     if num_predict <= 0:

@@ -90,23 +90,67 @@ def _is_multimodal_model_id(model_id: str) -> bool:
         return False
 
 
+def _is_causal_lm(model: Any) -> bool:
+    return hasattr(model, "generate") and (
+        hasattr(model, "lm_head") or hasattr(model, "get_output_embeddings")
+    )
+
+
+def _extract_text_decoder(model: Any) -> Any | None:
+    """Extract a text-only CausalLM from a multimodal wrapper."""
+    for attr in ("language_model", "text_model", "text_decoder"):
+        inner = getattr(model, attr, None)
+        if inner is None:
+            continue
+        if _is_causal_lm(inner):
+            return inner
+        inner_model = getattr(inner, "model", None)
+        if inner_model is not None and _is_causal_lm(inner_model):
+            return inner_model
+    if _is_causal_lm(model):
+        return model
+    return None
+
+
 def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict) -> Any:
-    """Load model with AutoModelForCausalLM.from_pretrained.
+    """Load a text-decoder model with GGUF metadata workaround.
 
-    Always uses AutoModelForCausalLM — even for multimodal models. This extracts just the
-    text decoder, which is what we need for abliteration and GGUF conversion. Vision weights
-    are not included in the text GGUF; Ollama handles vision via built-in RENDERER.
-
+    For multimodal checkpoints, attempts to load a multimodal class and extract the
+    text decoder. Falls back to AutoModelForCausalLM if extraction fails.
     On Invalid version 'N/A' (e.g. GGUF metadata), patches packaging.version and retries."""
     from transformers import AutoModelForCausalLM
+    multimodal_classes = []
+    try:
+        from transformers import AutoModelForVision2Seq  # type: ignore
 
-    if _is_multimodal_model_id(model_id):
-        log.info(
-            "Multimodal model detected; loading text decoder only via AutoModelForCausalLM. "
-            "Vision weights are handled by Ollama's built-in RENDERER."
-        )
+        multimodal_classes.append(AutoModelForVision2Seq)
+    except Exception:
+        pass
+    try:
+        from transformers import AutoModelForConditionalGeneration  # type: ignore
+
+        multimodal_classes.append(AutoModelForConditionalGeneration)
+    except Exception:
+        pass
+
+    is_mm = _is_multimodal_model_id(model_id) and "gguf_file" not in load_kw
+    if is_mm:
+        log.info("Multimodal model detected; loading and extracting text decoder.")
+
+    def _load_with(cls):
+        return cls.from_pretrained(model_id, **load_kw)
 
     try:
+        if is_mm:
+            for cls in (*multimodal_classes, AutoModelForCausalLM):
+                try:
+                    model = _load_with(cls)
+                except Exception:
+                    continue
+                text_model = _extract_text_decoder(model)
+                if text_model is not None:
+                    return text_model
+            return AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
         return AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
     except Exception as e:  # noqa: BLE001
         if "Invalid version" not in str(e) or "N/A" not in str(e):
@@ -125,6 +169,37 @@ def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict) -> An
             return AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
         finally:
             pkg_version.Version = _orig
+
+
+def _sanitize_text_config(output_dir: Path, model: Any) -> None:
+    """Rewrite config.json with text-only fields to keep GGUF conversion stable."""
+    config_path = output_dir / "config.json"
+    if not config_path.is_file():
+        return
+    try:
+        cfg = model.config.to_dict()
+    except Exception:
+        return
+    if not isinstance(cfg, dict):
+        return
+    for key in (
+        "vision_config",
+        "image_token_id",
+        "visual",
+        "mm_vision_tower",
+        "mm_projector",
+        "image_processor_type",
+        "image_size",
+        "vision_encoder",
+        "vision_tower",
+    ):
+        cfg.pop(key, None)
+    if not cfg.get("architectures"):
+        cfg["architectures"] = [type(model).__name__]
+    try:
+        config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except TypeError:
+        return
 
 
 def _model_hidden_size(model: Any) -> int | None:
@@ -161,6 +236,9 @@ def get_layers(model: Any) -> Any:
 
     Tried paths (in order):
       model.model.layers                          — standard CausalLM (Llama, Qwen, Gemma …)
+      model.layers                                — some HF models expose layers directly
+      model.model.decoder.layers                  — encoder/decoder variants (text decoder)
+      model.decoder.layers                        — decoder-only wrappers
       model.model.language_model.layers            — some nested multimodal wrappers
       model.language_model.model.layers            — AutoModel multimodal with inner .model
       model.language_model.layers                  — AutoModel multimodal direct (Qwen3.5)
@@ -168,6 +246,12 @@ def get_layers(model: Any) -> Any:
     """
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return model.model.layers
+    if hasattr(model, "layers"):
+        return model.layers
+    if hasattr(model, "model") and hasattr(model.model, "decoder") and hasattr(model.model.decoder, "layers"):
+        return model.model.decoder.layers
+    if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
+        return model.decoder.layers
     if (
         hasattr(model, "model")
         and hasattr(model.model, "language_model")
@@ -200,6 +284,8 @@ def compute_refusal_dir(
     layer_fracs: tuple[float, ...] = (0.4, 0.5, 0.6),
     n_directions: int = 1,
     pos: int = -1,
+    agg: str = "last",
+    paired: bool | None = None,
     device: str | None = None,
     load_in_8bit: bool = False,
     gguf_file: str | Path | None = None,
@@ -210,6 +296,8 @@ def compute_refusal_dir(
     Tries each layer_frac, picks the layer with largest harmful-harmless gap (direction selection),
     unless per_layer_directions=True: then one direction per layer (num_layers, hidden_size).
     Saves one direction (mean difference) or n_directions (top-k from SVD on difference matrix).
+    agg: last (default), mean (over non-special tokens), last_non_special.
+    paired: when True, sample the same indices from harmful and harmless lists (for parallel lists).
     Requires torch and transformers. Use: uv sync --extra abliterate.
     Returns a small summary dict (layer_frac, layer_index, gap_norm) when not per_layer_directions; else None.
     """
@@ -228,6 +316,8 @@ def compute_refusal_dir(
         harmful_lines = [s for s in (line.strip() for line in f) if s and not s.startswith("#")]
     with harmless_path.open() as f:
         harmless_lines = [s for s in (line.strip() for line in f) if s and not s.startswith("#")]
+    if agg not in ("last", "mean", "last_non_special"):
+        raise ValueError(f"agg must be last, mean, or last_non_special, got {agg!r}")
 
     # Support loading from GGUF (e.g. Ollama blob path) when gguf_file is set or model_id is a .gguf path
     use_gguf = gguf_file is not None or (isinstance(model_id, (str, Path)) and str(model_id).lower().endswith(".gguf"))
@@ -302,15 +392,65 @@ def compute_refusal_dir(
         if offload_folder:
             shutil.rmtree(offload_folder, ignore_errors=True)
         raise
+    if hasattr(model, "eval"):
+        model.eval()
     if offload_folder:
         shutil.rmtree(offload_folder, ignore_errors=True)
     layers = get_layers(model)
+    if paired is None:
+        paired = len(harmful_lines) == len(harmless_lines) and len(harmful_lines) > 0
     n = min(num_instructions, len(harmful_lines), len(harmless_lines))
     # Use a fixed seed for reproducible refusal direction computation.
     # Non-deterministic sampling can produce wildly different results on small models.
     rng = random.Random(42)
-    harmful_instructions = rng.sample(harmful_lines, n)
-    harmless_instructions = rng.sample(harmless_lines, n)
+    if paired:
+        max_n = min(len(harmful_lines), len(harmless_lines))
+        n = min(num_instructions, max_n)
+        indices = rng.sample(range(max_n), n)
+        harmful_instructions = [harmful_lines[i] for i in indices]
+        harmless_instructions = [harmless_lines[i] for i in indices]
+    else:
+        harmful_instructions = rng.sample(harmful_lines, n)
+        harmless_instructions = rng.sample(harmless_lines, n)
+
+    def _special_ids() -> set[int]:
+        ids: set[int] = set(getattr(tokenizer, "all_special_ids", []) or [])
+        if ids:
+            return ids
+        try:
+            for v in getattr(tokenizer, "special_tokens_map", {}).values():
+                if isinstance(v, str):
+                    tid = tokenizer.convert_tokens_to_ids(v)
+                    if isinstance(tid, int) and tid >= 0:
+                        ids.add(tid)
+                elif isinstance(v, list):
+                    for t in v:
+                        tid = tokenizer.convert_tokens_to_ids(t)
+                        if isinstance(tid, int) and tid >= 0:
+                            ids.add(tid)
+        except Exception:
+            return ids
+        return ids
+
+    special_ids = _special_ids()
+
+    def _select_hidden(hidden: Any, input_ids: Any) -> Any:
+        seq_len = hidden.size(1)
+        if agg == "mean":
+            ids = input_ids[0].tolist()
+            idxs = [i for i, t in enumerate(ids) if t not in special_ids] if special_ids else list(range(seq_len))
+            if not idxs:
+                idxs = [seq_len - 1]
+            return hidden[:, idxs, :].mean(dim=1)
+        if agg == "last_non_special":
+            ids = input_ids[0].tolist()
+            if special_ids:
+                for i in range(seq_len - 1, -1, -1):
+                    if ids[i] not in special_ids:
+                        return hidden[:, i, :]
+            return hidden[:, -1, :]
+        p = pos if -seq_len <= pos < seq_len else -1
+        return hidden[:, p, :]
 
     def tokenize(instructions):
         out = []
@@ -358,11 +498,13 @@ def compute_refusal_dir(
             for toks in harmful_toks:
                 out = model(toks, output_hidden_states=True)
                 for idx in all_layer_indices:
-                    harmful_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+                    vec = _select_hidden(out.hidden_states[idx + 1], toks)
+                    harmful_by_layer[idx].append(vec.cpu())
             for toks in harmless_toks:
                 out = model(toks, output_hidden_states=True)
                 for idx in all_layer_indices:
-                    harmless_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+                    vec = _select_hidden(out.hidden_states[idx + 1], toks)
+                    harmless_by_layer[idx].append(vec.cpu())
         per_layer_list = []
         for layer_idx in all_layer_indices:
             harm_mean = torch.cat(harmful_by_layer[layer_idx], dim=0).mean(dim=0).float()
@@ -388,11 +530,13 @@ def compute_refusal_dir(
         for toks in harmful_toks:
             out = model(toks, output_hidden_states=True)
             for idx in candidate_indices:
-                harmful_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+                vec = _select_hidden(out.hidden_states[idx + 1], toks)
+                harmful_by_layer[idx].append(vec.cpu())
         for toks in harmless_toks:
             out = model(toks, output_hidden_states=True)
             for idx in candidate_indices:
-                harmless_by_layer[idx].append(out.hidden_states[idx + 1][:, pos, :].cpu())
+                vec = _select_hidden(out.hidden_states[idx + 1], toks)
+                harmless_by_layer[idx].append(vec.cpu())
 
     # Select best layer frac from cached tensors — no additional forward passes needed.
     best_layer_frac = layer_fracs[0]
@@ -508,6 +652,7 @@ def apply_refusal_dir_and_save(
     strength_kernel: str = "constant",
     kernel_center_frac: float = 0.5,
     kernel_width_frac: float = 0.4,
+    output_only: bool = False,
 ) -> None:
     """
     Bake the refusal-direction ablation into the model weights and save to output_dir.
@@ -521,13 +666,18 @@ def apply_refusal_dir_and_save(
 
     refusal_pt_path = Path(refusal_pt_path)
     output_dir = Path(output_dir)
-    if not 0 < strength <= 1:
-        raise ValueError(f"strength must be in (0, 1], got {strength}")
+    if not strength > 0:
+        raise ValueError(f"strength must be > 0, got {strength}")
     s_attn = strength if atten_strength is None else atten_strength
     s_mlp = strength if mlp_strength is None else mlp_strength
     for name, s in (("atten_strength", s_attn), ("mlp_strength", s_mlp)):
-        if not 0 < s <= 1:
-            raise ValueError(f"{name} must be in (0, 1], got {s}")
+        if not s > 0:
+            raise ValueError(f"{name} must be > 0, got {s}")
+    if strength > 1.5 or s_attn > 1.5 or s_mlp > 1.5:
+        log.warning(
+            "High ablation strength (>1.5) can severely degrade coherence; "
+            "use only when a model retains refusal behavior at lower strengths."
+        )
     if not refusal_pt_path.is_file():
         raise FileNotFoundError(f"refusal .pt not found: {refusal_pt_path}")
 
@@ -587,6 +737,8 @@ def apply_refusal_dir_and_save(
         **load_gguf_kw,
     }
     model = _load_model_with_gguf_version_workaround(model_id, load_apply_kw)
+    if hasattr(model, "eval"):
+        model.eval()
     model_hidden = _model_hidden_size(model)
     if model_hidden is not None and model_hidden != hidden_size:
         raise ValueError(
@@ -663,6 +815,40 @@ def apply_refusal_dir_and_save(
                     new_w = new_w * (orig_norm / new_norm)
             linear.weight.data.copy_(new_w)
 
+    def _apply_mlp_module(mlp: object, I_minus_DDT_mlp: torch.Tensor) -> None:
+        if mlp is None:
+            return
+        if not output_only:
+            for name in (
+                "gate_proj",
+                "up_proj",
+                "c_fc",
+                "fc1",
+                "dense_h_to_4h",
+                "w1",
+                "w3",
+                "in_proj",
+                "in_proj_a",
+                "in_proj_b",
+            ):
+                proj = getattr(mlp, name, None)
+                if proj is not None:
+                    _apply_right(proj, I_minus_DDT_mlp)
+        for name in ("down_proj", "c_proj", "fc2", "dense_4h_to_h", "w2", "out_proj"):
+            proj = getattr(mlp, name, None)
+            if proj is not None:
+                _apply_left(proj, I_minus_DDT_mlp)
+        # MoE experts: apply the same projection to each expert module.
+        for exp_attr in ("experts", "expert_layers", "local_experts", "experts_list", "ffn_experts"):
+            experts = getattr(mlp, exp_attr, None)
+            if experts is None:
+                continue
+            for expert in list(experts):
+                _apply_mlp_module(expert, I_minus_DDT_mlp)
+        shared = getattr(mlp, "shared_expert", None)
+        if shared is not None:
+            _apply_mlp_module(shared, I_minus_DDT_mlp)
+
     for layer_idx, layer in enumerate(layers):
         if layer_idx < start_idx or layer_idx >= end_idx:
             continue
@@ -685,24 +871,31 @@ def apply_refusal_dir_and_save(
             or getattr(layer, "attn", None)
         )
         if attn is not None:
-            for linear in _get_attn_input_linears(attn):
-                _apply_right(linear, I_minus_DDT_attn)
+            if not output_only:
+                for linear in _get_attn_input_linears(attn):
+                    _apply_right(linear, I_minus_DDT_attn)
             for linear in _get_attn_output_linears(attn):
                 _apply_left(linear, I_minus_DDT_attn)
+        # Linear attention (Mamba / GatedDeltaNet / SSM, e.g. Qwen3.5 hybrid layers).
+        # These layers have input projections (in_proj_qkv, in_proj_z) and output (out_proj)
+        # that operate on hidden_size and must also be ablated.
+        lin_attn = getattr(layer, "linear_attn", None)
+        if lin_attn is not None:
+            if not output_only:
+                for name in ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"):
+                    proj = getattr(lin_attn, name, None)
+                    if proj is not None:
+                        _apply_right(proj, I_minus_DDT_attn)
+            for name in ("out_proj",):
+                proj = getattr(lin_attn, name, None)
+                if proj is not None:
+                    _apply_left(proj, I_minus_DDT_attn)
         # MLP: input projections (right-multiply) cover LLaMA gate_proj/up_proj, GPT-2 c_fc,
         # OPT fc1, Falcon/GPT-NeoX dense_h_to_4h, Mixtral/Yi w1/w3.
         # Output projections (left-multiply) cover LLaMA down_proj, GPT-2 c_proj, OPT fc2,
         # Falcon/GPT-NeoX dense_4h_to_h, Mixtral/Yi w2.
-        mlp = getattr(layer, "mlp", None)
-        if mlp is not None:
-            for name in ("gate_proj", "up_proj", "c_fc", "fc1", "dense_h_to_4h", "w1", "w3"):
-                proj = getattr(mlp, name, None)
-                if proj is not None:
-                    _apply_right(proj, I_minus_DDT_mlp)
-            for name in ("down_proj", "c_proj", "fc2", "dense_4h_to_h", "w2"):
-                proj = getattr(mlp, name, None)
-                if proj is not None:
-                    _apply_left(proj, I_minus_DDT_mlp)
+        for mlp_attr in ("mlp", "ffn", "feed_forward", "feedforward", "ff", "mlp_block", "ff_layer"):
+            _apply_mlp_module(getattr(layer, mlp_attr, None), I_minus_DDT_mlp)
 
     if verify:
         with torch.inference_mode():
@@ -719,6 +912,7 @@ def apply_refusal_dir_and_save(
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
         model.save_pretrained(output_dir, safe_serialization=True)
+        _sanitize_text_config(output_dir, model)
     except NotImplementedError:
         # Model was loaded with a weight conversion (e.g. MXFP4->bf16) that has no reverse.
         # Save state dict and config manually so convert_hf_to_gguf can still read the checkpoint.
@@ -734,6 +928,7 @@ def apply_refusal_dir_and_save(
             log.error("Error saving state dict: %s", e)
             raise
         model.config.save_pretrained(output_dir)
+        _sanitize_text_config(output_dir, model)
         log.info("Checkpoint saved.")
     tokenizer.save_pretrained(output_dir)
 
@@ -802,6 +997,8 @@ def evaluate_abliteration(
         "low_cpu_mem_usage": True,
     }
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
+    if hasattr(model, "eval"):
+        model.eval()
     use_chat = getattr(tokenizer, "chat_template", None) is not None
     use_gemma = not use_chat and is_gemma_checkpoint(checkpoint_dir)
     eos_id = getattr(tokenizer, "eos_token_id", None)
@@ -952,6 +1149,8 @@ def run_chat(
     if load_kw["device_map"] == "auto":
         load_kw["offload_folder"] = tempfile.mkdtemp(prefix="ollama_forge_offload_")
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
+    if hasattr(model, "eval"):
+        model.eval()
     if max_new_tokens is None:
         max_new_tokens = _model_max_position_embeddings(model)
         max_new_tokens = 2048 if max_new_tokens is None or max_new_tokens <= 0 else min(max_new_tokens, 8192)
