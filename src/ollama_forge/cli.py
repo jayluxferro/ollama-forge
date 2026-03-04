@@ -32,6 +32,7 @@ from ollama_forge.modelfile import (
     get_stop_tokens_from_checkpoint,
     merge_modelfile_with_reference_template,
     modelfile_append_num_predict,
+    modelfile_append_renderer_parser,
     modelfile_append_stop_parameters,
     modelfile_append_template,
     template_body_from_modelfile,
@@ -341,7 +342,15 @@ def _hf_checkpoint_to_ollama(
     )
 
     # -- 4. Template selection ----------------------------------------------------------
-    if template_from:
+    # Check for native Ollama RENDERER/PARSER support first — these handle chat
+    # formatting, thinking, tools, and vision natively, so we skip template derivation.
+    from ollama_forge.model_family import get_native_renderer_parser
+
+    renderer, parser = get_native_renderer_parser(checkpoint_dir)
+    if renderer:
+        content = modelfile_append_renderer_parser(content, renderer, parser)
+        log.info("Using native Ollama RENDERER %r / PARSER %r", renderer, parser)
+    elif template_from:
         ref_content = run_ollama_show_modelfile(template_from)
         if ref_content:
             content = merge_modelfile_with_reference_template(
@@ -352,17 +361,18 @@ def _hf_checkpoint_to_ollama(
             log.info("Note: no Ollama model %r found; pull it first for tool support.", template_from)
 
     # Detect model family for diagnostics
-    try:
-        from ollama_forge.model_family import get_family_name
+    if not renderer:
+        try:
+            from ollama_forge.model_family import get_family_name
 
-        family_name = get_family_name(checkpoint_dir)
-        if family_name:
-            log.info("Detected model family: %s", family_name)
-    except ImportError:
-        pass
+            family_name = get_family_name(checkpoint_dir)
+            if family_name:
+                log.info("Detected model family: %s", family_name)
+        except ImportError:
+            pass
 
     # If still no TEMPLATE, derive from the checkpoint's HF tokenizer
-    if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
+    if not renderer and not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
         hf_template = template_from_hf_checkpoint(checkpoint_dir)
         if hf_template:
             content = modelfile_append_template(content, hf_template)
@@ -4209,48 +4219,58 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     # Use absolute path so Ollama finds the GGUF when the Modelfile is in a temp dir
     gguf_for_modelfile = gguf_to_use.resolve()
     content = build_modelfile(str(gguf_for_modelfile))
-    _model_path = Path(model_id) if model_id else checkpoint_dir
-    _is_local_hf = _model_path.is_dir() and (_model_path / "config.json").is_file()
-    template_from = getattr(args, "template_from", None) or (None if _is_local_hf else (model_id if model_id else None))
-    if template_from:
-        ref_content = run_ollama_show_modelfile(template_from)
-        if ref_content:
-            content = merge_modelfile_with_reference_template(
-                content, ref_content, base=str(gguf_for_modelfile), template_only=True
-            )
-            log.info(
-                "Using chat template from Ollama model %r (for tool/Chat API support)",
-                template_from,
-            )
-        else:
-            log.info(
-                "Note: no Ollama model %r found; pull it first for tool support.",
-                template_from,
-            )
-    elif _is_local_hf:
-        log.info(
-            "Note: using local HF path; pass --template-from <ollama_model> for tool support."
+    # Check for native Ollama RENDERER/PARSER support first
+    from ollama_forge.model_family import get_native_renderer_parser
+
+    renderer, parser = get_native_renderer_parser(checkpoint_dir)
+    if renderer:
+        content = modelfile_append_renderer_parser(content, renderer, parser)
+        log.info("Using native Ollama RENDERER %r / PARSER %r", renderer, parser)
+    else:
+        _model_path = Path(model_id) if model_id else checkpoint_dir
+        _is_local_hf = _model_path.is_dir() and (_model_path / "config.json").is_file()
+        template_from = getattr(args, "template_from", None) or (
+            None if _is_local_hf else (model_id if model_id else None)
         )
-    # Detect model family for better diagnostics and template selection
-    try:
-        from ollama_forge.model_family import get_family_name
+        if template_from:
+            ref_content = run_ollama_show_modelfile(template_from)
+            if ref_content:
+                content = merge_modelfile_with_reference_template(
+                    content, ref_content, base=str(gguf_for_modelfile), template_only=True
+                )
+                log.info(
+                    "Using chat template from Ollama model %r (for tool/Chat API support)",
+                    template_from,
+                )
+            else:
+                log.info(
+                    "Note: no Ollama model %r found; pull it first for tool support.",
+                    template_from,
+                )
+        elif _is_local_hf:
+            log.info(
+                "Note: using local HF path; pass --template-from <ollama_model> for tool support."
+            )
+        # Detect model family for better diagnostics and template selection
+        try:
+            from ollama_forge.model_family import get_family_name
 
-        family_name = get_family_name(checkpoint_dir)
-        if family_name:
-            log.info("Detected model family: %s", family_name)
-    except ImportError:
-        family_name = None
+            family_name = get_family_name(checkpoint_dir)
+            if family_name:
+                log.info("Detected model family: %s", family_name)
+        except ImportError:
+            family_name = None
 
-    # If we still have no TEMPLATE, derive from the checkpoint's HF tokenizer so Ollama uses the same format.
-    if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
-        hf_template = template_from_hf_checkpoint(checkpoint_dir)
-        if hf_template:
-            content = modelfile_append_template(content, hf_template)
-            stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
-            if stop_tokens:
-                content = modelfile_append_stop_parameters(content, stop_tokens)
-            content = modelfile_append_num_predict(content, 2048)
-            log.info("Using chat template derived from checkpoint (HF format) for Ollama.")
+        # If we still have no TEMPLATE, derive from the checkpoint's HF tokenizer so Ollama uses the same format.
+        if not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
+            hf_template = template_from_hf_checkpoint(checkpoint_dir)
+            if hf_template:
+                content = modelfile_append_template(content, hf_template)
+                stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
+                if stop_tokens:
+                    content = modelfile_append_stop_parameters(content, stop_tokens)
+                content = modelfile_append_num_predict(content, 2048)
+                log.info("Using chat template derived from checkpoint (HF format) for Ollama.")
     if not getattr(args, "output_dir", None):
         print(
             f"To chat with correct tokenization (HF tokenizer): ollama-forge abliterate chat --name {name}",

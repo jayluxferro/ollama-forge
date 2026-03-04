@@ -116,7 +116,7 @@ Do not use variables.
     ),
     ModelFamily(
         name="qwen2",
-        model_types=("qwen2", "qwen2_moe", "qwen2_5", "qwen3", "qwen3_5"),
+        model_types=("qwen2", "qwen2_moe", "qwen2_5", "qwen3", "qwen3_5", "qwen3_5_text"),
         tokenizer_classes=("qwen2tokenizer", "qwen2tokenizerfast"),
         architectures=("qwen2forcausallm", "qwen2moeforcausallm", "qwen25forcausallm"),
         # Tool-capable template for Qwen2/2.5 (ChatML format with tool call JSON blocks).
@@ -189,6 +189,8 @@ When you need to call a tool, respond with a JSON object inside <tool_call> tags
 # we patch config.json in-place before conversion so the converter can proceed.
 _ARCHITECTURE_ALIASES: dict[str, str] = {
     "Qwen3_5ForCausalLM": "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5Model": "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5TextModel": "Qwen3_5ForConditionalGeneration",
 }
 
 
@@ -344,6 +346,33 @@ def is_gemma_checkpoint(checkpoint_dir: str | Path) -> bool:
     """True if the checkpoint is detected as a Gemma model (Gemma 2/3)."""
     family = detect_model_family(checkpoint_dir)
     return family is not None and family.name == "gemma"
+
+
+# Model types that have native Ollama RENDERER/PARSER support.
+# Maps normalized model_type → (renderer_name, parser_name).
+# When a model has native renderer support, the Modelfile should use
+# RENDERER/PARSER directives instead of a Go template — the renderer
+# handles chat formatting, thinking mode, tool calls, and vision natively.
+_NATIVE_RENDERER_TYPES: dict[str, tuple[str, str]] = {
+    "qwen35": ("qwen3.5", "qwen3.5"),  # model_type "qwen3_5" normalizes to "qwen35"
+    "qwen35text": ("qwen3.5", "qwen3.5"),  # AutoModelForCausalLM saves "qwen3_5_text" for text decoder
+}
+
+
+def get_native_renderer_parser(checkpoint_dir: str | Path) -> tuple[str | None, str | None]:
+    """Return (renderer, parser) if this model type has native Ollama support, else (None, None).
+
+    Reads ``model_type`` from config.json and looks it up in ``_NATIVE_RENDERER_TYPES``.
+    """
+    config_path = Path(checkpoint_dir) / "config.json"
+    if not config_path.is_file():
+        return (None, None)
+    with contextlib.suppress(Exception):
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        model_type = _normalize(data.get("model_type"))
+        if model_type in _NATIVE_RENDERER_TYPES:
+            return _NATIVE_RENDERER_TYPES[model_type]
+    return (None, None)
 
 
 def is_multimodal_checkpoint(checkpoint_dir: str | Path) -> bool:

@@ -375,17 +375,28 @@ def get_stop_tokens_from_checkpoint(checkpoint_dir: str | Path) -> list[str]:
         with contextlib.suppress(Exception):
             add(tokenizer.decode([tokenizer.pad_token_id], skip_special_tokens=False))
 
-    # Common end-of-turn / EOS in chat templates (avoid endless repetition when eos is empty)
-    for candidate in (
-        "<<end_of_turn>>",
-        "<|end_of_turn|>",
-        "<|end|>",
-        "<|eot_id|>",
-        "<|return|>",
-    ):
-        add(candidate)
-
     return out
+
+
+def modelfile_append_renderer_parser(
+    modelfile_content: str,
+    renderer: str,
+    parser: str | None = None,
+) -> str:
+    """Add RENDERER, PARSER, and a minimal pass-through TEMPLATE to the Modelfile.
+
+    When a model has native Ollama RENDERER/PARSER support, the renderer handles
+    chat formatting, thinking mode, tool calls, vision, and stop tokens — so we
+    emit a minimal ``TEMPLATE {{ .Prompt }}`` instead of a verbose Go template,
+    and omit stop tokens entirely.
+    """
+    # Replace or add a minimal template — the renderer handles formatting
+    content = modelfile_append_template(modelfile_content, "{{ .Prompt }}")
+    lines = content.rstrip().split("\n")
+    lines.append(f"RENDERER {renderer}")
+    if parser:
+        lines.append(f"PARSER {parser}")
+    return "\n".join(lines) + "\n"
 
 
 def modelfile_append_stop_parameters(modelfile_content: str, stop_tokens: list[str]) -> str:

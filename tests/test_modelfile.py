@@ -10,6 +10,7 @@ from ollama_forge.modelfile import (
     get_stop_tokens_from_checkpoint,
     merge_modelfile_with_reference_template,
     modelfile_append_num_predict,
+    modelfile_append_renderer_parser,
     modelfile_append_stop_parameters,
     modelfile_append_template,
     strip_tool_template,
@@ -423,3 +424,89 @@ class TestStripToolTemplate:
         content = 'FROM m.gguf\nTEMPLATE """{{ . | json }}"""\nPARAMETER stop "<|im_end|>"'
         result = strip_tool_template(content)
         assert 'PARAMETER stop "<|im_end|>"' in result
+
+
+# ---------------------------------------------------------------------------
+# modelfile_append_renderer_parser
+# ---------------------------------------------------------------------------
+
+
+class TestModelfileAppendRendererParser:
+    """Tests for modelfile_append_renderer_parser."""
+
+    def test_adds_renderer_and_parser(self) -> None:
+        """Adds RENDERER and PARSER directives."""
+        content = "FROM model.gguf\n"
+        result = modelfile_append_renderer_parser(content, "qwen3.5", "qwen3.5")
+        assert "RENDERER qwen3.5" in result
+        assert "PARSER qwen3.5" in result
+
+    def test_adds_minimal_template(self) -> None:
+        """Adds a minimal pass-through TEMPLATE."""
+        content = "FROM model.gguf\n"
+        result = modelfile_append_renderer_parser(content, "qwen3.5", "qwen3.5")
+        assert "TEMPLATE" in result
+        assert "{{ .Prompt }}" in result
+        # Should NOT have verbose Go template constructs
+        assert ".ToolCalls" not in result
+        assert "im_start" not in result
+
+    def test_replaces_existing_template(self) -> None:
+        """Replaces an existing verbose template with the minimal one."""
+        content = 'FROM model.gguf\nTEMPLATE """<|im_start|>user\n{{ .Prompt }}<|im_end|>"""'
+        result = modelfile_append_renderer_parser(content, "qwen3.5", "qwen3.5")
+        assert "im_start" not in result
+        assert "RENDERER qwen3.5" in result
+
+    def test_no_parser_when_none(self) -> None:
+        """PARSER line is omitted when parser is None."""
+        content = "FROM model.gguf\n"
+        result = modelfile_append_renderer_parser(content, "qwen3.5", None)
+        assert "RENDERER qwen3.5" in result
+        assert "PARSER" not in result
+
+    def test_preserves_from_and_params(self) -> None:
+        """FROM line and PARAMETERs are preserved."""
+        content = "FROM /path/to/model.gguf\nPARAMETER temperature 0.7\n"
+        result = modelfile_append_renderer_parser(content, "qwen3.5", "qwen3.5")
+        assert "FROM /path/to/model.gguf" in result
+        assert "PARAMETER temperature 0.7" in result
+
+
+
+# ---------------------------------------------------------------------------
+# get_stop_tokens_from_checkpoint — cross-family stop token removal
+# ---------------------------------------------------------------------------
+
+
+class TestStopTokensNoCrossFamily:
+    """Verify that get_stop_tokens_from_checkpoint no longer adds cross-family tokens."""
+
+    def test_mistral_does_not_get_gemma_tokens(self, tmp_path: Path) -> None:
+        """Mistral model should NOT get Gemma's <<end_of_turn>> token."""
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "mistral"}))
+        with patch("transformers.AutoTokenizer") as mock_auto:
+            mock_tok = MagicMock()
+            mock_tok.eos_token = "</s>"
+            mock_tok.pad_token = None
+            mock_tok.pad_token_id = None
+            mock_auto.from_pretrained.return_value = mock_tok
+            tokens = get_stop_tokens_from_checkpoint(tmp_path)
+        assert "<<end_of_turn>>" not in tokens
+        assert "<|eot_id|>" not in tokens
+
+    def test_unknown_model_does_not_get_cross_family_tokens(self, tmp_path: Path) -> None:
+        """Unknown model should NOT get tokens from other families."""
+        (tmp_path / "config.json").write_text(json.dumps({"model_type": "novel_arch"}))
+        with patch("transformers.AutoTokenizer") as mock_auto:
+            mock_tok = MagicMock()
+            mock_tok.eos_token = "<|end|>"
+            mock_tok.pad_token = None
+            mock_tok.pad_token_id = None
+            mock_auto.from_pretrained.return_value = mock_tok
+            tokens = get_stop_tokens_from_checkpoint(tmp_path)
+        # Should have the eos_token but NOT cross-family tokens
+        assert "<|end|>" in tokens
+        assert "<<end_of_turn>>" not in tokens
+        assert "<|eot_id|>" not in tokens
+        assert "<|return|>" not in tokens

@@ -64,10 +64,47 @@ def _strip_chat_reply(text: str, last_user_content: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _is_multimodal_model_id(model_id: str) -> bool:
+    """Check if a model ID (local path or HF repo) points to a multimodal checkpoint.
+
+    For local paths: checks config.json for ``vision_config``, ``image_token_id``, or ``visual``.
+    For HF repo IDs: uses ``AutoConfig.from_pretrained`` to inspect the config.
+    """
+    p = Path(model_id)
+    if p.is_dir():
+        from ollama_forge.model_family import is_multimodal_checkpoint
+
+        return is_multimodal_checkpoint(p)
+
+    # HF repo ID — use AutoConfig to check without downloading weights
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        return bool(
+            getattr(cfg, "vision_config", None)
+            or getattr(cfg, "image_token_id", None)
+            or getattr(cfg, "visual", None)
+        )
+    except Exception:
+        return False
+
+
 def _load_model_with_gguf_version_workaround(model_id: str, load_kw: dict) -> Any:
-    """Call AutoModelForCausalLM.from_pretrained; on Invalid version 'N/A' (e.g. GGUF metadata),
-    patch packaging.version and retry."""
+    """Load model with AutoModelForCausalLM.from_pretrained.
+
+    Always uses AutoModelForCausalLM — even for multimodal models. This extracts just the
+    text decoder, which is what we need for abliteration and GGUF conversion. Vision weights
+    are not included in the text GGUF; Ollama handles vision via built-in RENDERER.
+
+    On Invalid version 'N/A' (e.g. GGUF metadata), patches packaging.version and retries."""
     from transformers import AutoModelForCausalLM
+
+    if _is_multimodal_model_id(model_id):
+        log.info(
+            "Multimodal model detected; loading text decoder only via AutoModelForCausalLM. "
+            "Vision weights are handled by Ollama's built-in RENDERER."
+        )
 
     try:
         return AutoModelForCausalLM.from_pretrained(model_id, **load_kw)
@@ -120,8 +157,15 @@ def _model_max_position_embeddings(model: Any) -> int | None:
 
 
 def get_layers(model: Any) -> Any:
-    """Return transformer layers (model.model.layers, model.model.language_model.layers, or
-    model.transformer.h)."""
+    """Return transformer layers from various model architectures.
+
+    Tried paths (in order):
+      model.model.layers                          — standard CausalLM (Llama, Qwen, Gemma …)
+      model.model.language_model.layers            — some nested multimodal wrappers
+      model.language_model.model.layers            — AutoModel multimodal with inner .model
+      model.language_model.layers                  — AutoModel multimodal direct (Qwen3.5)
+      model.transformer.h                          — Falcon / GPT-2 / GPT-NeoX
+    """
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return model.model.layers
     if (
@@ -130,10 +174,18 @@ def get_layers(model: Any) -> Any:
         and hasattr(model.model.language_model, "layers")
     ):
         return model.model.language_model.layers
+    # AutoModel for multimodal: top-level language_model (with or without inner .model)
+    lm = getattr(model, "language_model", None)
+    if lm is not None:
+        inner = getattr(lm, "model", None)
+        if inner is not None and hasattr(inner, "layers"):
+            return inner.layers
+        if hasattr(lm, "layers"):
+            return lm.layers
     if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         return model.transformer.h
     raise AttributeError(
-        "Could not find layers: try model.model.layers, model.model.language_model.layers, or model.transformer.h. "
+        "Could not find layers: try model.model.layers, model.language_model.layers, or model.transformer.h. "
         "See docs/ABLITERATE.md for supported architectures."
     )
 
@@ -254,8 +306,11 @@ def compute_refusal_dir(
         shutil.rmtree(offload_folder, ignore_errors=True)
     layers = get_layers(model)
     n = min(num_instructions, len(harmful_lines), len(harmless_lines))
-    harmful_instructions = random.sample(harmful_lines, n)
-    harmless_instructions = random.sample(harmless_lines, n)
+    # Use a fixed seed for reproducible refusal direction computation.
+    # Non-deterministic sampling can produce wildly different results on small models.
+    rng = random.Random(42)
+    harmful_instructions = rng.sample(harmful_lines, n)
+    harmless_instructions = rng.sample(harmless_lines, n)
 
     def tokenize(instructions):
         out = []

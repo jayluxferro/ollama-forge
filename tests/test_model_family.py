@@ -7,12 +7,14 @@ from pathlib import Path
 from ollama_forge.model_family import (
     _ARCHITECTURE_ALIASES,
     _MODEL_FAMILIES,
+    _NATIVE_RENDERER_TYPES,
     _auto_family_from_config,
     _normalize,
     detect_model_family,
     get_family_name,
     get_family_stop_tokens,
     get_family_template_override,
+    get_native_renderer_parser,
     is_gemma_checkpoint,
     is_multimodal_checkpoint,
     remap_architecture_in_config,
@@ -555,6 +557,70 @@ class TestTemplateUsesCorrectFunctionNames:
 # ---------------------------------------------------------------------------
 # is_multimodal_checkpoint
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# get_native_renderer_parser
+# ---------------------------------------------------------------------------
+
+
+class TestGetNativeRendererParser:
+    """Tests for get_native_renderer_parser."""
+
+    def test_qwen3_5_returns_renderer_parser(self) -> None:
+        """qwen3_5 model type returns ('qwen3.5', 'qwen3.5')."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "qwen3_5"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            renderer, parser = get_native_renderer_parser(d)
+            assert renderer == "qwen3.5"
+            assert parser == "qwen3.5"
+
+    def test_qwen3_5_text_returns_renderer_parser(self) -> None:
+        """qwen3_5_text model type (text decoder) also returns ('qwen3.5', 'qwen3.5')."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "qwen3_5_text"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            renderer, parser = get_native_renderer_parser(d)
+            assert renderer == "qwen3.5"
+            assert parser == "qwen3.5"
+
+    def test_qwen2_returns_none(self) -> None:
+        """qwen2 model type does NOT get renderer/parser (only qwen3_5 does)."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "qwen2"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            renderer, parser = get_native_renderer_parser(d)
+            assert renderer is None
+            assert parser is None
+
+    def test_llama_returns_none(self) -> None:
+        """Non-qwen3.5 model types return (None, None)."""
+        with tempfile.TemporaryDirectory() as d:
+            config = {"model_type": "llama"}
+            (Path(d) / "config.json").write_text(json.dumps(config))
+            renderer, parser = get_native_renderer_parser(d)
+            assert renderer is None
+            assert parser is None
+
+    def test_nonexistent_path_returns_none(self) -> None:
+        """Non-existent path returns (None, None)."""
+        renderer, parser = get_native_renderer_parser("/nonexistent")
+        assert renderer is None
+        assert parser is None
+
+    def test_empty_config_returns_none(self) -> None:
+        """Empty config.json returns (None, None)."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.json").write_text("{}")
+            renderer, parser = get_native_renderer_parser(d)
+            assert renderer is None
+            assert parser is None
+
+    def test_native_renderer_types_dict_has_entries(self) -> None:
+        """Sanity: _NATIVE_RENDERER_TYPES has at least one entry."""
+        assert len(_NATIVE_RENDERER_TYPES) >= 1
+        assert "qwen35" in _NATIVE_RENDERER_TYPES  # "qwen3_5" normalized
 
 
 class TestIsMultimodalCheckpoint:

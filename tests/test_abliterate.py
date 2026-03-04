@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ollama_forge.abliterate import _strength_kernel_scale, get_D_for_layer
+from ollama_forge.abliterate import _is_multimodal_model_id, _strength_kernel_scale, get_D_for_layer, get_layers
 
 
 class TestStrengthKernelScale:
@@ -564,3 +564,131 @@ class TestLayerSkipEdgeCases:
         assert mock_log.warning.called, (
             "Warning expected when skip_begin + skip_end == n_layers"
         )
+
+
+# ---------------------------------------------------------------------------
+# _is_multimodal_model_id
+# ---------------------------------------------------------------------------
+
+
+class TestIsMultimodalModelId:
+    """Tests for _is_multimodal_model_id."""
+
+    def test_local_multimodal_dir(self, tmp_path: Path) -> None:
+        """Returns True for local dir with vision_config in config.json."""
+        config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 768}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        assert _is_multimodal_model_id(str(tmp_path)) is True
+
+    def test_local_text_only_dir(self, tmp_path: Path) -> None:
+        """Returns False for local dir without vision indicators."""
+        config = {"model_type": "qwen2", "architectures": ["Qwen2ForCausalLM"]}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        assert _is_multimodal_model_id(str(tmp_path)) is False
+
+    def test_hf_repo_id_uses_autoconfig(self) -> None:
+        """HF repo ID uses AutoConfig to check for multimodal."""
+        mock_cfg = MagicMock()
+        mock_cfg.vision_config = {"hidden_size": 768}
+        mock_cfg.image_token_id = None
+        mock_cfg.visual = None
+        with patch("transformers.AutoConfig") as mock_auto_config:
+            mock_auto_config.from_pretrained.return_value = mock_cfg
+            assert _is_multimodal_model_id("Qwen/Qwen3.5-0.8B") is True
+
+    def test_hf_repo_id_text_only(self) -> None:
+        """HF repo ID for text-only model returns False."""
+        mock_cfg = MagicMock(spec=[])  # no vision_config, image_token_id, visual attributes
+        with patch("transformers.AutoConfig") as mock_auto_config:
+            mock_auto_config.from_pretrained.return_value = mock_cfg
+            assert _is_multimodal_model_id("meta-llama/Llama-3-8B") is False
+
+    def test_nonexistent_path_returns_false(self) -> None:
+        """Non-existent path returns False."""
+        assert _is_multimodal_model_id("/nonexistent/path") is False
+
+
+class TestLoadModelMultimodal:
+    """Tests for model loading in _load_model_with_gguf_version_workaround."""
+
+    def test_multimodal_uses_causal_lm(self, tmp_path: Path) -> None:
+        """Multimodal models use AutoModelForCausalLM (text decoder only)."""
+        from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
+
+        config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 768}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+
+        mock_model = MagicMock()
+        with patch("transformers.AutoModelForCausalLM") as mock_causal:
+            mock_causal.from_pretrained.return_value = mock_model
+            result = _load_model_with_gguf_version_workaround(str(tmp_path), {"trust_remote_code": True})
+        assert result is mock_model
+        mock_causal.from_pretrained.assert_called_once()
+
+    def test_text_only_uses_causal_lm(self, tmp_path: Path) -> None:
+        """Text-only model uses AutoModelForCausalLM directly."""
+        from ollama_forge.abliterate import _load_model_with_gguf_version_workaround
+
+        config = {"model_type": "llama", "architectures": ["LlamaForCausalLM"]}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+
+        mock_model = MagicMock()
+        with patch("transformers.AutoModelForCausalLM") as mock_causal:
+            mock_causal.from_pretrained.return_value = mock_model
+            result = _load_model_with_gguf_version_workaround(str(tmp_path), {"trust_remote_code": True})
+        assert result is mock_model
+        mock_causal.from_pretrained.assert_called_once()
+
+
+class TestGetLayers:
+    """Tests for get_layers() with various model structures."""
+
+    def test_standard_causal_lm(self) -> None:
+        """model.model.layers — standard CausalLM (Llama, Qwen, Gemma)."""
+        layers = MagicMock()
+        model = MagicMock(spec=[])
+        model.model = MagicMock(spec=[])
+        model.model.layers = layers
+        assert get_layers(model) is layers
+
+    def test_nested_language_model(self) -> None:
+        """model.model.language_model.layers — nested multimodal wrapper."""
+        layers = MagicMock()
+        model = MagicMock(spec=[])
+        model.model = MagicMock(spec=[])
+        model.model.language_model = MagicMock(spec=[])
+        model.model.language_model.layers = layers
+        # Ensure model.model doesn't have .layers directly
+        del model.model.layers
+        assert get_layers(model) is layers
+
+    def test_automodel_multimodal_with_inner_model(self) -> None:
+        """model.language_model.model.layers — AutoModel multimodal with inner .model."""
+        layers = MagicMock()
+        model = MagicMock(spec=[])
+        model.language_model = MagicMock(spec=[])
+        model.language_model.model = MagicMock(spec=[])
+        model.language_model.model.layers = layers
+        assert get_layers(model) is layers
+
+    def test_automodel_multimodal_direct(self) -> None:
+        """model.language_model.layers — AutoModel multimodal direct (Qwen3.5)."""
+        layers = MagicMock()
+        model = MagicMock(spec=[])
+        model.language_model = MagicMock(spec=[])
+        model.language_model.layers = layers
+        assert get_layers(model) is layers
+
+    def test_gpt2_falcon(self) -> None:
+        """model.transformer.h — Falcon / GPT-2 / GPT-NeoX."""
+        layers = MagicMock()
+        model = MagicMock(spec=[])
+        model.transformer = MagicMock(spec=[])
+        model.transformer.h = layers
+        assert get_layers(model) is layers
+
+    def test_unknown_raises(self) -> None:
+        """Unrecognised model structure raises AttributeError."""
+        model = MagicMock(spec=[])
+        with pytest.raises(AttributeError, match="Could not find layers"):
+            get_layers(model)
