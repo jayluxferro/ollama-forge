@@ -919,14 +919,15 @@ def test_doctor_fix_plan_runs() -> None:
 
 
 def test_setup_llama_cpp_help() -> None:
-    """setup-llama-cpp --help lists --dir."""
+    """setup-llama-cpp --help lists --dir and --update."""
     result = subprocess.run(
         [sys.executable, "-m", "ollama_forge.cli", "setup-llama-cpp", "--help"],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert "dir" in result.stdout or "clone" in result.stdout.lower()
+    assert "--dir" in result.stdout
+    assert "--update" in result.stdout
 
 
 def test_downsize_prints_pipeline() -> None:

@@ -2170,6 +2170,20 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             status["quantize"],
             "run: ollama-forge setup-llama-cpp",
         )
+        # Check llama.cpp staleness
+        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+            if (candidate / ".git").is_dir():
+                age = _llama_cpp_git_age_days(candidate)
+                if age is not None:
+                    commit = _llama_cpp_current_commit(candidate)
+                    if age > 30:
+                        print(
+                            f"llama.cpp at {candidate} is {age} days old ({commit})."
+                            f" Run: ollama-forge setup-llama-cpp --dir {candidate} --update"
+                        )
+                    else:
+                        print(f"llama.cpp at {candidate}: up to date ({commit}, {age}d old)")
+                break
 
     if not getattr(args, "fix", False):
         ok = status["ollama"] and status["huggingface_hub"] and status["pyyaml"]
@@ -2229,41 +2243,8 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     return 0 if ok else 1
 
 
-def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Clone and build llama.cpp; print instructions to add to PATH."""
-    if getattr(args, "use_conda", False):
-        print(
-            "Use conda to install llama.cpp: conda install -c conda-forge llama-cpp\n"
-            "Ensure finetune and quantize (or llama-finetune, llama-quantize) are on PATH.\n"
-            "For convert/quantize you need GGUF support; see wiki or --help for CMake options.",
-            file=sys.stderr,
-        )
-        return 0
-    if getattr(args, "use_system", False):
-        q = _which_quantize()
-        ft = shutil.which("finetune") or shutil.which("llama-finetune")
-        if q and ft:
-            print("finetune and quantize are on PATH. No setup needed.")
-            return 0
-        print("finetune or quantize not found on PATH.", file=sys.stderr)
-        print("Install llama.cpp (system package or build from source) and add its bin dir to PATH.", file=sys.stderr)
-        return 1
-    target_dir = Path(args.dir or "llama.cpp").resolve()
-    if target_dir.exists() and any(target_dir.iterdir()):
-        log.warning(
-            "Directory already exists and is non-empty: %s. Use --dir <other> or remove it.",
-            target_dir,
-        )
-        return 1
-    url = "https://github.com/ggerganov/llama.cpp"
-    log.info("Cloning %s into %s...", url, target_dir)
-    code = run_cmd(
-        ["git", "clone", "--depth", "1", url, str(target_dir)],
-        not_found_message="Error: git not found. Install git and try again.",
-        process_error_message="Error: git clone failed: {e}",
-    )
-    if code != 0:
-        return code
+def _build_llama_cpp(target_dir: Path) -> int:
+    """Run cmake configure + build in target_dir/build. Returns exit code."""
     build_dir = target_dir / "build"
     build_dir.mkdir(exist_ok=True)
     log.info("Building (cmake)...")
@@ -2285,11 +2266,124 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
         return code
     bin_dir = build_dir / "bin"
     if not bin_dir.is_dir():
-        bin_dir = build_dir  # some layouts put binaries in build/
+        bin_dir = build_dir
     print(f'\nDone. Add to PATH: export PATH="{bin_dir}:$PATH"')
     print("Then you can use: finetune, quantize, and other llama.cpp tools.")
-    print("Minimal CMake options (if needed): cmake .. -DGGUF_BUILD_TESTS=OFF")
     return 0
+
+
+def _llama_cpp_git_age_days(target_dir: Path) -> int | None:
+    """Return days since the last git commit in target_dir, or None if not a git repo."""
+    from datetime import datetime, timezone
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"],
+            capture_output=True, text=True, timeout=10, check=False, cwd=target_dir,
+        )
+        if result.returncode != 0:
+            return None
+        timestamp = int(result.stdout.strip())
+        commit_date = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        age = datetime.now(timezone.utc) - commit_date
+        return age.days
+    except Exception:
+        return None
+
+
+def _llama_cpp_current_commit(target_dir: Path) -> str | None:
+    """Return the short git hash of the current llama.cpp checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False, cwd=target_dir,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Clone and build llama.cpp; or update an existing clone with --update."""
+    if getattr(args, "use_conda", False):
+        print(
+            "Use conda to install llama.cpp: conda install -c conda-forge llama-cpp\n"
+            "Ensure finetune and quantize (or llama-finetune, llama-quantize) are on PATH.\n"
+            "For convert/quantize you need GGUF support; see wiki or --help for CMake options.",
+            file=sys.stderr,
+        )
+        return 0
+    if getattr(args, "use_system", False):
+        q = _which_quantize()
+        ft = shutil.which("finetune") or shutil.which("llama-finetune")
+        if q and ft:
+            print("finetune and quantize are on PATH. No setup needed.")
+            return 0
+        print("finetune or quantize not found on PATH.", file=sys.stderr)
+        print(
+            "Install llama.cpp (system package or build from source) and add its bin dir to PATH.",
+            file=sys.stderr,
+        )
+        return 1
+
+    target_dir = Path(args.dir or "llama.cpp").resolve()
+    update = getattr(args, "update", False)
+
+    # --update on an existing clone: pull latest + rebuild
+    if update:
+        if not target_dir.exists() or not (target_dir / ".git").is_dir():
+            log.info("No existing clone at %s; will do a fresh clone instead.", target_dir)
+            # Fall through to clone path below
+        else:
+            old_hash = _llama_cpp_current_commit(target_dir)
+            log.info("Updating llama.cpp at %s...", target_dir)
+            # Unshallow if needed (setup-llama-cpp clones with --depth 1)
+            code = run_cmd(
+                ["git", "fetch", "--depth", "1", "origin"],
+                not_found_message="Error: git not found.",
+                process_error_message="Error: git fetch failed: {e}",
+                cwd=target_dir,
+            )
+            if code != 0:
+                return code
+            code = run_cmd(
+                ["git", "reset", "--hard", "origin/HEAD"],
+                not_found_message="Error: git not found.",
+                process_error_message="Error: git reset failed: {e}",
+                cwd=target_dir,
+            )
+            if code != 0:
+                return code
+            new_hash = _llama_cpp_current_commit(target_dir)
+            if old_hash and new_hash and old_hash == new_hash:
+                print(f"Already up to date ({new_hash}).")
+                return 0
+            log.info("Updated %s -> %s", old_hash or "unknown", new_hash or "unknown")
+            return _build_llama_cpp(target_dir)
+
+    # Fresh clone
+    if target_dir.exists() and any(target_dir.iterdir()):
+        if (target_dir / ".git").is_dir():
+            log.warning(
+                "Directory already exists: %s. Use --update to pull latest, or --dir <other>.",
+                target_dir,
+            )
+        else:
+            log.warning(
+                "Directory already exists and is non-empty: %s. Use --dir <other> or remove it.",
+                target_dir,
+            )
+        return 1
+    url = "https://github.com/ggerganov/llama.cpp"
+    log.info("Cloning %s into %s...", url, target_dir)
+    code = run_cmd(
+        ["git", "clone", "--depth", "1", url, str(target_dir)],
+        not_found_message="Error: git not found. Install git and try again.",
+        process_error_message="Error: git clone failed: {e}",
+    )
+    if code != 0:
+        return code
+    return _build_llama_cpp(target_dir)
 
 
 def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -8400,6 +8494,11 @@ def main() -> int:
         "--use-conda",
         action="store_true",
         help="Print instructions for using conda-installed llama.cpp (e.g. conda install -c conda-forge llama-cpp)",
+    )
+    p_setup.add_argument(
+        "--update",
+        action="store_true",
+        help="Pull latest changes and rebuild an existing llama.cpp clone (git fetch + reset + cmake build)",
     )
     p_setup.set_defaults(handler=_cmd_setup_llama_cpp)
 
