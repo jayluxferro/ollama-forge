@@ -71,3 +71,6 @@ blog/
 .env
 .env.local
 *.pem
+
+# Misc
+/.claude
