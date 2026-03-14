@@ -6,6 +6,7 @@ from typing import Any
 
 _PROFILES: dict[str, dict[str, Any]] = {
     "safe": {
+        "description": "Lower-strength defaults that favor preserving capability over maximum refusal removal.",
         "num_instructions": 64,
         "agg": "last_non_special",
         "strength": 0.6,
@@ -16,6 +17,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "output_only": False,
     },
     "balanced": {
+        "description": "General-purpose defaults for most models and iterative experimentation.",
         "num_instructions": 128,
         "agg": "last",
         "strength": 1.0,
@@ -26,6 +28,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "output_only": False,
     },
     "aggressive": {
+        "description": "Highest-strength defaults for stronger refusal removal with more capability risk.",
         "num_instructions": 256,
         "agg": "mean",
         "strength": 1.3,
@@ -40,6 +43,10 @@ _PROFILES: dict[str, dict[str, Any]] = {
 
 def list_profiles() -> tuple[str, ...]:
     return tuple(_PROFILES.keys())
+
+
+def get_profiles() -> dict[str, dict[str, Any]]:
+    return {name: dict(values) for name, values in _PROFILES.items()}
 
 
 def get_profile(name: str | None) -> dict[str, Any]:

@@ -327,6 +327,524 @@ def test_abliterate_compute_dir_help() -> None:
     assert "harmful" in result.stdout.lower()
 
 
+def test_abliterate_profiles_help() -> None:
+    """abliterate profiles --help lists JSON option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "profiles", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--json" in result.stdout
+
+
+def test_abliterate_report_help() -> None:
+    """abliterate report --help lists report path."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "report", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "path" in result.stdout.lower()
+    assert "--export" in result.stdout
+
+
+def test_abliterate_regenerate_report_help() -> None:
+    """abliterate regenerate-report --help lists output dir."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "regenerate-report", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--output-dir" in result.stdout
+
+
+def test_abliterate_pipeline_report_help() -> None:
+    """abliterate pipeline-report --help lists export option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "pipeline-report", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--export" in result.stdout
+
+
+def test_abliterate_pipeline_compare_help() -> None:
+    """abliterate pipeline-compare --help lists two pipeline paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "pipeline-compare", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "pipeline_a" in result.stdout and "pipeline_b" in result.stdout
+    assert "--export" in result.stdout
+
+
+def test_abliterate_aggregate_help() -> None:
+    """abliterate aggregate --help lists dir and metric options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "aggregate", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--dir" in result.stdout and "--metric" in result.stdout
+
+
+def test_abliterate_benchmark_help() -> None:
+    """abliterate benchmark --help lists model and prompt set options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "benchmark", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--model" in result.stdout and "prompt_set" in result.stdout
+
+
+def test_abliterate_ui_help() -> None:
+    """abliterate ui --help is available."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "ui", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "ui" in result.stdout.lower() or "streamlit" in result.stdout.lower()
+
+
+def test_abliterate_informed_plan_help() -> None:
+    """abliterate informed-plan --help lists analysis input."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-plan", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--analysis" in result.stdout
+
+
+def test_abliterate_informed_run_help() -> None:
+    """abliterate informed-run --help lists analysis, model, and name."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--analysis" in result.stdout and "--model" in result.stdout and "--name" in result.stdout
+    assert "--artifact-file" in result.stdout
+
+
+def test_abliterate_informed_refine_help() -> None:
+    """abliterate informed-refine --help lists artifact input."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-refine", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "artifact" in result.stdout.lower()
+
+
+def test_abliterate_informed_attach_eval_help() -> None:
+    """abliterate informed-attach-eval --help lists artifact and eval paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-attach-eval", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "artifact" in result.stdout.lower() and "eval_report" in result.stdout
+
+
+def test_abliterate_informed_artifact_help() -> None:
+    """abliterate informed-artifact --help lists export option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-artifact", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--export" in result.stdout
+
+
+def test_abliterate_informed_compare_help() -> None:
+    """abliterate informed-compare --help lists two artifact paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-compare", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "artifact_a" in result.stdout and "artifact_b" in result.stdout
+
+
+def test_abliterate_informed_pipeline_help() -> None:
+    """abliterate informed-pipeline --help lists study-config and model/name args."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "informed-pipeline", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--study-config" in result.stdout and "--model" in result.stdout and "--name" in result.stdout
+    assert "--benchmark-preset" in result.stdout and "--compare-eval-report" in result.stdout
+    assert "--auto-refine-run" in result.stdout and "--refine-output-dir" in result.stdout
+
+
+def test_study_help() -> None:
+    """study --help lists subcommands."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "presets" in result.stdout and "validate" in result.stdout and "plan" in result.stdout
+    assert "init" in result.stdout and "interactive" in result.stdout
+
+
+def test_study_presets_help() -> None:
+    """study presets --help lists JSON option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "presets", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--json" in result.stdout
+
+
+def test_study_models_help() -> None:
+    """study models --help lists recommendation flags."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "models", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--recommend" in result.stdout and "--tier" in result.stdout
+
+
+def test_study_benchmarks_help() -> None:
+    """study benchmarks --help lists kind filter."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "benchmarks", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--kind" in result.stdout
+
+
+def test_study_benchmark_run_help() -> None:
+    """study benchmark-run --help lists preset and model args."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "benchmark-run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--preset" in result.stdout and "--model" in result.stdout
+    assert "--base-url" in result.stdout
+    assert "--compare-model" in result.stdout
+
+
+def test_study_lm_eval_help() -> None:
+    """study lm-eval --help lists tasks and plan options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "lm-eval", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--tasks" in result.stdout and "--plan" in result.stdout
+    assert "--model-args" in result.stdout
+
+
+def test_study_eval_compare_help() -> None:
+    """study eval-compare --help lists two report paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "eval-compare", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "report_a" in result.stdout and "report_b" in result.stdout
+
+
+def test_study_analysis_modules_help() -> None:
+    """study analysis-modules --help lists JSON option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "analysis-modules", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--json" in result.stdout
+
+
+def test_study_analyze_bundle_help() -> None:
+    """study analyze-bundle --help lists modules and output options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "analyze-bundle", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--modules" in result.stdout and "--output-file" in result.stdout
+
+
+def test_study_analyze_help() -> None:
+    """study analyze --help lists module and output options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "analyze", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--module" in result.stdout and "--output-file" in result.stdout
+    assert "logit_lens" in result.stdout and "residual_stream" in result.stdout
+    assert "causal_tracing" in result.stdout and "conditional_similarity" in result.stdout
+    assert "activation_patching" in result.stdout
+    assert "steering_vectors" in result.stdout and "concept_geometry" in result.stdout
+    assert "defense_robustness" in result.stdout
+
+
+def test_study_report_help() -> None:
+    """study report --help lists report path."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "report", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "study-results" in result.stdout.lower() or "path" in result.stdout.lower()
+    assert "--export" in result.stdout
+
+
+def test_study_regenerate_report_help() -> None:
+    """study regenerate-report --help lists output-dir."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "regenerate-report", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--output-dir" in result.stdout
+
+
+def test_study_compare_help() -> None:
+    """study compare --help lists two report paths."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "compare", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "report_a" in result.stdout and "report_b" in result.stdout
+    assert "--export" in result.stdout
+
+
+def test_study_contribute_help() -> None:
+    """study contribute --help lists report path and dir."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "contribute", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "report" in result.stdout.lower() and "--dir" in result.stdout
+
+
+def test_study_aggregate_help() -> None:
+    """study aggregate --help lists dir and json flag."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "aggregate", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--dir" in result.stdout and "--json" in result.stdout
+
+
+def test_study_strategies_help() -> None:
+    """study strategies --help lists JSON option."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "strategies", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--json" in result.stdout
+
+
+def test_study_validate_success() -> None:
+    """study validate accepts a valid preset-backed config."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
+        f.write(
+            "preset: quick\n"
+            "model:\n"
+            "  name: Qwen/Qwen2.5-0.5B\n"
+            "dataset:\n"
+            "  name: wikitext\n"
+            "  split: test\n"
+        )
+        path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ollama_forge.cli", "study", "validate", path],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "Qwen/Qwen2.5-0.5B" in result.stdout
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_study_plan_json() -> None:
+    """study plan --json returns a plan payload."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
+        f.write(
+            "preset: quick\n"
+            "model:\n"
+            "  name: Qwen/Qwen2.5-0.5B\n"
+            "dataset:\n"
+            "  name: wikitext\n"
+            "  split: test\n"
+        )
+        path = f.name
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ollama_forge.cli", "study", "plan", path, "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        payload = json.loads(result.stdout)
+        assert payload["model_name"] == "Qwen/Qwen2.5-0.5B"
+        assert payload["strategies"][0]["strategy"] == "layer_removal"
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_study_run_help() -> None:
+    """study run --help lists config and output override options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "config" in result.stdout.lower()
+    assert "--output-dir" in result.stdout
+
+
+def test_study_optimize_help() -> None:
+    """study optimize --help lists strengths and metric options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "optimize", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--strengths" in result.stdout and "--metric" in result.stdout
+
+
+def test_study_init_help() -> None:
+    """study init --help lists output and preset options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "init", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--out" in result.stdout and "--preset" in result.stdout
+
+
+def test_study_interactive_help() -> None:
+    """study interactive --help lists non-interactive and run options."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "interactive", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "--non-interactive" in result.stdout and "--run" in result.stdout
+
+
+def test_study_ui_help() -> None:
+    """study ui --help is available."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "study", "ui", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "streamlit" in result.stdout.lower() or "ui" in result.stdout.lower()
+
+
+def test_study_init_writes_config() -> None:
+    """study init writes a starter config file."""
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "study.yaml"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ollama_forge.cli",
+                "study",
+                "init",
+                "--out",
+                str(out),
+                "--preset",
+                "quick",
+                "--model",
+                "Qwen/Qwen2.5-0.5B-Instruct",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert out.is_file()
+        text = out.read_text(encoding="utf-8")
+        assert "preset: quick" in text
+        assert "Qwen/Qwen2.5-0.5B-Instruct" in text
+
+
+def test_study_interactive_non_interactive_writes_config() -> None:
+    """study interactive --non-interactive writes a config using detected/default values."""
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "study.yaml"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ollama_forge.cli",
+                "study",
+                "interactive",
+                "--non-interactive",
+                "--out",
+                str(out),
+                "--preset",
+                "quick",
+                "--tier",
+                "tiny",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert out.is_file()
+        assert "Plan: ollama-forge study plan" in result.stdout
+
+
 def test_check_runs() -> None:
     """check command runs and prints ollama and huggingface status."""
     result = subprocess.run(

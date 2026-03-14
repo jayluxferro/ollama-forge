@@ -1,0 +1,11 @@
+preset: guardrail
+model:
+  name: Qwen/Qwen2.5-1.5B-Instruct
+  task: causal_lm
+  dtype: float16
+  device: auto
+dataset:
+  name: ./data/prompts.txt
+  split: train
+  text_column: text
+output_dir: study-results/guardrail-local

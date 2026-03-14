@@ -20,6 +20,17 @@ abliterate = [
   "protobuf>=3.20",
   "optuna>=3.0",
 ]
+study = [
+  "torch>=2.0",
+  "transformers>=5.2.0",
+  "accelerate>=0.25",
+  "datasets>=2.14",
+]
+study-ui = [
+  "streamlit>=1.28",
+  "pandas>=2.0",
+  "plotly>=5.18",
+]
 unsloth = ["unsloth"]
 security-eval-ui = ["streamlit>=1.28", "pandas>=2.0", "plotly>=5.18"]
 net = [

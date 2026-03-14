@@ -14,6 +14,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from urllib.request import urlopen
 
 # Import unsloth early (before transformers) so its optimizations apply.
@@ -30,6 +31,19 @@ from ollama_forge.hf_fetch import (
     list_gguf_files,
     pick_one_gguf,
     verify_gguf_checksum,
+)
+from ollama_forge.abliterate_reports import (
+    aggregate_reports,
+    build_benchmark_report,
+    build_run_report,
+    generate_latex_table,
+    load_report,
+    load_reports,
+    regenerate_report_exports,
+    report_html,
+    report_markdown,
+    save_contribution as save_abliterate_contribution,
+    save_report,
 )
 from ollama_forge.log import get_logger, set_verbose
 from ollama_forge.modelfile import (
@@ -2753,6 +2767,36 @@ def _cmd_security_eval_ui(parser: argparse.ArgumentParser, args: argparse.Namesp
     return 0
 
 
+def _cmd_study_ui(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Launch Streamlit UI for study workflows."""
+    app_dir = Path(__file__).resolve().parent
+    app_path = app_dir / "study_app.py"
+    if not app_path.exists():
+        print_actionable_error(
+            f"study UI app not found at {app_path}",
+            next_steps=[
+                "Ensure the study_app module is installed",
+                "Run: uv sync --extra study-ui",
+            ],
+        )
+        return 1
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.headless", "true"],
+            check=False,
+        )
+    except FileNotFoundError:
+        print_actionable_error(
+            "Streamlit not found",
+            next_steps=[
+                "Run: uv sync --extra study-ui",
+                "Then: ollama-forge study ui",
+            ],
+        )
+        return 1
+    return 0
+
+
 def _cmd_security_eval_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Compare two security-eval run JSON files side-by-side."""
     path_a = Path(getattr(args, "run_a", ""))
@@ -3892,6 +3936,14 @@ _ABLITERATE_RUN_DEFAULTS: dict[str, object] = {
     "template_from": None,
     "device": "auto",
     "gguf_converter": "auto",
+    "evaluate_harmful": None,
+    "evaluate_refusal_markers": None,
+    "evaluate_num_prompts": 50,
+    "report_file": None,
+    "no_report": False,
+    "contribute": False,
+    "contribute_dir": "community_results",
+    "contribute_notes": "",
 }
 
 _ABLITERATE_COMPUTE_DEFAULTS: dict[str, object] = {
@@ -3925,6 +3977,1992 @@ def _apply_profile_and_config(
         if current != default:
             continue
         setattr(args, key, value)
+
+
+def _abliterate_report_config(args: argparse.Namespace) -> dict[str, object]:
+    keys = [
+        "profile",
+        "num_instructions",
+        "agg",
+        "pos",
+        "paired",
+        "layer_fracs",
+        "num_directions",
+        "per_layer_directions",
+        "load_in_8bit",
+        "strength",
+        "atten_strength",
+        "mlp_strength",
+        "skip_begin_layers",
+        "skip_end_layers",
+        "norm_preserving",
+        "output_only",
+        "direction_index",
+        "strength_kernel",
+        "kernel_center_frac",
+        "kernel_width_frac",
+        "quant",
+        "gguf_converter",
+        "device",
+    ]
+    config: dict[str, object] = {}
+    for key in keys:
+        value = getattr(args, key, None)
+        if value is not None:
+            config[key] = value
+    return config
+
+
+def _save_abliterate_run_report(
+    args: argparse.Namespace,
+    *,
+    source_model: str | None,
+    resolved_model: str | None,
+    output_dir: Path,
+    checkpoint_dir: Path | None,
+    refusal_pt: Path | None,
+    gguf_path: Path | None,
+    gguf_exported: bool,
+    ollama_created: bool,
+    evaluation: dict | None,
+    status_label: str,
+) -> None:
+    if getattr(args, "no_report", False):
+        return
+    report = build_run_report(
+        source_model=source_model,
+        resolved_model=resolved_model,
+        ollama_model=getattr(args, "name", None) or "abliterated",
+        profile=getattr(args, "profile", None),
+        config=_abliterate_report_config(args),
+        artifacts={
+            "output_dir": str(output_dir),
+            "checkpoint_dir": str(checkpoint_dir) if checkpoint_dir else None,
+            "refusal_dir": str(refusal_pt) if refusal_pt else None,
+            "gguf_path": str(gguf_path) if gguf_path else None,
+        },
+        status={
+            "label": status_label,
+            "checkpoint_saved": bool(checkpoint_dir and checkpoint_dir.is_dir()),
+            "gguf_exported": gguf_exported,
+            "ollama_created": ollama_created,
+        },
+        evaluation=evaluation,
+        notes=getattr(args, "contribute_notes", "") or "",
+    )
+    report_path = Path(getattr(args, "report_file", None) or (output_dir / "abliterate-report.json"))
+    saved_path = save_report(report, report_path)
+    log.info("Saved abliterate report to %s", saved_path)
+    if getattr(args, "contribute", False):
+        contribution_path = save_abliterate_contribution(
+            report,
+            output_dir=getattr(args, "contribute_dir", None) or "community_results",
+            notes=getattr(args, "contribute_notes", "") or "",
+        )
+        log.info("Saved abliterate contribution to %s", contribution_path)
+
+
+def _print_abliterate_report_summary(report: dict[str, object]) -> None:
+    kind = report.get("report_kind")
+    if kind == "abliterate_benchmark":
+        primary = report.get("primary") or {}
+        compare = report.get("compare") or {}
+        primary_kpis = primary.get("kpis") or {}
+        print(f"Prompt set: {report.get('prompt_set')}")
+        print(f"Primary: {primary.get('model')} @ {primary.get('base_url')}")
+        if primary_kpis:
+            print(
+                "  ASR: {0:.1f}%  Refusal: {1:.1f}%".format(
+                    float(primary_kpis.get("asr_pct", 0.0)),
+                    float(primary_kpis.get("refusal_rate_pct", 0.0)),
+                )
+            )
+        if compare:
+            compare_kpis = compare.get("kpis") or {}
+            print(f"Compare: {compare.get('model')} @ {compare.get('base_url')}")
+            if compare_kpis:
+                print(
+                    "  ASR: {0:.1f}%  Refusal: {1:.1f}%".format(
+                        float(compare_kpis.get("asr_pct", 0.0)),
+                        float(compare_kpis.get("refusal_rate_pct", 0.0)),
+                    )
+                )
+    else:
+        evaluation = report.get("evaluation") or {}
+        status = report.get("status") or {}
+        print(f"Source model: {report.get('source_model')}")
+        print(f"Ollama model: {report.get('ollama_model')}")
+        print(f"Profile: {report.get('profile') or 'custom'}")
+        print(f"Status: {status.get('label')}")
+        print(f"Output dir: {(report.get('artifacts') or {}).get('output_dir')}")
+        if evaluation:
+            print(
+                "Evaluation: {0} / {1} refusals ({2:.1%})".format(
+                    int(evaluation.get("refusal_count", 0)),
+                    int(evaluation.get("total", 0)),
+                    float(evaluation.get("refusal_rate", 0.0)),
+                )
+            )
+
+
+def _cmd_abliterate_profiles(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_profiles import get_profiles
+
+    profiles = get_profiles()
+    if getattr(args, "json", False):
+        print(json.dumps(profiles, indent=2, sort_keys=True))
+        return 0
+    for name, values in profiles.items():
+        print(f"{name}: {values.get('description', '')}")
+        print(
+            "  instructions={0} agg={1} strength={2}/{3}/{4} norm_preserving={5} per_layer={6}".format(
+                values.get("num_instructions"),
+                values.get("agg"),
+                values.get("strength"),
+                values.get("atten_strength"),
+                values.get("mlp_strength"),
+                values.get("norm_preserving"),
+                values.get("per_layer_directions"),
+            )
+        )
+    return 0
+
+
+def _cmd_abliterate_informed_plan(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    try:
+        from ollama_forge.abliterate_informed import load_analysis_documents, recommend_abliterate_settings
+    except ImportError as e:
+        print_actionable_error("abliterate informed-plan failed to import", cause=str(e))
+        return 1
+    analysis_paths = getattr(args, "analysis", None) or []
+    if not analysis_paths:
+        print_actionable_error(
+            "pass at least one --analysis file",
+            next_steps=["Use outputs from `ollama-forge study analyze ... --output-file <file>`"],
+        )
+        return 1
+    try:
+        docs = load_analysis_documents(analysis_paths)
+        recommendation = recommend_abliterate_settings(docs)
+    except Exception as e:
+        print_actionable_error(
+            "abliterate informed-plan failed",
+            cause=str(e),
+            next_steps=["Ensure each analysis file is valid JSON from `ollama-forge study analyze`"],
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(recommendation, indent=2, sort_keys=True))
+    else:
+        print(f"profile: {recommendation['profile']}")
+        print(f"strength: {recommendation['strength']}")
+        print(f"atten_strength: {recommendation['atten_strength']}")
+        print(f"mlp_strength: {recommendation['mlp_strength']}")
+        print(f"per_layer_directions: {recommendation['per_layer_directions']}")
+        print(f"norm_preserving: {recommendation['norm_preserving']}")
+        print(f"strength_kernel: {recommendation['strength_kernel']}")
+        if recommendation.get("notes"):
+            print("notes:")
+            for note in recommendation["notes"]:
+                print(f"  - {note}")
+    return 0
+
+
+def _build_informed_run_args(
+    args: argparse.Namespace,
+    recommendation: dict[str, Any],
+    *,
+    analysis_files: list[str],
+    output_dir: str,
+    artifact_file: str,
+    report_file: str,
+    name: str,
+) -> argparse.Namespace:
+    run_args = argparse.Namespace(**_ABLITERATE_RUN_DEFAULTS)
+    run_args.model = getattr(args, "model", None)
+    run_args.name = name
+    run_args.output_dir = output_dir
+    run_args.harmful = getattr(args, "harmful", None)
+    run_args.harmless = getattr(args, "harmless", None)
+    run_args.harmful_dir = getattr(args, "harmful_dir", None)
+    run_args.harmless_dir = getattr(args, "harmless_dir", None)
+    run_args.llama_cpp_dir = getattr(args, "llama_cpp_dir", None)
+    run_args.template_from = getattr(args, "template_from", None)
+    run_args.device = getattr(args, "device", None) or "auto"
+    run_args.quant = getattr(args, "quant", None) or "Q4_K_M"
+    run_args.gguf_converter = getattr(args, "gguf_converter", None) or "auto"
+    run_args.contribute = getattr(args, "contribute", False)
+    run_args.contribute_dir = getattr(args, "contribute_dir", None) or "community_results"
+    run_args.contribute_notes = getattr(args, "contribute_notes", "") or ""
+    run_args.report_file = report_file
+    run_args.evaluate_harmful = getattr(args, "evaluate_harmful", None)
+    run_args.evaluate_refusal_markers = getattr(args, "evaluate_refusal_markers", None)
+    run_args.evaluate_num_prompts = getattr(args, "evaluate_num_prompts", 50)
+    run_args.profile = recommendation["profile"]
+    run_args.strength = recommendation["strength"]
+    run_args.atten_strength = recommendation["atten_strength"]
+    run_args.mlp_strength = recommendation["mlp_strength"]
+    run_args.per_layer_directions = recommendation["per_layer_directions"]
+    run_args.norm_preserving = recommendation["norm_preserving"]
+    run_args.strength_kernel = recommendation["strength_kernel"]
+    run_args.output_only = True
+    run_args.no_report = False
+    run_args.config = None
+    run_args._analysis_files = list(analysis_files)
+    run_args._artifact_file = artifact_file
+    return run_args
+
+
+def _cmd_abliterate_informed_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    try:
+        from ollama_forge.abliterate_informed import (
+            build_informed_run_artifact,
+            load_analysis_documents,
+            recommend_abliterate_settings,
+            save_informed_run_artifact,
+            update_informed_run_artifact,
+        )
+    except ImportError as e:
+        print_actionable_error("abliterate informed-run failed to import", cause=str(e))
+        return 1
+    analysis_paths = getattr(args, "analysis", None) or []
+    if not analysis_paths:
+        print_actionable_error(
+            "pass at least one --analysis file",
+            next_steps=["Use outputs from `ollama-forge study analyze ... --output-file <file>`"],
+        )
+        return 1
+    try:
+        analysis_docs = load_analysis_documents(analysis_paths)
+        recommendation = recommend_abliterate_settings(analysis_docs)
+    except Exception as e:
+        print_actionable_error(
+            "abliterate informed-run failed to load analysis",
+            cause=str(e),
+            next_steps=["Ensure analysis files are valid JSON from `ollama-forge study analyze`"],
+        )
+        return 1
+
+    output_dir = str(getattr(args, "output_dir", None) or Path.cwd())
+    artifact_path = str(getattr(args, "artifact_file", None) or (Path(output_dir) / "informed-run.json"))
+    report_path = str(getattr(args, "report_file", None) or (Path(output_dir) / "abliterate-report.json"))
+    run_args = _build_informed_run_args(
+        args,
+        recommendation,
+        analysis_files=[str(path) for path in analysis_paths],
+        output_dir=output_dir,
+        artifact_file=artifact_path,
+        report_file=report_path,
+        name=getattr(args, "name", None),
+    )
+
+    requested_run = {
+        "model": run_args.model,
+        "name": run_args.name,
+        "output_dir": run_args.output_dir,
+        "profile": run_args.profile,
+        "strength": run_args.strength,
+        "atten_strength": run_args.atten_strength,
+        "mlp_strength": run_args.mlp_strength,
+        "per_layer_directions": run_args.per_layer_directions,
+        "norm_preserving": run_args.norm_preserving,
+        "strength_kernel": run_args.strength_kernel,
+    }
+    artifact = build_informed_run_artifact(
+        analysis_docs=analysis_docs,
+        recommendation=recommendation,
+        requested_run=requested_run,
+    )
+    artifact_path_obj = Path(artifact_path)
+    save_informed_run_artifact(artifact, artifact_path_obj)
+
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "recommendation": recommendation,
+                    "artifact_file": str(artifact_path_obj),
+                    "run_args": {
+                        "profile": run_args.profile,
+                        "strength": run_args.strength,
+                        "atten_strength": run_args.atten_strength,
+                        "mlp_strength": run_args.mlp_strength,
+                        "per_layer_directions": run_args.per_layer_directions,
+                        "norm_preserving": run_args.norm_preserving,
+                        "strength_kernel": run_args.strength_kernel,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"Saved informed plan to {artifact_path}")
+    rc = _cmd_abliterate_run(parser, run_args)
+    report_path = Path(run_args.report_file) if run_args.report_file else ((Path(run_args.output_dir) if run_args.output_dir else Path.cwd()) / "abliterate-report.json")
+    updated = update_informed_run_artifact(
+        artifact,
+        run_status="success" if rc == 0 else "failed",
+        report_path=str(report_path) if report_path.is_file() else None,
+        report_payload=(json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None),
+    )
+    save_informed_run_artifact(updated, artifact_path_obj)
+    return rc
+
+
+def _cmd_abliterate_informed_refine(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    try:
+        from ollama_forge.abliterate_informed import recommend_followup_settings
+    except ImportError as e:
+        print_actionable_error("abliterate informed-refine failed to import", cause=str(e))
+        return 1
+    artifact_path = Path(getattr(args, "artifact", ""))
+    if not artifact_path.is_file():
+        print_actionable_error(
+            "artifact file not found",
+            cause=str(artifact_path),
+            next_steps=["Pass the JSON created by `ollama-forge abliterate informed-run`"],
+        )
+        return 1
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        recommendation = recommend_followup_settings(artifact)
+    except Exception as e:
+        print_actionable_error(
+            "abliterate informed-refine failed",
+            cause=str(e),
+            next_steps=["Ensure the artifact JSON is valid and contains a run report"],
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(recommendation, indent=2, sort_keys=True))
+    else:
+        print(f"profile: {recommendation.get('profile')}")
+        print(f"strength: {recommendation.get('strength')}")
+        print(f"atten_strength: {recommendation.get('atten_strength')}")
+        print(f"mlp_strength: {recommendation.get('mlp_strength')}")
+        print(f"per_layer_directions: {recommendation.get('per_layer_directions')}")
+        print(f"norm_preserving: {recommendation.get('norm_preserving')}")
+        print(f"strength_kernel: {recommendation.get('strength_kernel')}")
+        for note in recommendation.get("notes", []):
+            print(f"- {note}")
+    return 0
+
+
+def _cmd_abliterate_informed_attach_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    try:
+        from ollama_forge.abliterate_informed import save_informed_run_artifact, update_informed_run_artifact
+        from ollama_forge.study_eval_reports import compare_eval_reports, load_eval_report
+    except ImportError as e:
+        print_actionable_error("abliterate informed-attach-eval failed to import", cause=str(e))
+        return 1
+    artifact_path = Path(getattr(args, "artifact", ""))
+    eval_path = Path(getattr(args, "eval_report", ""))
+    if not artifact_path.is_file():
+        print_actionable_error("artifact file not found", cause=str(artifact_path))
+        return 1
+    if not eval_path.is_file():
+        print_actionable_error("eval report file not found", cause=str(eval_path))
+        return 1
+    compare_to = getattr(args, "compare_to", None)
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        eval_report = load_eval_report(eval_path)
+        comparison = None
+        if compare_to:
+            comparison = compare_eval_reports(load_eval_report(Path(compare_to)), eval_report)
+        updated = update_informed_run_artifact(
+            artifact,
+            run_status=artifact.get("run_status", "success"),
+            report_path=artifact.get("report_path"),
+            report_payload=artifact.get("report"),
+            benchmark_path=str(eval_path),
+            benchmark_payload=eval_report.raw,
+            eval_comparison=comparison,
+        )
+        save_informed_run_artifact(updated, artifact_path)
+    except Exception as e:
+        print_actionable_error("failed to attach eval report", cause=str(e))
+        return 1
+    print(f"Updated {artifact_path}")
+    return 0
+
+
+def _cmd_abliterate_informed_artifact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_informed_reports import load_informed_artifact, save_informed_artifact_export
+
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error("artifact file not found", cause=str(path))
+        return 1
+    try:
+        artifact = load_informed_artifact(path)
+    except Exception as e:
+        print_actionable_error("failed to load informed artifact", cause=str(e))
+        return 1
+    export = getattr(args, "export", None)
+    if export:
+        try:
+            save_informed_artifact_export(artifact, export)
+        except Exception as e:
+            print_actionable_error("failed to export informed artifact", cause=str(e))
+            return 1
+        print(f"Exported {export}")
+        if not getattr(args, "json", False):
+            return 0
+    if getattr(args, "json", False):
+        print(json.dumps(artifact, indent=2, sort_keys=True))
+    else:
+        recommendation = artifact.get("recommendation") or {}
+        print(f"run_status: {artifact.get('run_status')}")
+        print(f"profile: {recommendation.get('profile')}")
+        print(f"strength: {recommendation.get('strength')}")
+        print(f"has_report: {bool(artifact.get('report'))}")
+        print(f"has_benchmark: {bool(artifact.get('benchmark'))}")
+    return 0
+
+
+def _cmd_abliterate_informed_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_informed_reports import compare_informed_artifacts, load_informed_artifact
+
+    path_a = Path(getattr(args, "artifact_a", ""))
+    path_b = Path(getattr(args, "artifact_b", ""))
+    if not path_a.is_file() or not path_b.is_file():
+        missing = path_a if not path_a.is_file() else path_b
+        print_actionable_error("artifact file not found", cause=str(missing))
+        return 1
+    try:
+        payload = compare_informed_artifacts(load_informed_artifact(path_a), load_informed_artifact(path_b))
+    except Exception as e:
+        print_actionable_error("failed to compare informed artifacts", cause=str(e))
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for key, values in payload.items():
+            print(f"{key}: A={values.get('a')} B={values.get('b')}")
+    return 0
+
+
+def _cmd_abliterate_informed_pipeline(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_pipeline import (
+        InformedPipelineResult,
+        choose_pipeline_pass,
+        save_informed_pipeline_exports,
+        save_informed_pipeline_result,
+    )
+
+    result = InformedPipelineResult()
+    output_dir = Path(getattr(args, "output_dir", None) or f"abliterate-{getattr(args, 'name', 'informed')}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_path = Path(getattr(args, "pipeline_file", None) or (output_dir / "informed-pipeline.json"))
+
+    bundle_args = argparse.Namespace(
+        config=getattr(args, "study_config"),
+        modules=getattr(args, "modules", None),
+        output_file=str(getattr(args, "analysis_bundle", None) or (output_dir / "analysis-bundle.json")),
+        max_samples=getattr(args, "max_samples", None),
+        batch_size=getattr(args, "batch_size", None),
+        max_length=getattr(args, "max_length", None),
+        top_k=getattr(args, "top_k", None),
+        prompt=getattr(args, "prompt", None),
+        source_prompt=getattr(args, "source_prompt", None),
+        target_prompt=getattr(args, "target_prompt", None),
+        group_column=getattr(args, "group_column", None),
+        source_group=getattr(args, "source_group", None),
+        target_group=getattr(args, "target_group", None),
+        json=False,
+    )
+    rc = _cmd_study_analyze_bundle(parser, bundle_args)
+    result.add_stage("analysis_bundle", "success" if rc == 0 else "failed", output_file=bundle_args.output_file)
+    result.analysis_bundle = bundle_args.output_file
+    if rc != 0:
+        save_informed_pipeline_result(result, pipeline_path)
+        return rc
+
+    informed_args = argparse.Namespace(
+        analysis=[bundle_args.output_file],
+        model=getattr(args, "model"),
+        name=getattr(args, "name"),
+        output_dir=str(output_dir),
+        harmful=getattr(args, "harmful", None),
+        harmless=getattr(args, "harmless", None),
+        harmful_dir=getattr(args, "harmful_dir", None),
+        harmless_dir=getattr(args, "harmless_dir", None),
+        llama_cpp_dir=getattr(args, "llama_cpp_dir", None),
+        template_from=getattr(args, "template_from", None),
+        device=getattr(args, "device", None) or "auto",
+        quant=getattr(args, "quant", None) or "Q4_K_M",
+        gguf_converter=getattr(args, "gguf_converter", None) or "auto",
+        evaluate_harmful=getattr(args, "evaluate_harmful", None),
+        evaluate_refusal_markers=getattr(args, "evaluate_refusal_markers", None),
+        evaluate_num_prompts=getattr(args, "evaluate_num_prompts", 50),
+        report_file=str(getattr(args, "report_file", None) or (output_dir / "abliterate-report.json")),
+        artifact_file=str(getattr(args, "artifact_file", None) or (output_dir / "informed-run.json")),
+        contribute=getattr(args, "contribute", False),
+        contribute_dir=getattr(args, "contribute_dir", None) or "community_results",
+        contribute_notes=getattr(args, "contribute_notes", "") or "",
+        json=False,
+    )
+    rc = _cmd_abliterate_informed_run(parser, informed_args)
+    result.add_stage("informed_run", "success" if rc == 0 else "failed", artifact_file=informed_args.artifact_file)
+    result.informed_artifact = informed_args.artifact_file
+    result.run_report = informed_args.report_file
+    if rc != 0:
+        save_informed_pipeline_result(result, pipeline_path)
+        return rc
+
+    benchmark_preset = getattr(args, "benchmark_preset", None)
+    benchmark_output_json = None
+    benchmark_payload = None
+    eval_comparison_payload = None
+    if benchmark_preset:
+        benchmark_output_json = str(getattr(args, "benchmark_output_json", None) or (output_dir / "pipeline-benchmark.json"))
+        benchmark_args = argparse.Namespace(
+            preset=benchmark_preset,
+            model=getattr(args, "benchmark_model", None) or getattr(args, "name"),
+            base_url=getattr(args, "benchmark_base_url", None) or "http://127.0.0.1:11434",
+            output_json=benchmark_output_json,
+            output_csv=getattr(args, "benchmark_output_csv", None),
+            max_prompts=getattr(args, "benchmark_max_prompts", None),
+            timeout=getattr(args, "benchmark_timeout", 120.0),
+            save_history=False,
+            quiet=True,
+            json=False,
+            metric=getattr(args, "benchmark_metric", None),
+            dtype=getattr(args, "benchmark_dtype", None),
+            device=getattr(args, "benchmark_device", None),
+            text_column=getattr(args, "benchmark_text_column", None),
+            output_dir=getattr(args, "benchmark_output_dir", None),
+        )
+        benchmark_rc = _cmd_study_benchmark_run(parser, benchmark_args)
+        result.add_stage("benchmark", "success" if benchmark_rc == 0 else "failed", output_json=benchmark_output_json)
+        if benchmark_rc == 0:
+            result.benchmark_report = benchmark_output_json
+            if Path(benchmark_output_json).is_file():
+                benchmark_payload = json.loads(Path(benchmark_output_json).read_text(encoding="utf-8"))
+
+    compare_report = getattr(args, "compare_eval_report", None)
+    if compare_report and benchmark_output_json and Path(compare_report).is_file() and Path(benchmark_output_json).is_file():
+        try:
+            from ollama_forge.study_eval_reports import compare_eval_reports, load_eval_report
+
+            result.eval_comparison = compare_eval_reports(
+                load_eval_report(compare_report),
+                load_eval_report(benchmark_output_json),
+            )
+            eval_comparison_payload = result.eval_comparison
+            result.add_stage("eval_compare", "success", compare_report=compare_report, benchmark_report=benchmark_output_json)
+        except Exception as e:
+            result.add_stage("eval_compare", "failed", cause=str(e))
+
+    if benchmark_payload or eval_comparison_payload:
+        try:
+            from ollama_forge.abliterate_informed import update_informed_run_artifact, save_informed_run_artifact
+
+            informed_payload = json.loads(Path(informed_args.artifact_file).read_text(encoding="utf-8"))
+            informed_payload = update_informed_run_artifact(
+                informed_payload,
+                run_status=informed_payload.get("run_status", "success"),
+                report_path=informed_payload.get("report_path"),
+                report_payload=informed_payload.get("report"),
+                benchmark_path=benchmark_output_json if benchmark_payload else None,
+                benchmark_payload=benchmark_payload,
+                eval_comparison=eval_comparison_payload,
+            )
+            save_informed_run_artifact(informed_payload, informed_args.artifact_file)
+        except Exception as e:
+            result.add_stage("artifact_enrich", "failed", cause=str(e))
+        else:
+            result.add_stage("artifact_enrich", "success")
+
+    if getattr(args, "refine", False):
+        try:
+            from ollama_forge.abliterate_informed import recommend_followup_settings
+
+            artifact = json.loads(Path(informed_args.artifact_file).read_text(encoding="utf-8"))
+            result.refined_recommendation = recommend_followup_settings(artifact)
+            result.add_stage("refine", "success")
+        except Exception as e:
+            result.add_stage("refine", "failed", cause=str(e))
+
+    if getattr(args, "auto_refine_run", False) and result.refined_recommendation:
+        try:
+            from ollama_forge.abliterate_informed import (
+                build_informed_run_artifact,
+                load_analysis_documents,
+                save_informed_run_artifact,
+                update_informed_run_artifact,
+            )
+
+            second_output_dir = Path(getattr(args, "refine_output_dir", None) or (output_dir / "refined-pass"))
+            second_output_dir.mkdir(parents=True, exist_ok=True)
+            second_name = getattr(args, "refine_name", None) or f"{getattr(args, 'name')}{getattr(args, 'refine_name_suffix', '-refined')}"
+            second_artifact = str(second_output_dir / "informed-run.json")
+            second_report = str(second_output_dir / "abliterate-report.json")
+            second_run_args = _build_informed_run_args(
+                args,
+                result.refined_recommendation,
+                analysis_files=[bundle_args.output_file],
+                output_dir=str(second_output_dir),
+                artifact_file=second_artifact,
+                report_file=second_report,
+                name=second_name,
+            )
+            base_artifact = build_informed_run_artifact(
+                analysis_docs=load_analysis_documents([bundle_args.output_file]),
+                recommendation=result.refined_recommendation,
+                requested_run={
+                    "model": second_run_args.model,
+                    "name": second_run_args.name,
+                    "output_dir": second_run_args.output_dir,
+                    "profile": second_run_args.profile,
+                    "strength": second_run_args.strength,
+                    "atten_strength": second_run_args.atten_strength,
+                    "mlp_strength": second_run_args.mlp_strength,
+                    "per_layer_directions": second_run_args.per_layer_directions,
+                    "norm_preserving": second_run_args.norm_preserving,
+                    "strength_kernel": second_run_args.strength_kernel,
+                },
+            )
+            save_informed_run_artifact(base_artifact, second_artifact)
+            second_rc = _cmd_abliterate_run(parser, second_run_args)
+            second_report_path = Path(second_report)
+            updated_artifact = update_informed_run_artifact(
+                base_artifact,
+                run_status="success" if second_rc == 0 else "failed",
+                report_path=str(second_report_path) if second_report_path.is_file() else None,
+                report_payload=(json.loads(second_report_path.read_text(encoding="utf-8")) if second_report_path.is_file() else None),
+            )
+            if second_rc == 0 and benchmark_preset:
+                second_benchmark_json = str(second_output_dir / "pipeline-benchmark.json")
+                second_benchmark_args = argparse.Namespace(
+                    preset=benchmark_preset,
+                    model=getattr(args, "benchmark_model", None) or second_name,
+                    base_url=getattr(args, "benchmark_base_url", None) or "http://127.0.0.1:11434",
+                    output_json=second_benchmark_json,
+                    output_csv=None,
+                    max_prompts=getattr(args, "benchmark_max_prompts", None),
+                    timeout=getattr(args, "benchmark_timeout", 120.0),
+                    save_history=False,
+                    quiet=True,
+                    json=False,
+                    metric=getattr(args, "benchmark_metric", None),
+                    dtype=getattr(args, "benchmark_dtype", None),
+                    device=getattr(args, "benchmark_device", None),
+                    text_column=getattr(args, "benchmark_text_column", None),
+                    output_dir=getattr(args, "benchmark_output_dir", None),
+                )
+                second_benchmark_rc = _cmd_study_benchmark_run(parser, second_benchmark_args)
+                result.add_stage(
+                    "auto_refine_benchmark",
+                    "success" if second_benchmark_rc == 0 else "failed",
+                    output_json=second_benchmark_json,
+                )
+                if second_benchmark_rc == 0 and Path(second_benchmark_json).is_file():
+                    second_benchmark_payload = json.loads(Path(second_benchmark_json).read_text(encoding="utf-8"))
+                    updated_artifact = update_informed_run_artifact(
+                        updated_artifact,
+                        run_status=updated_artifact.get("run_status", "success"),
+                        report_path=updated_artifact.get("report_path"),
+                        report_payload=updated_artifact.get("report"),
+                        benchmark_path=second_benchmark_json,
+                        benchmark_payload=second_benchmark_payload,
+                    )
+                    result.second_pass_benchmark = second_benchmark_json
+                    if benchmark_output_json and Path(benchmark_output_json).is_file():
+                        from ollama_forge.study_eval_reports import compare_eval_reports, load_eval_report
+
+                        result.second_pass_benchmark_comparison = compare_eval_reports(
+                            load_eval_report(benchmark_output_json),
+                            load_eval_report(second_benchmark_json),
+                        )
+            save_informed_run_artifact(updated_artifact, second_artifact)
+            result.second_pass_artifact = second_artifact
+            result.second_pass_report = str(second_report_path) if second_report_path.is_file() else None
+            result.add_stage("auto_refine_run", "success" if second_rc == 0 else "failed", artifact_file=second_artifact)
+        except Exception as e:
+            result.add_stage("auto_refine_run", "failed", cause=str(e))
+
+    first_benchmark_payload = None
+    second_benchmark_payload = None
+    if result.benchmark_report and Path(result.benchmark_report).is_file():
+        first_benchmark_payload = json.loads(Path(result.benchmark_report).read_text(encoding="utf-8"))
+    if result.second_pass_benchmark and Path(result.second_pass_benchmark).is_file():
+        second_benchmark_payload = json.loads(Path(result.second_pass_benchmark).read_text(encoding="utf-8"))
+    result.selected_pass, result.selection_reason = choose_pipeline_pass(
+        first_benchmark=first_benchmark_payload,
+        second_benchmark=second_benchmark_payload,
+    )
+
+    save_informed_pipeline_result(result, pipeline_path)
+    save_informed_pipeline_exports(result, output_dir)
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Saved pipeline result to {pipeline_path}")
+        for stage in result.stages:
+            print(f"{stage.name}: {stage.status}")
+        if result.selected_pass:
+            print(f"selected_pass: {result.selected_pass}")
+    return 0
+
+
+def _cmd_abliterate_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error(
+            "report file not found",
+            cause=str(path),
+            next_steps=["Pass a JSON file created by abliterate run --report-file or abliterate benchmark"],
+        )
+        return 1
+    try:
+        report = load_report(path)
+    except (OSError, json.JSONDecodeError) as e:
+        print_actionable_error(
+            "failed to load report JSON",
+            cause=str(e),
+            next_steps=["Ensure the file is valid JSON"],
+        )
+        return 1
+    if report.get("report_kind") == "abliterate_contribution" and isinstance(report.get("report"), dict):
+        report = report["report"]
+    export = getattr(args, "export", None)
+    if export:
+        export_path = Path(export)
+        if export_path.suffix.lower() in (".md", ".markdown"):
+            export_path.write_text(report_markdown(report), encoding="utf-8")
+        elif export_path.suffix.lower() in (".html", ".htm"):
+            export_path.write_text(report_html(report), encoding="utf-8")
+        elif export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        else:
+            print_actionable_error("unsupported export format", cause=str(export_path), next_steps=["Use .md, .html, or .json"])
+            return 1
+        print(f"Exported {export_path}")
+        if not getattr(args, "json", False):
+            return 0
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_abliterate_report_summary(report)
+    return 0
+
+
+def _cmd_abliterate_regenerate_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error("report file not found", cause=str(path))
+        return 1
+    try:
+        report = load_report(path)
+        if report.get("report_kind") == "abliterate_contribution" and isinstance(report.get("report"), dict):
+            report = report["report"]
+        exports = regenerate_report_exports(report, getattr(args, "output_dir", None) or path.parent)
+    except Exception as e:
+        print_actionable_error("abliterate regenerate-report failed", cause=str(e))
+        return 1
+    for key, value in exports.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def _cmd_abliterate_pipeline_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_pipeline import (
+        load_informed_pipeline_result,
+        pipeline_html,
+        pipeline_markdown,
+    )
+
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error(
+            "pipeline file not found",
+            cause=str(path),
+            next_steps=["Pass the JSON created by `ollama-forge abliterate informed-pipeline`"],
+        )
+        return 1
+    try:
+        result = load_informed_pipeline_result(path)
+    except Exception as e:
+        print_actionable_error("failed to load pipeline JSON", cause=str(e))
+        return 1
+
+    export = getattr(args, "export", None)
+    if export:
+        export_path = Path(export)
+        if export_path.suffix.lower() in (".md", ".markdown"):
+            export_path.write_text(pipeline_markdown(result), encoding="utf-8")
+        elif export_path.suffix.lower() in (".html", ".htm"):
+            export_path.write_text(pipeline_html(result), encoding="utf-8")
+        elif export_path.suffix.lower() == ".json":
+            export_path.write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        else:
+            print_actionable_error("unsupported export format", cause=str(export_path), next_steps=["Use .md, .html, or .json"])
+            return 1
+        print(f"Exported {export_path}")
+        return 0
+
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"selected_pass: {result.selected_pass}")
+    if result.selection_reason:
+        print(f"selection_reason: {result.selection_reason}")
+    for stage in result.stages:
+        print(f"{stage.name}: {stage.status}")
+    return 0
+
+
+def _cmd_abliterate_pipeline_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.abliterate_pipeline import (
+        compare_pipeline_results,
+        load_informed_pipeline_result,
+        save_pipeline_comparison,
+    )
+
+    path_a = Path(getattr(args, "pipeline_a", ""))
+    path_b = Path(getattr(args, "pipeline_b", ""))
+    if not path_a.is_file() or not path_b.is_file():
+        missing = path_a if not path_a.is_file() else path_b
+        print_actionable_error("pipeline file not found", cause=str(missing))
+        return 1
+    try:
+        payload = compare_pipeline_results(
+            load_informed_pipeline_result(path_a),
+            load_informed_pipeline_result(path_b),
+        )
+    except Exception as e:
+        print_actionable_error("failed to compare pipeline JSON", cause=str(e))
+        return 1
+    export = getattr(args, "export", None)
+    if export:
+        try:
+            save_pipeline_comparison(payload, export)
+        except Exception as e:
+            print_actionable_error("failed to export pipeline comparison", cause=str(e))
+            return 1
+        print(f"Exported {export}")
+        if not getattr(args, "json", False):
+            return 0
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    for key, values in payload.items():
+        print(f"{key}: A={values.get('a')} B={values.get('b')}")
+    return 0
+
+
+def _cmd_abliterate_aggregate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    records = load_reports(getattr(args, "dir", "community_results"))
+    if not records:
+        print("No abliterate reports found.")
+        return 0
+    aggregated = aggregate_reports(records)
+    if getattr(args, "format", "summary") == "json":
+        print(json.dumps(aggregated, indent=2, sort_keys=True))
+        return 0
+    if getattr(args, "format", "summary") == "latex":
+        print(
+            generate_latex_table(
+                aggregated,
+                metric=getattr(args, "metric", "refusal_rate"),
+                min_runs=getattr(args, "min_runs", 1),
+            )
+        )
+        return 0
+    metric_name = getattr(args, "metric", "refusal_rate")
+    min_runs = getattr(args, "min_runs", 1)
+    print("Model | Profile | Mean | Std | Runs")
+    for model_key in sorted(aggregated):
+        for profile_key in sorted(aggregated[model_key]):
+            summary = aggregated[model_key][profile_key]
+            if int(summary.get("n_runs", 0)) < min_runs:
+                continue
+            metric_summary = summary.get(metric_name)
+            if not metric_summary:
+                continue
+            print(
+                "{0} | {1} | {2:.4f} | {3:.4f} | {4}".format(
+                    model_key,
+                    profile_key,
+                    float(metric_summary["mean"]),
+                    float(metric_summary["std"]),
+                    int(summary["n_runs"]),
+                )
+            )
+    return 0
+
+
+def _cmd_abliterate_benchmark(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    try:
+        from ollama_forge.security_eval.run import run_eval
+    except ImportError as e:
+        print_actionable_error(
+            "abliterate benchmark requires security-eval support",
+            cause=str(e),
+            next_steps=["Run: ollama-forge security-eval run <prompt_set> --model <name>"],
+        )
+        return 1
+
+
+def _cmd_abliterate_ui(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Launch Streamlit UI for abliterate workflows."""
+    app_dir = Path(__file__).resolve().parent
+    app_path = app_dir / "abliterate_app.py"
+    if not app_path.exists():
+        print_actionable_error(
+            f"abliterate UI app not found at {app_path}",
+            next_steps=[
+                "Ensure the abliterate_app module is installed",
+                "Run: uv sync --extra study-ui",
+            ],
+        )
+        return 1
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.headless", "true"],
+            check=False,
+        )
+    except FileNotFoundError:
+        print_actionable_error(
+            "Streamlit not found",
+            next_steps=[
+                "Run: uv sync --extra study-ui",
+                "Then: ollama-forge abliterate ui",
+            ],
+        )
+        return 1
+    return 0
+    prompt_set = Path(getattr(args, "prompt_set", ""))
+    if not prompt_set.is_file():
+        print_actionable_error(
+            "prompt set not found",
+            cause=str(prompt_set),
+            next_steps=["Pass a .txt or .jsonl prompt set path"],
+        )
+        return 1
+    output_dir = Path(getattr(args, "output_dir", None) or tempfile.mkdtemp(prefix="ollama-forge-benchmark-"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        primary_json = output_dir / "primary-run.json"
+        primary = run_eval(
+            prompt_set,
+            base_url=getattr(args, "base_url", "http://127.0.0.1:11434"),
+            model=getattr(args, "model", "llama3.2"),
+            output_json=primary_json,
+            save_to_history=getattr(args, "save_history", False),
+            max_prompts=getattr(args, "max_prompts", None),
+            system=getattr(args, "system", None),
+            timeout=getattr(args, "timeout", 120.0),
+            verbose=not getattr(args, "quiet", False),
+        )
+        compare = None
+        if getattr(args, "compare_model", None):
+            compare_json = output_dir / "compare-run.json"
+            compare = run_eval(
+                prompt_set,
+                base_url=getattr(args, "compare_base_url", None) or getattr(args, "base_url", "http://127.0.0.1:11434"),
+                model=getattr(args, "compare_model"),
+                output_json=compare_json,
+                save_to_history=getattr(args, "save_history", False),
+                max_prompts=getattr(args, "max_prompts", None),
+                system=getattr(args, "compare_system", None) or getattr(args, "system", None),
+                timeout=getattr(args, "timeout", 120.0),
+                verbose=not getattr(args, "quiet", False),
+            )
+        report = build_benchmark_report(
+            prompt_set=str(prompt_set),
+            output_dir=str(output_dir),
+            primary={
+                "model": primary.get("model"),
+                "base_url": primary.get("base_url"),
+                "kpis": primary.get("kpis"),
+                "run_json": str(primary_json),
+            },
+            compare=(
+                {
+                    "model": compare.get("model"),
+                    "base_url": compare.get("base_url"),
+                    "kpis": compare.get("kpis"),
+                    "run_json": str(output_dir / "compare-run.json"),
+                }
+                if compare
+                else None
+            ),
+        )
+        report_path = Path(getattr(args, "report_file", None) or (output_dir / "benchmark-report.json"))
+        save_report(report, report_path)
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            _print_abliterate_report_summary(report)
+            print(f"Saved benchmark report to {report_path}")
+        return 0
+    except Exception as e:
+        print_actionable_error(
+            "abliterate benchmark failed",
+            cause=str(e),
+            next_steps=["Ensure the target model is reachable and the prompt set is valid"],
+        )
+        return 1
+
+
+def _cmd_study_presets(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_presets import list_study_presets
+
+    presets = list_study_presets()
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                [
+                    {
+                        "key": preset.key,
+                        "name": preset.name,
+                        "description": preset.description,
+                        "strategies": preset.strategies,
+                        "metrics": preset.metrics,
+                        "max_samples": preset.max_samples,
+                        "batch_size": preset.batch_size,
+                        "max_length": preset.max_length,
+                        "tags": preset.tags,
+                    }
+                    for preset in presets
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    for preset in presets:
+        print(f"{preset.key}: {preset.name}")
+        print(f"  {preset.description}")
+        print(
+            "  strategies={0} metrics={1} max_samples={2} batch_size={3} max_length={4}".format(
+                ",".join(item["name"] for item in preset.strategies),
+                ",".join(preset.metrics),
+                preset.max_samples,
+                preset.batch_size,
+                preset.max_length,
+            )
+        )
+    return 0
+
+
+def _cmd_study_strategies(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_strategies import list_strategies
+
+    strategies = list_strategies()
+    if getattr(args, "json", False):
+        print(json.dumps(list(strategies), indent=2))
+    else:
+        for name in strategies:
+            print(name)
+    return 0
+
+
+def _cmd_study_validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_config import StudyConfig
+
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+    except Exception as e:
+        print_actionable_error(
+            "study config validation failed",
+            cause=str(e),
+            next_steps=["Check the YAML/JSON format and preset names", "Run: ollama-forge study presets"],
+        )
+        return 1
+    payload = config.to_dict()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Model: {config.model.name}")
+        print(f"Dataset: {config.dataset.name}:{config.dataset.split}")
+        print(f"Strategies: {', '.join(item.name for item in config.strategies)}")
+        print(f"Output dir: {config.output_dir}")
+    return 0
+
+
+def _cmd_study_plan(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_config import StudyConfig
+    from ollama_forge.study_runner import plan_study
+
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+        plan = plan_study(config)
+    except Exception as e:
+        print_actionable_error(
+            "study planning failed",
+            cause=str(e),
+            next_steps=["Check the config file", "Run: ollama-forge study validate <config>"],
+        )
+        return 1
+    payload = plan.to_dict()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Model: {payload['model_name']}")
+        print(f"Dataset: {payload['dataset_name']}")
+        print(f"Metrics: {', '.join(payload['metrics'])}")
+        print(f"Output dir: {payload['output_dir']}")
+        print("Strategies:")
+        for item in payload["strategies"]:
+            print(f"  - {item['strategy']}: {item['params']}")
+    return 0
+
+
+def _cmd_study_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_config import StudyConfig
+    from ollama_forge.study_runner import run_study
+
+    try:
+        from ollama_forge.study_runtime import StudyEvaluator, load_study_dataset, load_study_model
+    except ImportError as e:
+        print_actionable_error(
+            "study run requires optional study dependencies",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra study", "Then: ollama-forge study run <config>"],
+        )
+        return 1
+
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+        if getattr(args, "output_dir", None):
+            config.output_dir = getattr(args, "output_dir")
+        report = run_study(
+            config,
+            model_loader=load_study_model,
+            dataset_loader=load_study_dataset,
+            evaluator_factory=StudyEvaluator,
+        )
+    except Exception as e:
+        print_actionable_error(
+            "study run failed",
+            cause=str(e),
+            next_steps=[
+                "Check the model id, dataset config, and strategy list",
+                "Run: ollama-forge study validate <config>",
+                "Ensure study deps are installed: uv sync --extra study",
+            ],
+        )
+        return 1
+
+    output_root = Path(config.output_dir)
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Model: {report.model_name}")
+        print(f"Baseline: {report.baseline_metrics}")
+        print(f"Results: {len(report.results)}")
+        print(f"Saved: {output_root / 'study-results.json'}")
+        print(f"Saved: {output_root / 'study-results.csv'}")
+        print(f"Saved: {output_root / 'study-summary.txt'}")
+        impact_plot = output_root / "study-impact.png"
+        if impact_plot.is_file():
+            print(f"Saved: {impact_plot}")
+    return 0
+
+
+def _cmd_study_models(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_model_presets import (
+        detect_hardware_tier,
+        format_hardware_info,
+        list_model_presets,
+        recommended_model_presets,
+    )
+
+    tier = getattr(args, "tier", None)
+    recommend = getattr(args, "recommend", False)
+    if recommend:
+        detected_tier, info = detect_hardware_tier()
+        tier = tier or detected_tier
+        presets = recommended_model_presets(tier=tier, limit=getattr(args, "limit", 5))
+    else:
+        detected_tier, info = detect_hardware_tier()
+        presets = list_model_presets(tier=tier)
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "requested_tier": tier,
+                    "detected_tier": detected_tier,
+                    "hardware": info,
+                    "models": [preset.__dict__ for preset in presets],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"Detected tier: {detected_tier} ({format_hardware_info(info)})")
+    if tier:
+        print(f"Filter tier: {tier}")
+    for preset in presets:
+        quant = f" quant={preset.recommended_quantization}" if preset.recommended_quantization else ""
+        gated = " gated" if preset.gated else ""
+        print(f"{preset.hf_id} [{preset.tier}] {preset.params} dtype={preset.recommended_dtype}{quant}{gated}")
+        print(f"  {preset.description}")
+    return 0
+
+
+def _cmd_study_analysis_modules(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_analysis import available_analysis_modules
+
+    modules = list(available_analysis_modules())
+    if getattr(args, "json", False):
+        print(json.dumps(modules, indent=2))
+    else:
+        for module in modules:
+            print(module)
+    return 0
+
+
+def _run_study_analysis_module(config, handle, dataset, module_name: str, args: argparse.Namespace):
+    from ollama_forge.study_analysis import (
+        analyze_activation_probe,
+        analyze_activation_patching,
+        analyze_causal_patching,
+        analyze_concept_geometry,
+        analyze_conditional_similarity,
+        analyze_cross_layer_similarity,
+        analyze_defense_robustness,
+        analyze_logit_lens,
+        analyze_residual_stream,
+        analyze_steering_vectors,
+        collect_grouped_layer_vectors,
+        collect_layer_vectors,
+        trace_causal_layers,
+    )
+    from ollama_forge.study_architecture import detect_architecture_profile
+
+    if module_name == "causal_tracing":
+        prompt = getattr(args, "prompt", None)
+        if not prompt:
+            limit = min(len(dataset), 1)
+            if limit == 0:
+                raise ValueError("Dataset is empty; pass --prompt for causal tracing")
+            row = dataset[0]
+            prompt = row.get(config.dataset.text_column) if isinstance(row, dict) else row[config.dataset.text_column]
+        return trace_causal_layers(handle, str(prompt), max_length=getattr(args, "max_length", None) or config.max_length)
+
+    if module_name == "causal_patching":
+        source_prompt = getattr(args, "source_prompt", None)
+        target_prompt = getattr(args, "target_prompt", None)
+        if not source_prompt or not target_prompt:
+            if len(dataset) < 2:
+                raise ValueError("causal_patching requires --source-prompt and --target-prompt when dataset has fewer than 2 rows")
+            row0 = dataset[0]
+            row1 = dataset[1]
+            source_prompt = source_prompt or (row0.get(config.dataset.text_column) if isinstance(row0, dict) else row0[config.dataset.text_column])
+            target_prompt = target_prompt or (row1.get(config.dataset.text_column) if isinstance(row1, dict) else row1[config.dataset.text_column])
+        return analyze_causal_patching(
+            handle,
+            source_prompt=str(source_prompt),
+            target_prompt=str(target_prompt),
+            max_length=getattr(args, "max_length", None) or config.max_length,
+        )
+
+    if module_name == "architecture_profile":
+        return detect_architecture_profile(handle, model_name=config.model.name)
+
+    if module_name in {
+        "conditional_similarity",
+        "activation_patching",
+        "steering_vectors",
+        "concept_geometry",
+        "defense_robustness",
+    }:
+        group_column = getattr(args, "group_column", None) or config.dataset.label_column
+        grouped = collect_grouped_layer_vectors(
+            handle,
+            dataset,
+            group_column=group_column,
+            text_column=config.dataset.text_column,
+            max_samples=getattr(args, "max_samples", None) or config.dataset.max_samples,
+            batch_size=getattr(args, "batch_size", None) or config.batch_size,
+            max_length=getattr(args, "max_length", None) or config.max_length,
+        )
+        if module_name == "conditional_similarity":
+            return analyze_conditional_similarity(grouped)
+        if module_name == "activation_patching":
+            source_group = getattr(args, "source_group", None)
+            target_group = getattr(args, "target_group", None)
+            if not source_group or not target_group:
+                raise ValueError("activation_patching requires --source-group and --target-group")
+            return analyze_activation_patching(grouped, source_group=source_group, target_group=target_group)
+        if module_name == "steering_vectors":
+            return analyze_steering_vectors(grouped)
+        if module_name == "concept_geometry":
+            return analyze_concept_geometry(grouped)
+        return analyze_defense_robustness(grouped)
+
+    vectors = collect_layer_vectors(
+        handle,
+        dataset,
+        text_column=config.dataset.text_column,
+        max_samples=getattr(args, "max_samples", None) or config.dataset.max_samples,
+        batch_size=getattr(args, "batch_size", None) or config.batch_size,
+        max_length=getattr(args, "max_length", None) or config.max_length,
+    )
+    if module_name == "activation_probe":
+        return analyze_activation_probe(vectors)
+    if module_name == "cross_layer_similarity":
+        return analyze_cross_layer_similarity(vectors)
+    if module_name == "logit_lens":
+        return analyze_logit_lens(handle, vectors, top_k=getattr(args, "top_k", None) or 5)
+    return analyze_residual_stream(vectors)
+
+
+def _cmd_study_analyze_bundle(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from ollama_forge.study_analysis import available_analysis_modules
+    from ollama_forge.study_analysis_bundle import build_analysis_bundle, save_analysis_bundle
+    from ollama_forge.study_config import StudyConfig
+
+    try:
+        from ollama_forge.study_runtime import load_study_dataset, load_study_model
+    except ImportError as e:
+        print_actionable_error(
+            "study analyze-bundle requires optional study dependencies",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra study", "Then: ollama-forge study analyze-bundle <config>"],
+        )
+        return 1
+
+    module_list = getattr(args, "modules", None)
+    if module_list:
+        modules = [item.strip() for item in module_list.split(",") if item.strip()]
+    else:
+        modules = list(available_analysis_modules())
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+        handle = load_study_model(config.model)
+        dataset = load_study_dataset(config.dataset)
+        results = {}
+        for module_name in modules:
+            result = _run_study_analysis_module(config, handle, dataset, module_name, args)
+            results[module_name] = asdict(result)
+        bundle = build_analysis_bundle(config_path=str(getattr(args, "config")), modules=modules, results=results)
+        output_path = Path(getattr(args, "output_file", None) or (Path(config.output_dir) / "analysis-bundle.json"))
+        save_analysis_bundle(bundle, output_path)
+    except Exception as e:
+        print_actionable_error(
+            "study analyze-bundle failed",
+            cause=str(e),
+            next_steps=["Check the config and optional prompt/group arguments"],
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(bundle, indent=2, sort_keys=True))
+    else:
+        print(f"Saved bundle: {output_path}")
+        print(f"Modules: {', '.join(modules)}")
+    return 0
+
+
+def _cmd_study_analyze(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_config import StudyConfig
+
+    try:
+        from ollama_forge.study_analysis import save_analysis_result
+        from ollama_forge.study_runtime import load_study_dataset, load_study_model
+    except ImportError as e:
+        print_actionable_error(
+            "study analyze requires optional study dependencies",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra study", "Then: ollama-forge study analyze <config> --module <name>"],
+        )
+        return 1
+
+    module_name = getattr(args, "module", None)
+    if module_name not in (
+        "activation_probe",
+        "cross_layer_similarity",
+        "logit_lens",
+        "residual_stream",
+        "causal_tracing",
+        "conditional_similarity",
+        "activation_patching",
+        "causal_patching",
+        "steering_vectors",
+        "concept_geometry",
+        "architecture_profile",
+        "defense_robustness",
+    ):
+        print_actionable_error(
+            "unknown analysis module",
+            cause=str(module_name),
+            next_steps=["Run: ollama-forge study analysis-modules"],
+        )
+        return 1
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+        handle = load_study_model(config.model)
+        dataset = load_study_dataset(config.dataset)
+        result = _run_study_analysis_module(config, handle, dataset, module_name, args)
+        output_dir = Path(getattr(args, "output_dir", None) or config.output_dir)
+        output_path = Path(getattr(args, "output_file", None) or (output_dir / f"{module_name}.json"))
+        save_analysis_result(result, output_path)
+    except Exception as e:
+        print_actionable_error(
+            "study analysis failed",
+            cause=str(e),
+            next_steps=[
+                "Check the model and dataset configuration",
+                "Run: ollama-forge study validate <config>",
+                "Ensure study deps are installed: uv sync --extra study",
+            ],
+        )
+        return 1
+    if getattr(args, "json", False):
+        from dataclasses import asdict
+
+        print(json.dumps(asdict(result), indent=2, sort_keys=True))
+    else:
+        print(f"Module: {module_name}")
+        print(f"Saved: {output_path}")
+    return 0
+
+
+def _cmd_study_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_reports import load_study_report
+
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error(
+            "study report file not found",
+            cause=str(path),
+            next_steps=["Pass the study-results.json file produced by `ollama-forge study run`"],
+        )
+        return 1
+    try:
+        report = load_study_report(path)
+    except Exception as e:
+        print_actionable_error("failed to load study report", cause=str(e), next_steps=["Ensure the file is valid JSON"])
+        return 1
+    export_path = getattr(args, "export", None)
+    if export_path:
+        export_target = Path(export_path)
+        if export_target.suffix.lower() in (".md", ".markdown"):
+            report.save_markdown(export_target)
+        elif export_target.suffix.lower() in (".html", ".htm"):
+            report.save_html(export_target)
+        elif export_target.suffix.lower() == ".json":
+            report.save_json(export_target)
+        elif export_target.suffix.lower() == ".csv":
+            report.save_csv(export_target)
+        else:
+            print_actionable_error("unsupported export format", cause=str(export_target), next_steps=["Use .md, .html, .json, or .csv"])
+            return 1
+        print(f"Exported {export_target}")
+        if not getattr(args, "json", False):
+            return 0
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    for line in report.summary_lines():
+        print(line)
+    if report.results:
+        print("Top components:")
+        for item in report.results[: min(10, len(report.results))]:
+            print(f"  {item.strategy} {item.component} {item.metrics}")
+    return 0
+
+
+def _cmd_study_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_reports import (
+        compare_study_reports,
+        load_study_report,
+        save_study_report_comparison,
+    )
+
+    path_a = Path(getattr(args, "report_a", ""))
+    path_b = Path(getattr(args, "report_b", ""))
+    if not path_a.is_file() or not path_b.is_file():
+        missing = path_a if not path_a.is_file() else path_b
+        print_actionable_error(
+            "study report file not found",
+            cause=str(missing),
+            next_steps=["Pass two study-results.json files produced by `ollama-forge study run`"],
+        )
+        return 1
+    try:
+        report_a = load_study_report(path_a)
+        report_b = load_study_report(path_b)
+    except Exception as e:
+        print_actionable_error("failed to load study reports", cause=str(e), next_steps=["Ensure both files are valid JSON"])
+        return 1
+    payload = compare_study_reports(report_a, report_b)
+    export = getattr(args, "export", None)
+    if export:
+        try:
+            save_study_report_comparison(payload, export)
+        except Exception as e:
+            print_actionable_error("failed to export study comparison", cause=str(e))
+            return 1
+        print(f"Exported {export}")
+        if not getattr(args, "json", False):
+            return 0
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"A: {payload['model_a']}")
+    print(f"B: {payload['model_b']}")
+    for metric, values in payload["baseline_metrics"].items():
+        print(f"{metric}: A={values.get('a')} B={values.get('b')}")
+    print(f"results: A={len(report_a.results)} B={len(report_b.results)}")
+    return 0
+
+
+def _cmd_study_contribute(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_community import save_study_contribution
+    from ollama_forge.study_reports import load_study_report
+
+    path = Path(getattr(args, "report", ""))
+    if not path.is_file():
+        print_actionable_error("study report file not found", cause=str(path))
+        return 1
+    try:
+        report = load_study_report(path)
+        saved = save_study_contribution(
+            report,
+            source_report=str(path),
+            output_dir=getattr(args, "dir", None) or "study_results_community",
+            notes=getattr(args, "notes", "") or "",
+        )
+    except Exception as e:
+        print_actionable_error("study contribute failed", cause=str(e))
+        return 1
+    print(f"Saved {saved}")
+    return 0
+
+
+def _cmd_study_aggregate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_community import aggregate_study_contributions, load_study_contributions
+
+    records = load_study_contributions(getattr(args, "dir", None) or "study_results_community")
+    if not records:
+        print("No study contributions found.")
+        return 0
+    payload = aggregate_study_contributions(records)
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    for model_name, summary in sorted(payload.items()):
+        print(model_name)
+        print(f"  n_reports={summary['n_reports']}")
+        for key, value in sorted(summary.items()):
+            if key == "n_reports":
+                continue
+            print(f"  {key}: mean={value['mean']:.4f} std={value['std']:.4f} n={value['n']}")
+    return 0
+
+
+def _cmd_study_regenerate_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_reports import load_study_report
+
+    path = Path(getattr(args, "path", ""))
+    if not path.is_file():
+        print_actionable_error("study report file not found", cause=str(path))
+        return 1
+    try:
+        report = load_study_report(path)
+        output_dir = Path(getattr(args, "output_dir", None) or path.parent)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report.save_json(output_dir / "study-results.json")
+        report.save_csv(output_dir / "study-results.csv")
+        report.save_summary(output_dir / "study-summary.txt")
+        report.save_markdown(output_dir / "study-report.md")
+        report.save_html(output_dir / "study-report.html")
+        try:
+            report.plot_impact(output_dir / "study-impact.png")
+        except (ImportError, ValueError):
+            pass
+    except Exception as e:
+        print_actionable_error("study regenerate-report failed", cause=str(e))
+        return 1
+    print(f"Regenerated exports in {output_dir}")
+    return 0
+
+
+def _study_default_model_for_tier(tier: str) -> str:
+    from ollama_forge.study_model_presets import recommended_model_presets
+
+    presets = recommended_model_presets(tier=tier, limit=1)
+    return presets[0].hf_id if presets else "distilgpt2"
+
+
+def _cmd_study_init(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_presets import get_study_preset
+
+    try:
+        import yaml
+    except ImportError as e:
+        print_actionable_error("study init requires pyyaml", cause=str(e), next_steps=["Install PyYAML"])
+        return 1
+
+    preset_name = getattr(args, "preset", None) or "quick"
+    try:
+        preset = get_study_preset(preset_name)
+    except KeyError as e:
+        print_actionable_error("unknown study preset", cause=str(e), next_steps=["Run: ollama-forge study presets"])
+        return 1
+
+    model_name = getattr(args, "model", None) or _study_default_model_for_tier(getattr(args, "tier", None) or "tiny")
+    dataset_name = getattr(args, "dataset", None) or "wikitext"
+    dataset_subset = getattr(args, "dataset_subset", None) or "wikitext-2-raw-v1"
+    dataset_split = getattr(args, "dataset_split", None) or "test"
+    output_dir = getattr(args, "output_dir", None) or "study-results"
+    config = {
+        "preset": preset.key,
+        "model": {
+            "name": model_name,
+            "task": getattr(args, "task", None) or "causal_lm",
+            "dtype": getattr(args, "dtype", None) or "float16",
+            "device": getattr(args, "device", None) or "auto",
+        },
+        "dataset": {
+            "name": dataset_name,
+            "subset": dataset_subset,
+            "split": dataset_split,
+            "text_column": getattr(args, "text_column", None) or "text",
+            "label_column": getattr(args, "label_column", None) or "label",
+        },
+        "output_dir": output_dir,
+    }
+    out_path = Path(getattr(args, "out", None) or "study.yaml")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    print(f"Wrote {out_path}")
+    return 0
+
+
+def _cmd_study_interactive(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_model_presets import detect_hardware_tier, list_model_presets, recommended_model_presets
+    from ollama_forge.study_presets import list_study_presets
+
+    non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
+    detected_tier, _info = detect_hardware_tier()
+    tier = getattr(args, "tier", None) or (detected_tier if non_interactive else _prompt_with_default("Hardware tier", detected_tier))
+    tier = tier.lower()
+
+    recommended = recommended_model_presets(tier=tier, limit=3)
+    default_model = getattr(args, "model", None) or (recommended[-1].hf_id if recommended else _study_default_model_for_tier(tier))
+    if non_interactive:
+        model_name = default_model
+    else:
+        print("Recommended models:")
+        for preset in recommended:
+            print(f"  {preset.hf_id} [{preset.tier}] {preset.params}")
+        model_name = _prompt_with_default("Model HF id", default_model)
+
+    presets = list_study_presets()
+    preset_keys = {preset.key for preset in presets}
+    default_preset = getattr(args, "preset", None) or "quick"
+    if non_interactive:
+        preset_key = default_preset
+    else:
+        print("Available presets:")
+        for preset in presets:
+            print(f"  {preset.key}: {preset.name}")
+        preset_key = _prompt_with_default("Study preset", default_preset)
+    if preset_key not in preset_keys:
+        print_actionable_error("unknown study preset", cause=preset_key, next_steps=["Run: ollama-forge study presets"])
+        return 1
+
+    dataset_name = getattr(args, "dataset", None) or ("wikitext" if non_interactive else _prompt_with_default("Dataset", "wikitext"))
+    dataset_subset = getattr(args, "dataset_subset", None) or (
+        "wikitext-2-raw-v1" if non_interactive else _prompt_with_default("Dataset subset", "wikitext-2-raw-v1")
+    )
+    dataset_split = getattr(args, "dataset_split", None) or ("test" if non_interactive else _prompt_with_default("Dataset split", "test"))
+    output_dir = getattr(args, "output_dir", None) or ("study-results" if non_interactive else _prompt_with_default("Output dir", "study-results"))
+    out_path = Path(getattr(args, "out", None) or "study.yaml")
+
+    init_args = argparse.Namespace(
+        preset=preset_key,
+        model=model_name,
+        tier=tier,
+        dataset=dataset_name,
+        dataset_subset=dataset_subset,
+        dataset_split=dataset_split,
+        output_dir=output_dir,
+        task=getattr(args, "task", None) or "causal_lm",
+        dtype=getattr(args, "dtype", None) or "float16",
+        device=getattr(args, "device", None) or "auto",
+        text_column=getattr(args, "text_column", None) or "text",
+        label_column=getattr(args, "label_column", None) or "label",
+        out=str(out_path),
+    )
+    rc = _cmd_study_init(parser, init_args)
+    if rc != 0:
+        return rc
+    print(f"Plan: ollama-forge study plan {out_path}")
+    if getattr(args, "run", False):
+        run_args = argparse.Namespace(config=str(out_path), output_dir=output_dir, json=getattr(args, "json", False))
+        return _cmd_study_run(parser, run_args)
+    return 0
+
+
+def _cmd_study_benchmarks(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_benchmarks import list_benchmark_presets
+
+    presets = list_benchmark_presets(kind=getattr(args, "kind", None))
+    if getattr(args, "json", False):
+        print(json.dumps([preset.__dict__ for preset in presets], indent=2, sort_keys=True))
+        return 0
+    for preset in presets:
+        print(f"{preset.key} [{preset.kind}]")
+        print(f"  {preset.name}")
+        print(f"  path: {preset.path}")
+        print(f"  {preset.description}")
+    return 0
+
+
+def _cmd_study_optimize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_config import StudyConfig
+    from ollama_forge.study_optimize import optimize_study_strength
+
+    try:
+        from ollama_forge.study_runtime import StudyEvaluator, load_study_dataset, load_study_model
+    except ImportError as e:
+        print_actionable_error(
+            "study optimize requires optional study dependencies",
+            cause=str(e),
+            next_steps=["Run: uv sync --extra study", "Then: ollama-forge study optimize <config>"],
+        )
+        return 1
+    try:
+        config = StudyConfig.from_yaml(getattr(args, "config"))
+        strengths = [float(part) for part in (getattr(args, "strengths", None) or "0.25,0.5,0.75,1.0").split(",")]
+        output_dir = Path(getattr(args, "output_dir", None) or (Path(config.output_dir) / "optimize"))
+        result = optimize_study_strength(
+            config,
+            strengths=strengths,
+            metric=getattr(args, "metric", None) or config.metrics[0],
+            objective=getattr(args, "objective", None) or ("min" if (getattr(args, "metric", None) or config.metrics[0]) == "perplexity" else "max"),
+            model_loader=load_study_model,
+            dataset_loader=load_study_dataset,
+            evaluator_factory=StudyEvaluator,
+            output_dir=output_dir,
+        )
+    except Exception as e:
+        print_actionable_error(
+            "study optimize failed",
+            cause=str(e),
+            next_steps=[
+                "Check the config file and metric name",
+                "Run: ollama-forge study validate <config>",
+                "Ensure study deps are installed: uv sync --extra study",
+            ],
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Best strength: {result.best_strength}")
+        print(f"Best {result.metric}: {result.best_score}")
+        print(f"Saved: {Path(output_dir) / 'study-optimize.json'}")
+    return 0
+
+
+def _cmd_study_benchmark_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_benchmarks import compare_benchmark_runs, get_benchmark_preset
+
+    preset_key = getattr(args, "preset", None)
+    if not preset_key:
+        print_actionable_error("pass --preset <key>", next_steps=["Run: ollama-forge study benchmarks"])
+        return 1
+    try:
+        preset = get_benchmark_preset(preset_key)
+    except KeyError as e:
+        print_actionable_error("unknown benchmark preset", cause=str(e), next_steps=["Run: ollama-forge study benchmarks"])
+        return 1
+    try:
+        if preset.kind == "security_eval":
+            from ollama_forge.security_eval.run import run_eval
+
+            run_meta = run_eval(
+                preset.path,
+                base_url=getattr(args, "base_url", None) or "http://127.0.0.1:11434",
+                model=getattr(args, "model", None) or "llama3.2",
+                output_json=getattr(args, "output_json", None),
+                output_csv=getattr(args, "output_csv", None),
+                save_to_history=getattr(args, "save_history", False),
+                max_prompts=getattr(args, "max_prompts", None),
+                timeout=float(getattr(args, "timeout", 120.0)),
+                verbose=not getattr(args, "quiet", False),
+            )
+            compare_model = getattr(args, "compare_model", None)
+            compare_meta = None
+            if compare_model:
+                compare_meta = run_eval(
+                    preset.path,
+                    base_url=getattr(args, "compare_base_url", None) or getattr(args, "base_url", None) or "http://127.0.0.1:11434",
+                    model=compare_model,
+                    output_json=getattr(args, "compare_output_json", None),
+                    output_csv=None,
+                    save_to_history=getattr(args, "save_history", False),
+                    max_prompts=getattr(args, "max_prompts", None),
+                    timeout=float(getattr(args, "timeout", 120.0)),
+                    verbose=not getattr(args, "quiet", False),
+                )
+            payload = {"primary": run_meta}
+            if compare_meta:
+                payload["secondary"] = compare_meta
+                payload["comparison"] = compare_benchmark_runs(run_meta, compare_meta)
+            if getattr(args, "json", False):
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                kpis = run_meta.get("kpis") or {}
+                print(f"preset: {preset.key}")
+                print(f"model: {run_meta.get('model')}")
+                print(f"ASR %: {kpis.get('asr_pct', 0):.1f}")
+                print(f"Refusal %: {kpis.get('refusal_rate_pct', 0):.1f}")
+                if compare_meta:
+                    compare_kpis = compare_meta.get("kpis") or {}
+                    print(f"compare_model: {compare_meta.get('model')}")
+                    print(f"compare_ASR %: {compare_kpis.get('asr_pct', 0):.1f}")
+                    print(f"compare_Refusal %: {compare_kpis.get('refusal_rate_pct', 0):.1f}")
+            return 0
+
+        # dataset preset: run baseline-only study evaluation
+        from ollama_forge.study_config import StudyConfig
+        from ollama_forge.study_runtime import StudyEvaluator, load_study_dataset, load_study_model
+        from ollama_forge.study_runner import run_study
+
+        dataset_name, dataset_subset, dataset_split = (preset.path.split(":", 2) + ["", ""])[:3]
+
+        def _build_cfg(model_name: str, output_dir: str) -> StudyConfig:
+            return StudyConfig.from_dict(
+                {
+                    "model": {
+                        "name": model_name,
+                        "task": "causal_lm",
+                        "dtype": getattr(args, "dtype", None) or "float16",
+                        "device": getattr(args, "device", None) or "auto",
+                    },
+                    "dataset": {
+                        "name": dataset_name,
+                        "subset": dataset_subset or None,
+                        "split": dataset_split or "test",
+                        "text_column": getattr(args, "text_column", None) or "text",
+                    },
+                    "strategies": [],
+                    "metrics": [getattr(args, "metric", None) or "perplexity"],
+                    "output_dir": output_dir,
+                }
+            )
+
+        primary_output = getattr(args, "output_dir", None) or f"study-results/benchmark-{preset.key}"
+        primary_report = run_study(
+            _build_cfg(getattr(args, "model", None), primary_output),
+            model_loader=load_study_model,
+            dataset_loader=load_study_dataset,
+            evaluator_factory=StudyEvaluator,
+        )
+        payload = {"primary": primary_report.to_dict()}
+        compare_model = getattr(args, "compare_model", None)
+        if compare_model:
+            secondary_output = getattr(args, "compare_output_dir", None) or f"{primary_output}-compare"
+            secondary_report = run_study(
+                _build_cfg(compare_model, secondary_output),
+                model_loader=load_study_model,
+                dataset_loader=load_study_dataset,
+                evaluator_factory=StudyEvaluator,
+            )
+            payload["secondary"] = secondary_report.to_dict()
+            payload["comparison"] = {
+                "metric": getattr(args, "metric", None) or "perplexity",
+                "primary": primary_report.baseline_metrics,
+                "secondary": secondary_report.baseline_metrics,
+            }
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"preset: {preset.key}")
+            print(f"model: {payload['primary']['model_name']}")
+            print(f"baseline: {payload['primary']['baseline_metrics']}")
+            if "secondary" in payload:
+                print(f"compare_model: {payload['secondary']['model_name']}")
+                print(f"compare_baseline: {payload['secondary']['baseline_metrics']}")
+        return 0
+    except Exception as e:
+        print_actionable_error(
+            "study benchmark-run failed",
+            cause=str(e),
+            next_steps=["Check the preset, model, and runtime dependencies"],
+        )
+        return 1
+
+
+def _cmd_study_lm_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_eval_integrations import build_lm_eval_command, run_lm_eval, save_lm_eval_plan
+
+    tasks = [item.strip() for item in (getattr(args, "tasks", None) or "").split(",") if item.strip()]
+    if not tasks:
+        print_actionable_error("pass --tasks <task1,task2,...>", next_steps=["Example: --tasks hellaswag,arc_easy"])
+        return 1
+    command = build_lm_eval_command(
+        model=getattr(args, "model", None) or "hf",
+        tasks=tasks,
+        model_args=getattr(args, "model_args", None) or "",
+        output_path=getattr(args, "output_path", None),
+        device=getattr(args, "device", None),
+        batch_size=getattr(args, "batch_size", None),
+        limit=getattr(args, "limit", None),
+    )
+    if getattr(args, "plan", False):
+        plan_path = getattr(args, "plan_file", None)
+        if plan_path:
+            save_lm_eval_plan(command, plan_path)
+        if getattr(args, "json", False):
+            print(json.dumps({"command": command.command, "output_path": command.output_path}, indent=2, sort_keys=True))
+        else:
+            print(" ".join(command.command))
+        return 0
+    try:
+        rc = run_lm_eval(command)
+    except FileNotFoundError as e:
+        print_actionable_error(
+            "lm_eval executable not found",
+            cause=str(e),
+            next_steps=["Install lm-evaluation-harness", "Or re-run with --plan to print the command only"],
+        )
+        return 1
+    return rc
+
+
+def _cmd_study_eval_compare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.study_eval_reports import compare_eval_reports, load_eval_report
+
+    path_a = Path(getattr(args, "report_a", ""))
+    path_b = Path(getattr(args, "report_b", ""))
+    if not path_a.is_file() or not path_b.is_file():
+        missing = path_a if not path_a.is_file() else path_b
+        print_actionable_error("eval report file not found", cause=str(missing))
+        return 1
+    try:
+        report_a = load_eval_report(path_a)
+        report_b = load_eval_report(path_b)
+        payload = compare_eval_reports(report_a, report_b)
+    except Exception as e:
+        print_actionable_error(
+            "study eval-compare failed",
+            cause=str(e),
+            next_steps=["Pass a security-eval JSON or lm-eval JSON report"],
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"A: {payload['source_a']} ({payload['kind_a']})")
+        print(f"B: {payload['source_b']} ({payload['kind_b']})")
+        for name, values in payload["metrics"].items():
+            print(f"{name}: A={values.get('a')} B={values.get('b')}")
+    return 0
 
 
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -4001,6 +6039,7 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             )
             return 1
         checkpoint_dir = output_dir = gguf_path = None  # set below
+    evaluation: dict | None = None
     only_compute = getattr(args, "only_compute", False)
     only_apply = getattr(args, "only_apply", False)
     only_export = getattr(args, "only_export", False)
@@ -4088,6 +6127,19 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             for t in temp_files:
                 Path(t).unlink(missing_ok=True)
         log.info("Saved refusal direction to %s", refusal_pt)
+        _save_abliterate_run_report(
+            args,
+            source_model=getattr(args, "model", None),
+            resolved_model=model_id,
+            output_dir=output_dir,
+            checkpoint_dir=None,
+            refusal_pt=refusal_pt,
+            gguf_path=None,
+            gguf_exported=False,
+            ollama_created=False,
+            evaluation=None,
+            status_label="computed_direction",
+        )
         return 0
     if only_apply and not from_checkpoint_dir:
         if not refusal_pt.is_file():
@@ -4119,6 +6171,31 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             output_only=getattr(args, "output_only", True),
         )
         log.info("Checkpoint saved to %s", checkpoint_dir)
+        if getattr(args, "evaluate_harmful", None):
+            try:
+                from ollama_forge.abliterate import evaluate_abliteration
+
+                evaluation = evaluate_abliteration(
+                    checkpoint_dir,
+                    getattr(args, "evaluate_harmful"),
+                    refusal_markers_path=getattr(args, "evaluate_refusal_markers", None),
+                    num_prompts=getattr(args, "evaluate_num_prompts", 50),
+                )
+            except Exception as e:
+                log.warning("Post-run evaluation failed: %s", e)
+        _save_abliterate_run_report(
+            args,
+            source_model=getattr(args, "model", None),
+            resolved_model=model_id,
+            output_dir=output_dir,
+            checkpoint_dir=checkpoint_dir,
+            refusal_pt=refusal_pt,
+            gguf_path=None,
+            gguf_exported=False,
+            ollama_created=False,
+            evaluation=evaluation,
+            status_label="checkpoint_saved",
+        )
         return 0
     if only_export and not from_checkpoint_dir:
         checkpoint_dir = output_dir / "checkpoint"
@@ -4222,8 +6299,33 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             if not str(e).strip():
                 traceback.print_exc(file=sys.stderr)
             return 1
+    if checkpoint_dir and checkpoint_dir.is_dir() and getattr(args, "evaluate_harmful", None):
+        try:
+            from ollama_forge.abliterate import evaluate_abliteration
+
+            evaluation = evaluate_abliteration(
+                checkpoint_dir,
+                getattr(args, "evaluate_harmful"),
+                refusal_markers_path=getattr(args, "evaluate_refusal_markers", None),
+                num_prompts=getattr(args, "evaluate_num_prompts", 50),
+            )
+        except Exception as e:
+            log.warning("Post-run evaluation failed: %s", e)
     if getattr(args, "checkpoint_only", False):
         log.info("Checkpoint-only requested; skipping GGUF conversion.")
+        _save_abliterate_run_report(
+            args,
+            source_model=getattr(args, "model", None),
+            resolved_model=model_id,
+            output_dir=output_dir,
+            checkpoint_dir=checkpoint_dir,
+            refusal_pt=refusal_pt if not from_checkpoint_dir else output_dir / "refusal_dir.pt",
+            gguf_path=None,
+            gguf_exported=False,
+            ollama_created=False,
+            evaluation=evaluation,
+            status_label="checkpoint_only",
+        )
         return 0
     # Validate GGUF support before conversion
     from ollama_forge.model_family import gguf_support_status, remap_architecture_in_config
@@ -4233,6 +6335,19 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         if getattr(args, "auto_fallback", False):
             log.warning(
                 "GGUF conversion unsupported (%s); leaving checkpoint for serve/proxy.", reason
+            )
+            _save_abliterate_run_report(
+                args,
+                source_model=getattr(args, "model", None),
+                resolved_model=model_id,
+                output_dir=output_dir,
+                checkpoint_dir=checkpoint_dir,
+                refusal_pt=refusal_pt if not from_checkpoint_dir else output_dir / "refusal_dir.pt",
+                gguf_path=None,
+                gguf_exported=False,
+                ollama_created=False,
+                evaluation=evaluation,
+                status_label=f"checkpoint_only_fallback:{reason}",
             )
             return 0
         print_actionable_error(
@@ -4377,7 +6492,21 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             f"For agents with tool support: ollama-forge abliterate proxy --checkpoint {output_dir / 'checkpoint'}",
             file=sys.stderr,
         )
-    return run_ollama_create(name, content)
+    create_rc = run_ollama_create(name, content)
+    _save_abliterate_run_report(
+        args,
+        source_model=getattr(args, "model", None),
+        resolved_model=model_id,
+        output_dir=output_dir,
+        checkpoint_dir=checkpoint_dir,
+        refusal_pt=refusal_pt if not from_checkpoint_dir else output_dir / "refusal_dir.pt",
+        gguf_path=gguf_to_use,
+        gguf_exported=gguf_to_use.is_file(),
+        ollama_created=create_rc == 0,
+        evaluation=evaluation,
+        status_label="ollama_created" if create_rc == 0 else "ollama_create_failed",
+    )
+    return create_rc
 
 
 def _cmd_abliterate_easy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -5046,6 +7175,50 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         help="GGUF converter: llama-cpp (default subprocess), unsloth (requires unsloth package), "
              "auto (try llama-cpp first, fall back to unsloth). Default: auto",
     )
+    p_run.add_argument(
+        "--evaluate-harmful",
+        metavar="FILE",
+        help="Optional harmful prompt list to run against the saved checkpoint before export/reporting",
+    )
+    p_run.add_argument(
+        "--evaluate-refusal-markers",
+        metavar="FILE",
+        help="Optional refusal marker file for --evaluate-harmful",
+    )
+    p_run.add_argument(
+        "--evaluate-num-prompts",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max prompts for --evaluate-harmful (default: 50)",
+    )
+    p_run.add_argument(
+        "--report-file",
+        metavar="FILE",
+        help="Write structured abliterate report JSON to this path (default: <output-dir>/abliterate-report.json)",
+    )
+    p_run.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip writing the abliterate report JSON",
+    )
+    p_run.add_argument(
+        "--contribute",
+        action="store_true",
+        help="Copy the run report into a contributions directory for later aggregation",
+    )
+    p_run.add_argument(
+        "--contribute-dir",
+        default="community_results",
+        metavar="DIR",
+        help="Contribution output directory (default: community_results)",
+    )
+    p_run.add_argument(
+        "--contribute-notes",
+        default="",
+        metavar="TEXT",
+        help="Optional notes to include in the run report and contribution",
+    )
     p_run.set_defaults(handler=_cmd_abliterate_run)
 
     p_download = abliterate_sub.add_parser(
@@ -5063,6 +7236,155 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         help="Copy only the small curated lists from the package (no network); requires package data files",
     )
     p_download.set_defaults(handler=_cmd_abliterate_download_lists)
+
+    p_profiles = abliterate_sub.add_parser(
+        "profiles",
+        help="List built-in abliterate profiles and their effective defaults",
+    )
+    p_profiles.add_argument(
+        "--json",
+        action="store_true",
+        help="Print profile definitions as JSON",
+    )
+    p_profiles.set_defaults(handler=_cmd_abliterate_profiles)
+
+    p_informed_plan = abliterate_sub.add_parser(
+        "informed-plan",
+        help="Recommend abliterate settings from one or more study analysis JSON files",
+    )
+    p_informed_plan.add_argument(
+        "--analysis",
+        action="append",
+        help="Path to an analysis JSON file from `ollama-forge study analyze` (repeatable)",
+    )
+    p_informed_plan.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the recommended settings as JSON",
+    )
+    p_informed_plan.set_defaults(handler=_cmd_abliterate_informed_plan)
+
+    p_informed_run = abliterate_sub.add_parser(
+        "informed-run",
+        help="Run abliterate using settings inferred from study analysis JSON files",
+    )
+    p_informed_run.add_argument("--analysis", action="append", help="Analysis JSON file from `ollama-forge study analyze`")
+    p_informed_run.add_argument("--model", required=True, help="Hugging Face model id or local path")
+    p_informed_run.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_informed_run.add_argument("--output-dir", help="Output directory for checkpoint/GGUF/report artifacts")
+    p_informed_run.add_argument("--harmful", help="Path to file with harmful instructions")
+    p_informed_run.add_argument("--harmless", help="Path to file with harmless instructions")
+    p_informed_run.add_argument("--harmful-dir", help="Directory with harmful instructions")
+    p_informed_run.add_argument("--harmless-dir", help="Directory with harmless instructions")
+    p_informed_run.add_argument("--llama-cpp-dir", help="Path to llama.cpp clone")
+    p_informed_run.add_argument("--template-from", help="Ollama model to copy template from")
+    p_informed_run.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
+    p_informed_run.add_argument("--quant", default="Q4_K_M", help="GGUF quantization when requantizing")
+    p_informed_run.add_argument("--gguf-converter", choices=["llama-cpp", "unsloth", "auto"], default="auto")
+    p_informed_run.add_argument("--evaluate-harmful", help="Optional harmful prompt file for post-run evaluation")
+    p_informed_run.add_argument("--evaluate-refusal-markers", help="Optional refusal markers file")
+    p_informed_run.add_argument("--evaluate-num-prompts", type=int, default=50, help="Max prompts for post-run evaluation")
+    p_informed_run.add_argument("--report-file", help="Explicit report path")
+    p_informed_run.add_argument("--artifact-file", help="Explicit informed-run artifact JSON path")
+    p_informed_run.add_argument("--contribute", action="store_true", help="Save a local contribution record")
+    p_informed_run.add_argument("--contribute-dir", default="community_results", help="Contribution directory")
+    p_informed_run.add_argument("--contribute-notes", default="", help="Notes to include in the contribution")
+    p_informed_run.add_argument("--json", action="store_true", help="Print inferred settings without executing the run")
+    p_informed_run.set_defaults(handler=_cmd_abliterate_informed_run)
+
+    p_informed_refine = abliterate_sub.add_parser(
+        "informed-refine",
+        help="Refine an informed recommendation using the saved informed-run artifact and attached report",
+    )
+    p_informed_refine.add_argument("artifact", help="Path to informed-run.json")
+    p_informed_refine.add_argument("--json", action="store_true", help="Print the refined settings as JSON")
+    p_informed_refine.set_defaults(handler=_cmd_abliterate_informed_refine)
+
+    p_informed_attach_eval = abliterate_sub.add_parser(
+        "informed-attach-eval",
+        help="Attach an external eval report to an informed-run artifact for later refinement",
+    )
+    p_informed_attach_eval.add_argument("artifact", help="Path to informed-run.json")
+    p_informed_attach_eval.add_argument("eval_report", help="Path to a security-eval or lm-eval JSON report")
+    p_informed_attach_eval.add_argument("--compare-to", help="Optional second eval report to compare against before attaching")
+    p_informed_attach_eval.set_defaults(handler=_cmd_abliterate_informed_attach_eval)
+
+    p_informed_artifact = abliterate_sub.add_parser(
+        "informed-artifact",
+        help="Show or export a saved informed-run artifact",
+    )
+    p_informed_artifact.add_argument("path", help="Path to informed-run.json")
+    p_informed_artifact.add_argument("--export", help="Optional export path (.md, .html, or .json)")
+    p_informed_artifact.add_argument("--json", action="store_true", help="Print the full artifact as JSON")
+    p_informed_artifact.set_defaults(handler=_cmd_abliterate_informed_artifact)
+
+    p_informed_compare = abliterate_sub.add_parser(
+        "informed-compare",
+        help="Compare two informed-run artifacts",
+    )
+    p_informed_compare.add_argument("artifact_a", help="First informed-run.json path")
+    p_informed_compare.add_argument("artifact_b", help="Second informed-run.json path")
+    p_informed_compare.add_argument("--json", action="store_true", help="Print the comparison as JSON")
+    p_informed_compare.set_defaults(handler=_cmd_abliterate_informed_compare)
+
+    p_informed_pipeline = abliterate_sub.add_parser(
+        "informed-pipeline",
+        help="Run bundled study analysis, informed abliteration, and optional refinement in one flow",
+    )
+    p_informed_pipeline.add_argument("--study-config", required=True, help="Study config used to generate bundled analysis")
+    p_informed_pipeline.add_argument("--model", required=True, help="Hugging Face model id or local path")
+    p_informed_pipeline.add_argument("--name", required=True, help="Name for the Ollama model")
+    p_informed_pipeline.add_argument("--output-dir", help="Output directory for pipeline artifacts")
+    p_informed_pipeline.add_argument("--analysis-bundle", help="Explicit analysis bundle path")
+    p_informed_pipeline.add_argument("--pipeline-file", help="Explicit pipeline result path")
+    p_informed_pipeline.add_argument("--artifact-file", help="Explicit informed-run artifact path")
+    p_informed_pipeline.add_argument("--report-file", help="Explicit abliterate report path")
+    p_informed_pipeline.add_argument("--modules", help="Comma-separated analysis module list for the bundle")
+    p_informed_pipeline.add_argument("--max-samples", type=int, help="Override analysis max samples")
+    p_informed_pipeline.add_argument("--batch-size", type=int, help="Override analysis batch size")
+    p_informed_pipeline.add_argument("--max-length", type=int, help="Override analysis max length")
+    p_informed_pipeline.add_argument("--top-k", type=int, help="Top-K tokens for logit_lens")
+    p_informed_pipeline.add_argument("--prompt", help="Prompt for causal_tracing")
+    p_informed_pipeline.add_argument("--source-prompt", help="Source prompt for causal_patching")
+    p_informed_pipeline.add_argument("--target-prompt", help="Target prompt for causal_patching")
+    p_informed_pipeline.add_argument("--group-column", help="Grouping column for grouped analyses")
+    p_informed_pipeline.add_argument("--source-group", help="Source group label for activation_patching")
+    p_informed_pipeline.add_argument("--target-group", help="Target group label for activation_patching")
+    p_informed_pipeline.add_argument("--harmful", help="Path to harmful instructions")
+    p_informed_pipeline.add_argument("--harmless", help="Path to harmless instructions")
+    p_informed_pipeline.add_argument("--harmful-dir", help="Directory of harmful instructions")
+    p_informed_pipeline.add_argument("--harmless-dir", help="Directory of harmless instructions")
+    p_informed_pipeline.add_argument("--llama-cpp-dir", help="Path to llama.cpp clone")
+    p_informed_pipeline.add_argument("--template-from", help="Ollama model to copy template from")
+    p_informed_pipeline.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
+    p_informed_pipeline.add_argument("--quant", default="Q4_K_M", help="GGUF quantization when requantizing")
+    p_informed_pipeline.add_argument("--gguf-converter", choices=["llama-cpp", "unsloth", "auto"], default="auto")
+    p_informed_pipeline.add_argument("--evaluate-harmful", help="Optional harmful prompt file for post-run evaluation")
+    p_informed_pipeline.add_argument("--evaluate-refusal-markers", help="Optional refusal markers file")
+    p_informed_pipeline.add_argument("--evaluate-num-prompts", type=int, default=50)
+    p_informed_pipeline.add_argument("--contribute", action="store_true", help="Save a local contribution record")
+    p_informed_pipeline.add_argument("--contribute-dir", default="community_results")
+    p_informed_pipeline.add_argument("--contribute-notes", default="")
+    p_informed_pipeline.add_argument("--benchmark-preset", help="Optional benchmark preset to run after informed-run")
+    p_informed_pipeline.add_argument("--benchmark-model", help="Override model name for benchmark-run")
+    p_informed_pipeline.add_argument("--benchmark-base-url", help="Override base URL for benchmark-run")
+    p_informed_pipeline.add_argument("--benchmark-output-json", help="Explicit benchmark JSON path")
+    p_informed_pipeline.add_argument("--benchmark-output-csv", help="Explicit benchmark CSV path")
+    p_informed_pipeline.add_argument("--benchmark-max-prompts", type=int, help="Prompt limit for benchmark-run")
+    p_informed_pipeline.add_argument("--benchmark-timeout", type=float, default=120.0)
+    p_informed_pipeline.add_argument("--benchmark-metric", help="Dataset benchmark metric override")
+    p_informed_pipeline.add_argument("--benchmark-dtype", help="Dataset benchmark dtype override")
+    p_informed_pipeline.add_argument("--benchmark-device", help="Dataset benchmark device override")
+    p_informed_pipeline.add_argument("--benchmark-text-column", help="Dataset benchmark text column override")
+    p_informed_pipeline.add_argument("--benchmark-output-dir", help="Dataset benchmark output dir override")
+    p_informed_pipeline.add_argument("--compare-eval-report", help="Optional external eval report to compare against the benchmark output")
+    p_informed_pipeline.add_argument("--refine", action="store_true", help="Attach a follow-up recommendation after the run")
+    p_informed_pipeline.add_argument("--auto-refine-run", action="store_true", help="Execute a second pass automatically when refinement is available")
+    p_informed_pipeline.add_argument("--refine-name", help="Explicit Ollama model name for the second pass")
+    p_informed_pipeline.add_argument("--refine-name-suffix", default="-refined", help="Suffix for second-pass model name (default: -refined)")
+    p_informed_pipeline.add_argument("--refine-output-dir", help="Explicit output dir for the second pass")
+    p_informed_pipeline.add_argument("--json", action="store_true", help="Print the pipeline result as JSON")
+    p_informed_pipeline.set_defaults(handler=_cmd_abliterate_informed_pipeline)
 
     p_chat = abliterate_sub.add_parser(
         "chat",
@@ -5280,6 +7602,160 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         help="Max prompts for post-optimize security eval (default: 50)",
     )
     p_optimize.set_defaults(handler=_cmd_abliterate_optimize)
+
+    p_report = abliterate_sub.add_parser(
+        "report",
+        help="Show a saved abliterate run or benchmark report",
+    )
+    p_report.add_argument("path", help="Path to a report JSON file")
+    p_report.add_argument("--export", help="Optional export path (.md, .html, or .json)")
+    p_report.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the raw JSON report",
+    )
+    p_report.set_defaults(handler=_cmd_abliterate_report)
+
+    p_regen = abliterate_sub.add_parser(
+        "regenerate-report",
+        help="Regenerate abliterate report exports from a saved report JSON file",
+    )
+    p_regen.add_argument("path", help="Path to a report JSON file")
+    p_regen.add_argument("--output-dir", help="Directory to write regenerated exports")
+    p_regen.set_defaults(handler=_cmd_abliterate_regenerate_report)
+
+    p_pipeline_report = abliterate_sub.add_parser(
+        "pipeline-report",
+        help="Show or export a saved informed pipeline JSON artifact",
+    )
+    p_pipeline_report.add_argument("path", help="Path to informed-pipeline.json")
+    p_pipeline_report.add_argument("--export", help="Optional export path (.md, .html, or .json)")
+    p_pipeline_report.add_argument("--json", action="store_true", help="Print the pipeline JSON")
+    p_pipeline_report.set_defaults(handler=_cmd_abliterate_pipeline_report)
+
+    p_pipeline_compare = abliterate_sub.add_parser(
+        "pipeline-compare",
+        help="Compare two informed pipeline JSON artifacts",
+    )
+    p_pipeline_compare.add_argument("pipeline_a", help="First informed-pipeline.json path")
+    p_pipeline_compare.add_argument("pipeline_b", help="Second informed-pipeline.json path")
+    p_pipeline_compare.add_argument("--export", help="Optional export path (.md, .html, or .json)")
+    p_pipeline_compare.add_argument("--json", action="store_true", help="Print the comparison as JSON")
+    p_pipeline_compare.set_defaults(handler=_cmd_abliterate_pipeline_compare)
+
+    p_aggregate = abliterate_sub.add_parser(
+        "aggregate",
+        help="Aggregate saved abliterate reports or contributions",
+    )
+    p_aggregate.add_argument(
+        "--dir",
+        default="community_results",
+        metavar="DIR",
+        help="Directory containing report/contribution JSON files (default: community_results)",
+    )
+    p_aggregate.add_argument(
+        "--format",
+        choices=("summary", "json", "latex"),
+        default="summary",
+        help="Output format (default: summary)",
+    )
+    p_aggregate.add_argument(
+        "--metric",
+        choices=("refusal_rate", "refusal_count", "total"),
+        default="refusal_rate",
+        help="Metric to summarize (default: refusal_rate)",
+    )
+    p_aggregate.add_argument(
+        "--min-runs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Only show groups with at least N runs (default: 1)",
+    )
+    p_aggregate.set_defaults(handler=_cmd_abliterate_aggregate)
+
+    p_benchmark = abliterate_sub.add_parser(
+        "benchmark",
+        help="Run security-eval once or twice and save an abliterate benchmark report",
+    )
+    p_benchmark.add_argument("prompt_set", help="Prompt set path (.txt or .jsonl)")
+    p_benchmark.add_argument(
+        "--model",
+        required=True,
+        help="Primary model name to query",
+    )
+    p_benchmark.add_argument(
+        "--base-url",
+        default="http://127.0.0.1:11434",
+        metavar="URL",
+        help="Primary model base URL (default: http://127.0.0.1:11434)",
+    )
+    p_benchmark.add_argument(
+        "--compare-model",
+        metavar="NAME",
+        help="Optional comparison model name",
+    )
+    p_benchmark.add_argument(
+        "--compare-base-url",
+        metavar="URL",
+        help="Optional comparison base URL (defaults to --base-url)",
+    )
+    p_benchmark.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="Directory for saved run JSON files and benchmark report",
+    )
+    p_benchmark.add_argument(
+        "--report-file",
+        metavar="FILE",
+        help="Explicit benchmark report path (default: <output-dir>/benchmark-report.json)",
+    )
+    p_benchmark.add_argument(
+        "--max-prompts",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Limit prompts for a quicker benchmark",
+    )
+    p_benchmark.add_argument(
+        "--system",
+        metavar="TEXT",
+        help="Optional system prompt for the primary run",
+    )
+    p_benchmark.add_argument(
+        "--compare-system",
+        metavar="TEXT",
+        help="Optional system prompt for the comparison run",
+    )
+    p_benchmark.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="Per-request timeout in seconds (default: 120)",
+    )
+    p_benchmark.add_argument(
+        "--save-history",
+        action="store_true",
+        help="Also save each security-eval run to the history database",
+    )
+    p_benchmark.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Reduce per-prompt benchmark logging",
+    )
+    p_benchmark.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the benchmark report as JSON",
+    )
+    p_benchmark.set_defaults(handler=_cmd_abliterate_benchmark)
+
+    p_ui = abliterate_sub.add_parser(
+        "ui",
+        help="Launch the local Streamlit UI for abliterate/informed artifact workflows",
+    )
+    p_ui.set_defaults(handler=_cmd_abliterate_ui)
 
     p_fix_template = abliterate_sub.add_parser(
         "fix-ollama-template",
@@ -6253,6 +8729,237 @@ def main() -> int:
     p_hf_cache_rm.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_hf_cache_rm.set_defaults(handler=_cmd_hf_cache_rm)
 
+    # study (generic ablation study planning/configuration)
+    p_study = subparsers.add_parser(
+        "study",
+        help="Generic ablation study helpers: presets, strategies, validation, and planning",
+    )
+    study_sub = p_study.add_subparsers(dest="study_command")
+    p_study_presets = study_sub.add_parser("presets", help="List available study presets")
+    p_study_presets.add_argument("--json", action="store_true", help="Print presets as JSON")
+    p_study_presets.set_defaults(handler=_cmd_study_presets)
+
+    p_study_models = study_sub.add_parser("models", help="List curated model presets and hardware-tier recommendations")
+    p_study_models.add_argument(
+        "--tier",
+        choices=("tiny", "small", "medium", "large", "frontier"),
+        help="Filter models by hardware tier",
+    )
+    p_study_models.add_argument(
+        "--recommend",
+        action="store_true",
+        help="Show a small recommended set based on detected hardware",
+    )
+    p_study_models.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Max recommendations when using --recommend (default: 5)",
+    )
+    p_study_models.add_argument("--json", action="store_true", help="Print models as JSON")
+    p_study_models.set_defaults(handler=_cmd_study_models)
+
+    p_study_benchmarks = study_sub.add_parser("benchmarks", help="List curated benchmark presets")
+    p_study_benchmarks.add_argument("--kind", choices=("dataset", "security_eval"), help="Filter by benchmark kind")
+    p_study_benchmarks.add_argument("--json", action="store_true", help="Print benchmarks as JSON")
+    p_study_benchmarks.set_defaults(handler=_cmd_study_benchmarks)
+
+    p_study_benchmark_run = study_sub.add_parser("benchmark-run", help="Run a curated security benchmark preset")
+    p_study_benchmark_run.add_argument("--preset", required=True, help="Benchmark preset key from `study benchmarks`")
+    p_study_benchmark_run.add_argument("--model", required=True, help="Model name to query")
+    p_study_benchmark_run.add_argument("--base-url", default="http://127.0.0.1:11434", help="Base URL for the model API")
+    p_study_benchmark_run.add_argument("--compare-model", help="Optional comparison model")
+    p_study_benchmark_run.add_argument("--compare-base-url", help="Optional comparison base URL")
+    p_study_benchmark_run.add_argument("--compare-output-json", help="Optional comparison output JSON path")
+    p_study_benchmark_run.add_argument("--compare-output-dir", help="Optional comparison output dir for dataset presets")
+    p_study_benchmark_run.add_argument("--output-json", help="Optional output JSON path")
+    p_study_benchmark_run.add_argument("--output-csv", help="Optional output CSV path")
+    p_study_benchmark_run.add_argument("--max-prompts", type=int, help="Optional prompt limit")
+    p_study_benchmark_run.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout")
+    p_study_benchmark_run.add_argument("--save-history", action="store_true", help="Save to security-eval history")
+    p_study_benchmark_run.add_argument("--quiet", action="store_true", help="Reduce per-prompt logging")
+    p_study_benchmark_run.add_argument("--json", action="store_true", help="Print full run metadata as JSON")
+    p_study_benchmark_run.set_defaults(handler=_cmd_study_benchmark_run)
+
+    p_study_lm_eval = study_sub.add_parser("lm-eval", help="Plan or run lm-evaluation-harness against a model")
+    p_study_lm_eval.add_argument("--model", default="hf", help="lm_eval model backend (default: hf)")
+    p_study_lm_eval.add_argument("--tasks", required=True, help="Comma-separated task list")
+    p_study_lm_eval.add_argument("--model-args", default="", help="lm_eval --model_args string")
+    p_study_lm_eval.add_argument("--output-path", help="lm_eval output path")
+    p_study_lm_eval.add_argument("--device", help="lm_eval device")
+    p_study_lm_eval.add_argument("--batch-size", help="lm_eval batch size")
+    p_study_lm_eval.add_argument("--limit", type=int, help="Optional sample limit")
+    p_study_lm_eval.add_argument("--plan", action="store_true", help="Print the lm_eval command without executing")
+    p_study_lm_eval.add_argument("--plan-file", help="Optional JSON file to save the command plan")
+    p_study_lm_eval.add_argument("--json", action="store_true", help="Print the plan as JSON when used with --plan")
+    p_study_lm_eval.set_defaults(handler=_cmd_study_lm_eval)
+
+    p_study_eval_compare = study_sub.add_parser("eval-compare", help="Compare two external eval reports")
+    p_study_eval_compare.add_argument("report_a", help="First eval report JSON")
+    p_study_eval_compare.add_argument("report_b", help="Second eval report JSON")
+    p_study_eval_compare.add_argument("--json", action="store_true", help="Print the comparison as JSON")
+    p_study_eval_compare.set_defaults(handler=_cmd_study_eval_compare)
+
+    p_study_modules = study_sub.add_parser("analysis-modules", help="List available baseline analysis modules")
+    p_study_modules.add_argument("--json", action="store_true", help="Print module names as JSON")
+    p_study_modules.set_defaults(handler=_cmd_study_analysis_modules)
+
+    p_study_strategies = study_sub.add_parser("strategies", help="List built-in study strategies")
+    p_study_strategies.add_argument("--json", action="store_true", help="Print strategy names as JSON")
+    p_study_strategies.set_defaults(handler=_cmd_study_strategies)
+
+    p_study_validate = study_sub.add_parser("validate", help="Validate a study config file")
+    p_study_validate.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_validate.add_argument("--json", action="store_true", help="Print normalized config as JSON")
+    p_study_validate.set_defaults(handler=_cmd_study_validate)
+
+    p_study_plan = study_sub.add_parser("plan", help="Expand a study config into an execution plan")
+    p_study_plan.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_plan.add_argument("--json", action="store_true", help="Print the plan as JSON")
+    p_study_plan.set_defaults(handler=_cmd_study_plan)
+
+    p_study_init = study_sub.add_parser("init", help="Write a starter study config")
+    p_study_init.add_argument("--out", default="study.yaml", help="Output YAML path (default: study.yaml)")
+    p_study_init.add_argument("--preset", default="quick", help="Study preset key (default: quick)")
+    p_study_init.add_argument("--tier", choices=("tiny", "small", "medium", "large", "frontier"), help="Hardware tier hint")
+    p_study_init.add_argument("--model", help="Model HF id")
+    p_study_init.add_argument("--dataset", help="Dataset name or local file path")
+    p_study_init.add_argument("--dataset-subset", help="Dataset subset/config name")
+    p_study_init.add_argument("--dataset-split", default="test", help="Dataset split (default: test)")
+    p_study_init.add_argument("--output-dir", default="study-results", help="Study output directory")
+    p_study_init.add_argument("--task", default="causal_lm", help="Task type (default: causal_lm)")
+    p_study_init.add_argument("--dtype", default="float16", help="Model dtype (default: float16)")
+    p_study_init.add_argument("--device", default="auto", help="Model device (default: auto)")
+    p_study_init.add_argument("--text-column", default="text", help="Dataset text column (default: text)")
+    p_study_init.add_argument("--label-column", default="label", help="Dataset label column (default: label)")
+    p_study_init.set_defaults(handler=_cmd_study_init)
+
+    p_study_interactive = study_sub.add_parser("interactive", help="Guided study setup flow")
+    p_study_interactive.add_argument("--out", default="study.yaml", help="Output YAML path (default: study.yaml)")
+    p_study_interactive.add_argument("--preset", help="Default preset key")
+    p_study_interactive.add_argument("--tier", choices=("tiny", "small", "medium", "large", "frontier"), help="Default hardware tier")
+    p_study_interactive.add_argument("--model", help="Default model HF id")
+    p_study_interactive.add_argument("--dataset", help="Default dataset name or path")
+    p_study_interactive.add_argument("--dataset-subset", help="Default dataset subset/config name")
+    p_study_interactive.add_argument("--dataset-split", help="Default dataset split")
+    p_study_interactive.add_argument("--output-dir", help="Default output directory")
+    p_study_interactive.add_argument("--task", default="causal_lm", help="Task type (default: causal_lm)")
+    p_study_interactive.add_argument("--dtype", default="float16", help="Model dtype (default: float16)")
+    p_study_interactive.add_argument("--device", default="auto", help="Model device (default: auto)")
+    p_study_interactive.add_argument("--text-column", default="text", help="Dataset text column (default: text)")
+    p_study_interactive.add_argument("--label-column", default="label", help="Dataset label column (default: label)")
+    p_study_interactive.add_argument("--non-interactive", action="store_true", help="Use detected/default values without prompts")
+    p_study_interactive.add_argument("--run", action="store_true", help="Run the generated config immediately")
+    p_study_interactive.add_argument("--json", action="store_true", help="When used with --run, print the report as JSON")
+    p_study_interactive.set_defaults(handler=_cmd_study_interactive)
+
+    p_study_ui = study_sub.add_parser("ui", help="Launch the local Streamlit UI for study workflows")
+    p_study_ui.set_defaults(handler=_cmd_study_ui)
+
+    p_study_run = study_sub.add_parser("run", help="Execute a study config against a transformer model")
+    p_study_run.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_run.add_argument("--output-dir", help="Override the config output directory")
+    p_study_run.add_argument("--json", action="store_true", help="Print the final report as JSON")
+    p_study_run.set_defaults(handler=_cmd_study_run)
+
+    p_study_optimize = study_sub.add_parser("optimize", help="Grid-search intervention strength for a study config")
+    p_study_optimize.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_optimize.add_argument("--metric", help="Metric to optimize (default: first metric in config)")
+    p_study_optimize.add_argument("--objective", choices=("min", "max"), help="Optimization direction")
+    p_study_optimize.add_argument(
+        "--strengths",
+        help="Comma-separated strength values to try (default: 0.25,0.5,0.75,1.0)",
+    )
+    p_study_optimize.add_argument("--output-dir", help="Override output directory for optimization artifacts")
+    p_study_optimize.add_argument("--json", action="store_true", help="Print the optimization report as JSON")
+    p_study_optimize.set_defaults(handler=_cmd_study_optimize)
+
+    p_study_analyze = study_sub.add_parser("analyze", help="Run a baseline analysis module from a study config")
+    p_study_analyze.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_analyze.add_argument(
+        "--module",
+        required=True,
+        choices=(
+            "activation_probe",
+            "cross_layer_similarity",
+            "logit_lens",
+            "residual_stream",
+            "causal_tracing",
+            "conditional_similarity",
+            "activation_patching",
+            "causal_patching",
+            "steering_vectors",
+            "concept_geometry",
+            "architecture_profile",
+            "defense_robustness",
+        ),
+        help="Analysis module to run",
+    )
+    p_study_analyze.add_argument("--output-dir", help="Override the output directory")
+    p_study_analyze.add_argument("--output-file", help="Explicit JSON output path")
+    p_study_analyze.add_argument("--max-samples", type=int, help="Override max samples for analysis")
+    p_study_analyze.add_argument("--batch-size", type=int, help="Override batch size for analysis")
+    p_study_analyze.add_argument("--max-length", type=int, help="Override tokenization max length for analysis")
+    p_study_analyze.add_argument("--top-k", type=int, help="Top-K tokens for logit_lens (default: 5)")
+    p_study_analyze.add_argument("--prompt", help="Prompt text for causal_tracing (defaults to first dataset row)")
+    p_study_analyze.add_argument("--source-prompt", help="Source prompt for causal_patching")
+    p_study_analyze.add_argument("--target-prompt", help="Target prompt for causal_patching")
+    p_study_analyze.add_argument("--group-column", help="Grouping column for conditional_similarity")
+    p_study_analyze.add_argument("--source-group", help="Source group label for activation_patching")
+    p_study_analyze.add_argument("--target-group", help="Target group label for activation_patching")
+    p_study_analyze.add_argument("--json", action="store_true", help="Print the analysis result as JSON")
+    p_study_analyze.set_defaults(handler=_cmd_study_analyze)
+
+    p_study_analyze_bundle = study_sub.add_parser("analyze-bundle", help="Run multiple analysis modules and save one bundle")
+    p_study_analyze_bundle.add_argument("config", help="Path to a study YAML/JSON config")
+    p_study_analyze_bundle.add_argument("--modules", help="Comma-separated module list (default: all)")
+    p_study_analyze_bundle.add_argument("--output-file", help="Explicit output bundle JSON path")
+    p_study_analyze_bundle.add_argument("--max-samples", type=int, help="Override max samples for analysis")
+    p_study_analyze_bundle.add_argument("--batch-size", type=int, help="Override batch size for analysis")
+    p_study_analyze_bundle.add_argument("--max-length", type=int, help="Override tokenization max length for analysis")
+    p_study_analyze_bundle.add_argument("--top-k", type=int, help="Top-K tokens for logit_lens (default: 5)")
+    p_study_analyze_bundle.add_argument("--prompt", help="Prompt text for causal_tracing")
+    p_study_analyze_bundle.add_argument("--source-prompt", help="Source prompt for causal_patching")
+    p_study_analyze_bundle.add_argument("--target-prompt", help="Target prompt for causal_patching")
+    p_study_analyze_bundle.add_argument("--group-column", help="Grouping column for grouped modules")
+    p_study_analyze_bundle.add_argument("--source-group", help="Source group label for activation_patching")
+    p_study_analyze_bundle.add_argument("--target-group", help="Target group label for activation_patching")
+    p_study_analyze_bundle.add_argument("--json", action="store_true", help="Print the bundle as JSON")
+    p_study_analyze_bundle.set_defaults(handler=_cmd_study_analyze_bundle)
+
+    p_study_report = study_sub.add_parser("report", help="Show a saved study-results.json report")
+    p_study_report.add_argument("path", help="Path to study-results.json")
+    p_study_report.add_argument("--export", help="Optional export path (.md, .html, .json, or .csv)")
+    p_study_report.add_argument("--json", action="store_true", help="Print the full report as JSON")
+    p_study_report.set_defaults(handler=_cmd_study_report)
+
+    p_study_regenerate = study_sub.add_parser(
+        "regenerate-report",
+        help="Regenerate study exports (json/csv/summary/md/html/plot) from a study-results.json file",
+    )
+    p_study_regenerate.add_argument("path", help="Path to study-results.json")
+    p_study_regenerate.add_argument("--output-dir", help="Directory to write regenerated exports")
+    p_study_regenerate.set_defaults(handler=_cmd_study_regenerate_report)
+
+    p_study_compare = study_sub.add_parser("compare", help="Compare two study-results.json reports")
+    p_study_compare.add_argument("report_a", help="First study-results.json path")
+    p_study_compare.add_argument("report_b", help="Second study-results.json path")
+    p_study_compare.add_argument("--export", help="Optional export path (.md, .html, .json, or .csv)")
+    p_study_compare.add_argument("--json", action="store_true", help="Print the comparison as JSON")
+    p_study_compare.set_defaults(handler=_cmd_study_compare)
+
+    p_study_contribute = study_sub.add_parser("contribute", help="Save a study report into the local contribution store")
+    p_study_contribute.add_argument("report", help="Path to study-results.json")
+    p_study_contribute.add_argument("--dir", default="study_results_community", help="Contribution directory")
+    p_study_contribute.add_argument("--notes", default="", help="Optional notes to include with the contribution")
+    p_study_contribute.set_defaults(handler=_cmd_study_contribute)
+
+    p_study_aggregate = study_sub.add_parser("aggregate", help="Aggregate local study contributions")
+    p_study_aggregate.add_argument("--dir", default="study_results_community", help="Contribution directory")
+    p_study_aggregate.add_argument("--json", action="store_true", help="Print aggregation as JSON")
+    p_study_aggregate.set_defaults(handler=_cmd_study_aggregate)
+
     # security-eval (LLM security evaluation: run prompt sets, score, KPIs)
     p_security_eval = subparsers.add_parser(
         "security-eval",
@@ -6424,6 +9131,9 @@ def main() -> int:
         return 0
     if parsed.command == "hf-cache" and not getattr(parsed, "hf_cache_command", None):
         p_hf_cache.print_help()
+        return 0
+    if parsed.command == "study" and not getattr(parsed, "study_command", None):
+        p_study.print_help()
         return 0
     if parsed.command == "security-eval" and not getattr(parsed, "security_eval_command", None):
         p_security_eval.print_help()
