@@ -398,15 +398,10 @@ def compute_refusal_dir(
             model_id,
             model_id,
         )
-    if device is None and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        device = "mps"
-    # device_map="mps" is unreliable across accelerate versions; use the dict form instead.
-    if device == "mps":
-        device_map: str | dict = {"": "mps"}
-    elif device is None:
-        device_map = "auto"
-    else:
-        device_map = device
+    from ollama_forge.device import get_device, get_device_map
+
+    resolved_device = get_device(device or "auto")
+    device_map: str | dict = get_device_map(resolved_device)
     load_kw: dict = {
         "trust_remote_code": True,
         "device_map": device_map,
@@ -1288,10 +1283,12 @@ def evaluate_abliteration(
         return {"refusal_count": 0, "total": 0, "refusal_rate": 0.0}
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    from ollama_forge.device import get_device_map
+
     load_kw: dict = {
         "trust_remote_code": True,
         "dtype": torch.bfloat16,
-        "device_map": "auto" if device is None else device,
+        "device_map": get_device_map(device),
         "low_cpu_mem_usage": True,
     }
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
@@ -1436,15 +1433,18 @@ def run_chat(
     if not checkpoint_dir.is_dir() or not (checkpoint_dir / "config.json").is_file():
         raise FileNotFoundError(f"Checkpoint dir not found or invalid (no config.json): {checkpoint_dir}")
 
+    from ollama_forge.device import get_device_map
+
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    device_map = get_device_map(device)
     load_kw: dict = {
         "trust_remote_code": True,
         "dtype": torch.bfloat16,
-        "device_map": "auto" if device is None else device,
+        "device_map": device_map,
         "low_cpu_mem_usage": True,
     }
     # MoE / pytorch_model.bin checkpoints need offload_folder when device_map offloads to disk.
-    if load_kw["device_map"] == "auto":
+    if device_map == "auto":
         load_kw["offload_folder"] = tempfile.mkdtemp(prefix="ollama_forge_offload_")
     model = _load_model_with_gguf_version_workaround(str(checkpoint_dir), load_kw)
     if hasattr(model, "eval"):

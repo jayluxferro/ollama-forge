@@ -2155,6 +2155,15 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             print("HF_TOKEN: set (for gated/private repos)")
         else:
             print("HF_TOKEN: not set (optional; needed for gated/private Hugging Face)")
+        # Device info
+        from ollama_forge.device import get_device_name, get_memory_info
+
+        dev_name = get_device_name()
+        mem = get_memory_info()
+        if mem:
+            print(f"Accelerator: {dev_name} ({mem.total_gb:.1f} GB, {mem.free_gb:.1f} GB free)")
+        else:
+            print(f"Accelerator: {dev_name}")
         check_item(
             "abliterate deps",
             status["abliterate_deps"],
@@ -6232,6 +6241,21 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         profile_name=getattr(args, "profile", None),
         config=cfg,
     )
+    # --dry-run: show resolved config and exit
+    if getattr(args, "dry_run", False):
+        config = _abliterate_report_config(args)
+        config["model"] = getattr(args, "model", None)
+        config["name"] = getattr(args, "name", None)
+        config["output_dir"] = getattr(args, "output_dir", None)
+        if getattr(args, "json", False):
+            print(json.dumps(config, indent=2, sort_keys=True, default=str))
+        else:
+            print("Abliterate run configuration (dry run):")
+            for key, value in sorted(config.items()):
+                if value is not None:
+                    print(f"  {key}: {value}")
+        return 0
+
     from_checkpoint_dir = getattr(args, "from_checkpoint", None)
     name = getattr(args, "name", None)
     if not name:
@@ -6334,6 +6358,21 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             ],
         )
         return 1
+    # Early memory check — warn if model likely too large for available memory
+    if not from_checkpoint_dir and model_id and not getattr(args, "load_in_8bit", False):
+        try:
+            from ollama_forge.device import get_memory_info
+
+            mem = get_memory_info()
+            if mem and mem.free_gb < 4.0:
+                log.warning(
+                    "Low available memory (%.1f GB free). "
+                    "Consider --load-in-8bit or a smaller model if loading fails.",
+                    mem.free_gb,
+                )
+        except Exception:
+            pass
+
     # Warn about multimodal models (abliteration only affects text decoder weights)
     if not from_checkpoint_dir and model_id:
         _model_path = Path(model_id)
@@ -6487,6 +6526,12 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         try:
             harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)
             try:
+                from ollama_forge.device import get_device_name, get_memory_info
+
+                dev_name = get_device_name()
+                mem = get_memory_info()
+                mem_str = f" ({mem.total_gb:.1f} GB)" if mem else ""
+                log.info("Device: %s%s", dev_name, mem_str)
                 log.info("Computing refusal direction...")
                 compute_refusal_dir(
                     model_id,
@@ -6507,18 +6552,9 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     direction_method=getattr(args, "direction_method", "diff_means"),
                 )
                 # Free memory from first load before second load (apply_refusal_dir_and_save loads again).
-                import gc
+                from ollama_forge.device import empty_cache
 
-                gc.collect()
-                try:
-                    import torch
-
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    if getattr(torch, "mps", None) and getattr(torch.mps, "empty_cache", None):
-                        torch.mps.empty_cache()
-                except ImportError:
-                    pass  # torch not available; cache flush is best-effort
+                empty_cache()
                 log.info("Baking ablation into weights and saving checkpoint...")
                 apply_refusal_dir_and_save(
                     model_id,
@@ -6558,15 +6594,27 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         except Exception as e:
             import traceback
 
+            from ollama_forge.device import is_oom_error
+
             msg = str(e).strip() or f"{type(e).__name__} (no message)"
-            print_actionable_error(
-                "abliterate run failed (compute or bake step)",
-                cause=msg,
-                next_steps=[
-                    "Check --model (HF repo or path), --harmful, --harmless paths",
-                    "Run: ollama-forge abliterate run --help",
-                ],
-            )
+            if is_oom_error(e) and not getattr(args, "load_in_8bit", False):
+                print_actionable_error(
+                    "abliterate run failed: out of memory",
+                    cause=msg,
+                    next_steps=[
+                        "Re-run with --load-in-8bit to reduce memory usage",
+                        "Or use a smaller model / machine with more RAM",
+                    ],
+                )
+            else:
+                print_actionable_error(
+                    "abliterate run failed (compute or bake step)",
+                    cause=msg,
+                    next_steps=[
+                        "Check --model (HF repo or path), --harmful, --harmless paths",
+                        "Run: ollama-forge abliterate run --help",
+                    ],
+                )
             if not str(e).strip():
                 traceback.print_exc(file=sys.stderr)
             return 1
@@ -7602,6 +7650,11 @@ def _add_abliterate_args(subparsers) -> "argparse.ArgumentParser":
         default="",
         metavar="TEXT",
         help="Optional notes to include in the run report and contribution",
+    )
+    p_run.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show resolved configuration and exit without running (combine with --json for machine-readable)",
     )
     p_run.set_defaults(handler=_cmd_abliterate_run)
 

@@ -1147,6 +1147,23 @@ def test_abliterate_run_gguf_converter_in_help() -> None:
     assert "unsloth" in result.stdout
 
 
+def test_abliterate_run_dry_run() -> None:
+    """abliterate run --dry-run prints config without loading model."""
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "ollama_forge.cli", "abliterate", "run",
+            "--model", "fake/model", "--name", "test-dry",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "dry run" in result.stdout.lower()
+    assert "strength" in result.stdout
+    assert "test-dry" in result.stdout
+
+
 def test_train_help() -> None:
     """train --help lists --data, --base, --name."""
     result = subprocess.run(
