@@ -10,7 +10,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ollama_forge.abliterate import _is_multimodal_model_id, _strength_kernel_scale, get_D_for_layer, get_layers
+from ollama_forge.abliterate import (
+    _is_multimodal_model_id,
+    _leace_direction,
+    _strength_kernel_scale,
+    get_D_for_layer,
+    get_layers,
+    refine_ablation,
+)
 
 
 class TestStrengthKernelScale:
@@ -982,3 +989,121 @@ class TestGetLayers:
         model = MagicMock(spec=[])
         with pytest.raises(AttributeError, match="Could not find layers"):
             get_layers(model)
+
+
+class TestLeaceDirection:
+    """Tests for the _leace_direction Fisher LDA function."""
+
+    def test_produces_unit_vector(self) -> None:
+        harmful = torch.randn(20, HIDDEN)
+        harmless = torch.randn(20, HIDDEN)
+        d = _leace_direction(harmful, harmless)
+        assert d.shape == (HIDDEN, 1)
+        assert abs(d.norm().item() - 1.0) < 1e-5
+
+    def test_opposite_means_give_nonzero_direction(self) -> None:
+        torch.manual_seed(42)
+        harmful = torch.ones(20, HIDDEN) * 5.0 + torch.randn(20, HIDDEN) * 0.05
+        harmless = torch.ones(20, HIDDEN) * -5.0 + torch.randn(20, HIDDEN) * 0.05
+        d = _leace_direction(harmful, harmless)
+        # Direction should be roughly aligned with the all-ones vector
+        cosine = torch.dot(d.squeeze(), torch.ones(HIDDEN) / math.sqrt(HIDDEN)).abs().item()
+        assert cosine > 0.7, f"Expected high alignment, got cosine={cosine}"
+
+    def test_identical_inputs_return_direction(self) -> None:
+        """Degenerate case: identical harmful/harmless → falls back to normalized diff."""
+        same = torch.randn(10, HIDDEN)
+        d = _leace_direction(same, same)
+        assert d.shape == (HIDDEN, 1)
+        # Norm should still be 1 (or 0 if perfectly identical)
+        assert d.norm().item() <= 1.0 + 1e-5
+
+    def test_single_sample_works(self) -> None:
+        harmful = torch.randn(1, HIDDEN)
+        harmless = torch.randn(1, HIDDEN)
+        d = _leace_direction(harmful, harmless)
+        assert d.shape == (HIDDEN, 1)
+        assert abs(d.norm().item() - 1.0) < 1e-5
+
+
+class _RefineModel(torch.nn.Module):
+    """Minimal model with forward pass for refine_ablation tests."""
+
+    def __init__(self, h: int = HIDDEN, n_layers: int = 2) -> None:
+        super().__init__()
+        self.config = MagicMock()
+        self.config.hidden_size = h
+        # Build real layers
+        layers = []
+        for _ in range(n_layers):
+            layer = torch.nn.Module()
+            attn = torch.nn.Module()
+            attn.q_proj = torch.nn.Linear(h, h, bias=False)
+            attn.k_proj = torch.nn.Linear(h, h, bias=False)
+            attn.v_proj = torch.nn.Linear(h, h, bias=False)
+            attn.o_proj = torch.nn.Linear(h, h, bias=False)
+            layer.self_attn = attn
+            mlp = torch.nn.Module()
+            mlp.down_proj = torch.nn.Linear(h, h, bias=False)
+            layer.mlp = mlp
+            layers.append(layer)
+        inner = torch.nn.Module()
+        inner.layers = torch.nn.ModuleList(layers)
+        self.model = inner
+
+    def forward(self, input_ids=None, **kwargs):
+        # Return fake hidden states for probing
+        batch = input_ids.shape[0] if input_ids is not None else 1
+        seq = input_ids.shape[1] if input_ids is not None else 3
+        h = self.config.hidden_size
+        n = len(self.model.layers)
+        hidden_states = tuple(torch.randn(batch, seq, h) for _ in range(n + 1))
+        result = MagicMock()
+        result.hidden_states = hidden_states
+        return result
+
+
+class _RefineTokenizer:
+    def __call__(self, text, *, return_tensors="pt", truncation=True, max_length=256):
+        ids = torch.tensor([[1, 2, 3]])
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+
+class TestRefineAblation:
+    def test_returns_zero_when_below_threshold(self) -> None:
+        """If residual direction norm < threshold, no passes applied."""
+        model = _RefineModel()
+        tokenizer = _RefineTokenizer()
+        passes = refine_ablation(
+            model, tokenizer,
+            ["harmful prompt 1"], ["harmless prompt 1"],
+            max_passes=2, threshold=999.0,  # very high threshold
+            skip_begin_layers=0, skip_end_layers=0,
+        )
+        assert passes == 0
+
+    def test_applies_at_least_one_pass(self) -> None:
+        """With low threshold, at least one refinement pass should be applied."""
+        model = _RefineModel()
+        tokenizer = _RefineTokenizer()
+        passes = refine_ablation(
+            model, tokenizer,
+            ["harmful prompt 1", "harmful prompt 2"],
+            ["harmless prompt 1", "harmless prompt 2"],
+            max_passes=1, threshold=0.0001,  # very low threshold
+            skip_begin_layers=0, skip_end_layers=0,
+        )
+        assert passes >= 1
+
+    def test_respects_max_passes(self) -> None:
+        """Should not exceed max_passes."""
+        model = _RefineModel()
+        tokenizer = _RefineTokenizer()
+        passes = refine_ablation(
+            model, tokenizer,
+            [f"harmful {i}" for i in range(5)],
+            [f"harmless {i}" for i in range(5)],
+            max_passes=3, threshold=0.0001,
+            skip_begin_layers=0, skip_end_layers=0,
+        )
+        assert passes <= 3

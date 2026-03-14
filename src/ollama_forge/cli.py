@@ -4236,18 +4236,31 @@ def _cmd_abliterate_profiles(parser: argparse.ArgumentParser, args: argparse.Nam
         print(json.dumps(profiles, indent=2, sort_keys=True))
         return 0
     for name, values in profiles.items():
-        print(f"{name}: {values.get('description', '')}")
-        print(
-            "  instructions={0} agg={1} strength={2}/{3}/{4} norm_preserving={5} per_layer={6}".format(
-                values.get("num_instructions"),
-                values.get("agg"),
-                values.get("strength"),
-                values.get("atten_strength"),
-                values.get("mlp_strength"),
-                values.get("norm_preserving"),
-                values.get("per_layer_directions"),
-            )
-        )
+        desc = values.pop("description", "")
+        print(f"\n{name}: {desc}")
+        # Group params by category for readability
+        core = []
+        for k in ("num_instructions", "agg", "strength", "atten_strength", "mlp_strength"):
+            if k in values:
+                core.append(f"{k}={values[k]}")
+        if core:
+            print(f"  core: {', '.join(core)}")
+        flags = []
+        for k in (
+            "per_layer_directions", "output_only", "norm_preserving",
+            "project_bias", "sparse_surgery",
+        ):
+            if k in values:
+                flags.append(f"{k}={values[k]}")
+        if flags:
+            print(f"  flags: {', '.join(flags)}")
+        advanced = []
+        for k in ("svd_method", "surgery_top_k", "moe_expert_scale", "refine_passes", "refine_threshold"):
+            if k in values:
+                advanced.append(f"{k}={values[k]}")
+        if advanced:
+            print(f"  advanced: {', '.join(advanced)}")
+    print()
     return 0
 
 
@@ -6247,13 +6260,21 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         config["model"] = getattr(args, "model", None)
         config["name"] = getattr(args, "name", None)
         config["output_dir"] = getattr(args, "output_dir", None)
-        if getattr(args, "json", False):
-            print(json.dumps(config, indent=2, sort_keys=True, default=str))
-        else:
-            print("Abliterate run configuration (dry run):")
-            for key, value in sorted(config.items()):
-                if value is not None:
-                    print(f"  {key}: {value}")
+        # Add device info
+        try:
+            from ollama_forge.device import get_device_name, get_memory_info
+
+            config["device_name"] = get_device_name()
+            mem = get_memory_info()
+            if mem:
+                config["device_memory_gb"] = mem.total_gb
+                config["device_free_gb"] = mem.free_gb
+        except Exception:
+            pass
+        print("Abliterate run configuration (dry run):")
+        for key, value in sorted(config.items()):
+            if value is not None:
+                print(f"  {key}: {value}")
         return 0
 
     from_checkpoint_dir = getattr(args, "from_checkpoint", None)

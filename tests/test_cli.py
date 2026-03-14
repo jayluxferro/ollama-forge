@@ -1164,6 +1164,52 @@ def test_abliterate_run_dry_run() -> None:
     assert "test-dry" in result.stdout
 
 
+def test_abliterate_compare_help() -> None:
+    """abliterate compare --help lists model_a, model_b."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "compare", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "model_a" in result.stdout
+    assert "model_b" in result.stdout
+    assert "--prompts" in result.stdout
+
+
+def test_abliterate_profiles_json() -> None:
+    """abliterate profiles --json returns valid JSON with all profiles."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "profiles", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    import json
+
+    profiles = json.loads(result.stdout)
+    assert "safe" in profiles
+    assert "aggressive" in profiles
+    assert "surgical" in profiles
+    assert "nuclear" in profiles
+
+
+def test_abliterate_run_help_shows_new_flags() -> None:
+    """abliterate run --help shows all new algorithm flags."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ollama_forge.cli", "abliterate", "run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    for flag in (
+        "--project-bias", "--sparse-surgery", "--surgery-top-k",
+        "--svd-method", "--direction-method", "--refine-passes",
+        "--moe-expert-scale", "--save-lora", "--dry-run",
+    ):
+        assert flag in result.stdout, f"Missing flag: {flag}"
+
+
 def test_train_help() -> None:
     """train --help lists --data, --base, --name."""
     result = subprocess.run(

@@ -1135,14 +1135,17 @@ def refine_ablation(
                 toks = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
                 toks = {k: v.to(device) for k, v in toks.items()}
                 out = model(**toks, output_hidden_states=True)
-                hs = out.hidden_states[probe_layer_idx + 1]  # +1 for embedding layer
-                harmful_acts.append(hs[0, -1].detach().cpu().float())
+                hs_list = out.hidden_states
+                # +1 for embedding layer; clamp to available states
+                hs_idx = min(probe_layer_idx + 1, len(hs_list) - 1)
+                harmful_acts.append(hs_list[hs_idx][0, -1].detach().cpu().float())
             for prompt in harmless_instructions[:32]:
                 toks = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
                 toks = {k: v.to(device) for k, v in toks.items()}
                 out = model(**toks, output_hidden_states=True)
-                hs = out.hidden_states[probe_layer_idx + 1]
-                harmless_acts.append(hs[0, -1].detach().cpu().float())
+                hs_list = out.hidden_states
+                hs_idx = min(probe_layer_idx + 1, len(hs_list) - 1)
+                harmless_acts.append(hs_list[hs_idx][0, -1].detach().cpu().float())
 
         if not harmful_acts or not harmless_acts:
             break

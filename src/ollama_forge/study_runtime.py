@@ -8,14 +8,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-def _choose_device(requested: str, torch_module) -> str:
-    if requested != "auto":
-        return requested
-    if torch_module.cuda.is_available():
-        return "cuda"
-    if getattr(torch_module.backends, "mps", None) and torch_module.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+def _choose_device(requested: str, torch_module) -> str:  # noqa: ARG001
+    from ollama_forge.device import get_device
+
+    return get_device(requested)
 
 
 def _dtype_from_name(name: str, torch_module):
@@ -350,10 +346,12 @@ def load_study_model(model_cfg) -> StudyModelHandle:
     except ImportError as exc:
         raise ImportError("study run requires torch and transformers") from exc
 
+    from ollama_forge.device import is_cuda_available, is_mps_available
+
     device = _choose_device(model_cfg.device, torch)
-    if device == "cuda" and not torch.cuda.is_available():
+    if device == "cuda" and not is_cuda_available():
         raise ValueError("CUDA requested but no CUDA device is available")
-    if device == "mps" and not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+    if device == "mps" and not is_mps_available():
         raise ValueError("MPS requested but not available")
 
     dtype = _dtype_from_name(model_cfg.dtype, torch)

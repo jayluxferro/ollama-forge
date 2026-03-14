@@ -181,11 +181,14 @@ def get_model_preset(hf_id: str) -> ModelPreset:
 
 
 def detect_hardware_tier() -> tuple[str, dict[str, str | float | int]]:
-    info: dict[str, str | float | int] = {"platform": platform.system()}
-    try:
-        import torch
+    from ollama_forge.device import get_device_name, get_memory_info, is_cuda_available, is_mps_available
 
-        if torch.cuda.is_available():
+    info: dict[str, str | float | int] = {"platform": platform.system()}
+    info["accelerator"] = get_device_name()
+    try:
+        if is_cuda_available():
+            import torch
+
             max_vram = 0.0
             gpu_count = torch.cuda.device_count()
             for idx in range(gpu_count):
@@ -200,8 +203,10 @@ def detect_hardware_tier() -> tuple[str, dict[str, str | float | int]]:
             if max_vram >= 8:
                 return "medium", info
             return "small", info
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            info["accelerator"] = "mps"
+        if is_mps_available():
+            mem = get_memory_info()
+            if mem:
+                info["estimated_vram_gb"] = mem.total_gb
             return "medium", info
     except Exception:
         pass

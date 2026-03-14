@@ -47,6 +47,16 @@ def test_get_device_map_auto() -> None:
     assert result in ("auto", {"": "mps"})
 
 
+def test_get_device_map_none() -> None:
+    result = get_device_map(None)
+    assert result in ("auto", {"": "mps"})
+
+
+def test_get_device_map_cuda() -> None:
+    result = get_device_map("cuda")
+    assert result == "auto"
+
+
 def test_is_gpu_available_returns_bool() -> None:
     assert isinstance(is_gpu_available(), bool)
 
