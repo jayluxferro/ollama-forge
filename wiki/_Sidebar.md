@@ -11,6 +11,8 @@
 - [Training Data](Training-Data)
 - [Retrain Pipeline](Retrain-Pipeline)
 - [Abliterate](Abliterate)
+- [Abliterate Profiles](Abliterate-Profiles)
+- [Study Framework](Study-Framework)
 - [Heretic integration](Heretic-Integration)
 - [Security Eval](Security-Eval)
 - [Downsizing](Downsizing)

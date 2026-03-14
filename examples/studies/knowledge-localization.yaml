@@ -1,0 +1,12 @@
+preset: knowledge
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  task: causal_lm
+  dtype: float16
+  device: auto
+dataset:
+  name: wikitext
+  subset: wikitext-2-raw-v1
+  split: test
+  text_column: text
+output_dir: study-results/knowledge-localization

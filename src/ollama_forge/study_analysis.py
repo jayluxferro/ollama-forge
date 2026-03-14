@@ -47,6 +47,22 @@ class LogitLensResult:
 
 
 @dataclass
+class TunedLensLayerResult:
+    layer_index: int
+    top_tokens: list[str]
+    top_token_ids: list[int]
+    top_scores: list[float]
+    kl_from_final: float
+
+
+@dataclass
+class TunedLensResult:
+    layers: list[TunedLensLayerResult]
+    final_layer_top_token: str | None
+    convergence_layer: int | None
+
+
+@dataclass
 class ResidualStreamLayerResult:
     layer_index: int
     mean_norm: float
@@ -178,6 +194,9 @@ def available_analysis_modules() -> tuple[str, ...]:
         "concept_geometry",
         "architecture_profile",
         "defense_robustness",
+        "cross_model_transfer",
+        "sparsity_analysis",
+        "tuned_lens",
     )
 
 
@@ -277,6 +296,105 @@ def analyze_logit_lens(handle: Any, layer_vectors: dict[int, list[torch.Tensor]]
     return LogitLensResult(layers=layers, final_layer_top_token=final_token)
 
 
+def analyze_tuned_lens(
+    handle: Any, layer_vectors: dict[int, list[torch.Tensor]], *, top_k: int = 5,
+) -> TunedLensResult:
+    """Tuned lens: apply final LayerNorm + lm_head to intermediate hidden states.
+
+    Unlike logit lens (raw hidden → lm_head), tuned lens normalizes first,
+    giving more accurate predictions at early layers. Also computes KL divergence
+    from the final layer's distribution to measure convergence.
+    """
+    if handle.task != "causal_lm":
+        raise ValueError("tuned_lens currently supports causal_lm tasks only")
+    get_output_embeddings = getattr(handle.model, "get_output_embeddings", None)
+    lm_head = get_output_embeddings() if callable(get_output_embeddings) else getattr(handle.model, "lm_head", None)
+    if lm_head is None:
+        raise ValueError("Model has no output embedding head for tuned-lens analysis")
+
+    # Find the final layer norm
+    final_norm = None
+    for attr in ("model.norm", "model.final_layernorm", "transformer.ln_f", "model.layer_norm"):
+        parts = attr.split(".")
+        obj = handle.model
+        for part in parts:
+            obj = getattr(obj, part, None)
+            if obj is None:
+                break
+        if obj is not None and hasattr(obj, "weight"):
+            final_norm = obj
+            break
+
+    layers: list[TunedLensLayerResult] = []
+    final_logits: torch.Tensor | None = None
+    sorted_indices = sorted(layer_vectors)
+
+    for layer_idx in sorted_indices:
+        samples = layer_vectors[layer_idx]
+        if not samples:
+            continue
+        stacked = torch.stack([v.float() for v in samples])
+        mean_vector = stacked.mean(dim=0).to(next(lm_head.parameters()).device)
+
+        # Apply final norm if available (this is what makes it "tuned")
+        if final_norm is not None:
+            mean_vector = final_norm(mean_vector)
+
+        logits = lm_head(mean_vector).detach().cpu()
+        scores, token_ids = torch.topk(logits, k=min(top_k, logits.shape[-1]))
+        token_ids_list = [int(tid) for tid in token_ids.tolist()]
+        top_tokens = []
+        for tid in token_ids_list:
+            try:
+                token = handle.tokenizer.decode([tid]).strip()
+            except Exception:
+                token = str(tid)
+            top_tokens.append(token or str(tid))
+
+        # KL divergence from final layer
+        kl = 0.0
+        if final_logits is not None:
+            p = torch.softmax(final_logits, dim=-1)
+            q = torch.softmax(logits, dim=-1)
+            kl = float(torch.sum(p * torch.log((p / q.clamp(min=1e-10)).clamp(min=1e-10))).item())
+
+        layers.append(TunedLensLayerResult(
+            layer_index=layer_idx,
+            top_tokens=top_tokens,
+            top_token_ids=token_ids_list,
+            top_scores=[float(s) for s in scores.tolist()],
+            kl_from_final=max(0.0, kl),
+        ))
+        # Keep last layer's logits as reference
+        if layer_idx == sorted_indices[-1]:
+            final_logits = logits
+    # Recompute KL now that we have final_logits
+    if final_logits is not None and len(layers) > 1:
+        p = torch.softmax(final_logits, dim=-1)
+        for layer_result in layers[:-1]:
+            idx = layer_result.layer_index
+            samples = layer_vectors[idx]
+            if not samples:
+                continue
+            mean_v = torch.stack([v.float() for v in samples]).mean(dim=0).to(next(lm_head.parameters()).device)
+            if final_norm is not None:
+                mean_v = final_norm(mean_v)
+            q_logits = lm_head(mean_v).detach().cpu()
+            q = torch.softmax(q_logits, dim=-1)
+            kl_val = float(torch.sum(p * torch.log((p / q.clamp(min=1e-10)).clamp(min=1e-10))).item())
+            layer_result.kl_from_final = max(0.0, kl_val)
+
+    final_token = layers[-1].top_tokens[0] if layers else None
+    # Convergence layer: first layer where KL < 0.1
+    convergence = None
+    for lr in layers:
+        if lr.kl_from_final < 0.1:
+            convergence = lr.layer_index
+            break
+
+    return TunedLensResult(layers=layers, final_layer_top_token=final_token, convergence_layer=convergence)
+
+
 def analyze_residual_stream(layer_vectors: dict[int, list[torch.Tensor]]) -> ResidualStreamResult:
     rows: list[ResidualStreamLayerResult] = []
     previous_mean: torch.Tensor | None = None
@@ -288,10 +406,7 @@ def analyze_residual_stream(layer_vectors: dict[int, list[torch.Tensor]]) -> Res
         stacked = torch.stack([value.float() for value in samples])
         mean_vector = stacked.mean(dim=0)
         mean_norm = float(mean_vector.norm().item())
-        if previous_mean is None:
-            delta = 0.0
-        else:
-            delta = float((mean_vector - previous_mean).norm().item())
+        delta = 0.0 if previous_mean is None else float((mean_vector - previous_mean).norm().item())
         rows.append(
             ResidualStreamLayerResult(
                 layer_index=layer_idx,
@@ -379,7 +494,9 @@ def collect_grouped_layer_vectors(
     return groups
 
 
-def analyze_conditional_similarity(grouped_vectors: dict[str, dict[int, list[torch.Tensor]]]) -> ConditionalSimilarityResult:
+def analyze_conditional_similarity(
+    grouped_vectors: dict[str, dict[int, list[torch.Tensor]]],
+) -> ConditionalSimilarityResult:
     groups = sorted(grouped_vectors)
     layers: list[ConditionalSimilarityLayerResult] = []
     if len(groups) < 2:
@@ -457,9 +574,9 @@ def analyze_causal_patching(
     target_prompt: str,
     max_length: int = 256,
 ) -> CausalPatchResult:
-    from ollama_forge.study_metrics import kl_divergence_from_logits
-
     import torch
+
+    from ollama_forge.study_metrics import kl_divergence_from_logits
 
     target_enc = handle.tokenizer(target_prompt, return_tensors="pt", truncation=True, max_length=max_length)
     target_enc = {key: value.to(handle.device) for key, value in target_enc.items()}
@@ -618,6 +735,149 @@ def analyze_defense_robustness(grouped_vectors: dict[str, dict[int, list[torch.T
         self_repair_risk=self_repair_risk,
         entangled_layers=entangled_layers,
         clean_layers=clean_layers,
+    )
+
+
+@dataclass
+class CrossModelTransferLayerResult:
+    layer_frac: float
+    cosine_similarity: float
+    norm_ratio: float
+
+
+@dataclass
+class CrossModelTransferResult:
+    layers: list[CrossModelTransferLayerResult]
+    mean_cosine: float
+    universality_index: float
+
+
+def analyze_cross_model_transfer(
+    directions_a: dict[int, torch.Tensor],
+    directions_b: dict[int, torch.Tensor],
+) -> CrossModelTransferResult:
+    """Compare refusal directions between two models to measure transfer potential.
+
+    Args:
+        directions_a: Per-layer mean direction vectors from model A {layer_idx: (H,)}.
+        directions_b: Per-layer mean direction vectors from model B {layer_idx: (H,)}.
+            Models may have different layer counts and hidden sizes.
+
+    Returns:
+        CrossModelTransferResult with per-layer cosine similarity and universality index.
+    """
+    n_a = max(directions_a) + 1 if directions_a else 1
+    n_b = max(directions_b) + 1 if directions_b else 1
+    rows: list[CrossModelTransferLayerResult] = []
+    cosines: list[float] = []
+
+    # Match layers by fractional position (handles different layer counts)
+    for idx_a, dir_a in sorted(directions_a.items()):
+        frac_a = idx_a / max(n_a - 1, 1)
+        # Find closest layer in model B by fraction
+        best_idx_b = None
+        best_frac_diff = float("inf")
+        for idx_b in directions_b:
+            frac_b = idx_b / max(n_b - 1, 1)
+            diff = abs(frac_a - frac_b)
+            if diff < best_frac_diff:
+                best_frac_diff = diff
+                best_idx_b = idx_b
+        if best_idx_b is None:
+            continue
+        dir_b = directions_b[best_idx_b]
+        da = dir_a.float().squeeze()
+        db = dir_b.float().squeeze()
+        # If hidden sizes differ, can't compare directly — skip
+        if da.shape != db.shape:
+            continue
+        na = da.norm().item()
+        nb = db.norm().item()
+        if na < 1e-8 or nb < 1e-8:
+            continue
+        cos = float(torch.dot(da / na, db / nb).abs().item())
+        ratio = min(na, nb) / max(na, nb)
+        rows.append(CrossModelTransferLayerResult(
+            layer_frac=frac_a, cosine_similarity=cos, norm_ratio=ratio,
+        ))
+        cosines.append(cos)
+
+    mean_cos = sum(cosines) / len(cosines) if cosines else 0.0
+    # Universality index: fraction of layers with cosine > 0.7
+    universal = sum(1 for c in cosines if c > 0.7) / len(cosines) if cosines else 0.0
+    return CrossModelTransferResult(layers=rows, mean_cosine=mean_cos, universality_index=universal)
+
+
+@dataclass
+class SparsityLayerResult:
+    layer_index: int
+    gini_coefficient: float
+    top_10pct_concentration: float
+    effective_dimensions: float
+
+
+@dataclass
+class SparsityAnalysisResult:
+    layers: list[SparsityLayerResult]
+    mean_gini: float
+    most_sparse_layer: int | None
+    recommended_surgery_top_k: float
+
+
+def analyze_sparsity(
+    grouped_vectors: dict[str, dict[int, list[torch.Tensor]]],
+) -> SparsityAnalysisResult:
+    """Analyze how concentrated the refusal signal is per layer.
+
+    Computes Gini coefficient and top-10% concentration of the difference
+    between group means. High Gini = refusal concentrated in few dimensions
+    (good candidate for sparse surgery).
+    """
+    groups = sorted(grouped_vectors)
+    rows: list[SparsityLayerResult] = []
+    if len(groups) < 2:
+        return SparsityAnalysisResult([], 0.0, None, 0.3)
+
+    all_layers = sorted({idx for per_group in grouped_vectors.values() for idx in per_group})
+    for layer_idx in all_layers:
+        means: list[torch.Tensor] = []
+        for group in groups:
+            samples = grouped_vectors[group].get(layer_idx, [])
+            if not samples:
+                continue
+            means.append(torch.stack([s.float() for s in samples]).mean(dim=0))
+        if len(means) < 2:
+            continue
+        diff = (means[0] - means[1]).abs()
+        sorted_diff = diff.sort(descending=True).values
+        total = sorted_diff.sum().item()
+        if total < 1e-10:
+            rows.append(SparsityLayerResult(layer_idx, 0.0, 0.0, float(diff.numel())))
+            continue
+        # Gini coefficient (using ascending sort)
+        n = diff.numel()
+        sorted_asc = diff.sort().values
+        index = torch.arange(1, n + 1, dtype=torch.float32)
+        gini = float(((2.0 * index - n - 1) * sorted_asc).sum().item() / (n * total))
+        # Top 10% concentration
+        k10 = max(1, n // 10)
+        top_10 = float(sorted_diff[:k10].sum().item() / total)
+        # Effective dimensions (entropy-based)
+        probs = diff / total
+        log_probs = torch.log(probs.clamp(min=1e-10))
+        eff_dim = float(torch.exp(-(probs * log_probs).sum()).item())
+
+        rows.append(SparsityLayerResult(layer_idx, gini, top_10, eff_dim))
+
+    gini_vals = [r.gini_coefficient for r in rows]
+    mean_gini = sum(gini_vals) / len(gini_vals) if gini_vals else 0.0
+    most_sparse = max(rows, key=lambda r: r.gini_coefficient).layer_index if rows else None
+    # Recommend top_k based on mean concentration
+    mean_top10 = sum(r.top_10pct_concentration for r in rows) / len(rows) if rows else 0.5
+    recommended_k = max(0.1, min(0.5, mean_top10 * 1.5))
+    return SparsityAnalysisResult(
+        layers=rows, mean_gini=mean_gini,
+        most_sparse_layer=most_sparse, recommended_surgery_top_k=round(recommended_k, 2),
     )
 
 

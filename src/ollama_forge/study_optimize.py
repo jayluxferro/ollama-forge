@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from ollama_forge.study_config import StudyConfig, StrategyConfig
+from ollama_forge.study_config import StrategyConfig, StudyConfig
 from ollama_forge.study_runner import run_study
 
 

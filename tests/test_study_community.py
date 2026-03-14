@@ -13,7 +13,9 @@ from ollama_forge.study_reports import StudyReport, StudyResult
 def _make_report() -> StudyReport:
     report = StudyReport(model_name="demo/model", config={"x": 1})
     report.add_baseline({"perplexity": 5.0})
-    report.add_result(StudyResult(strategy="layer_removal", component="layer_0", description="x", metrics={"perplexity": 6.0}))
+    report.add_result(StudyResult(
+        strategy="layer_removal", component="layer_0", description="x", metrics={"perplexity": 6.0},
+    ))
     return report
 
 

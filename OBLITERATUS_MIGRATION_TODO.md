@@ -14,9 +14,9 @@ Scope: port `OBLITERATUS` capabilities into `ollama-forge` without telemetry, re
 
 - [x] Add guided interactive CLI for study setup and model selection
 - [x] Add local UI for ablation/abliteration workflows
-- [ ] Add side-by-side model comparison workflows
-- [ ] Add richer export/report regeneration commands
-- [ ] Add curated examples for study configs and benchmark recipes
+- [x] Add side-by-side model comparison workflows (abliterate compare)
+- [x] Add richer export/report regeneration commands (markdown, HTML, JSON, CSV, LaTeX)
+- [x] Add curated examples for study configs and benchmark recipes
 
 ## Generic Ablation Suite
 
@@ -31,55 +31,60 @@ Scope: port `OBLITERATUS` capabilities into `ollama-forge` without telemetry, re
 
 ## Evaluation
 
-- [ ] Add baseline evaluator abstraction
+- [x] Add baseline evaluator abstraction (StudyEvaluator: perplexity, entropy, effective_rank, accuracy, f1)
 - [x] Add advanced metrics module
 - [x] Add benchmark catalog and baseline comparison helpers
-- [ ] Add plot generation for study and benchmark outputs
-- [ ] Add lm-eval integration where feasible
-- [ ] Add Heretic-style eval integration where feasible
+- [x] Add plot generation for study and benchmark outputs (plot_impact + plot_heatmap)
+- [x] Add lm-eval integration (study lm-eval command, build/run/save plan)
+- [x] Add Heretic-style eval integration (evaluate_abliteration with refusal marker detection)
 
 ## Abliteration Pipeline Expansion
 
-- [ ] Expand method catalog toward `OBLITERATUS` parity
-- [ ] Add informed pipeline scaffolding
-- [ ] Add reusable stage/result objects
-- [ ] Add richer intermediate artifact capture
-- [ ] Add community/local result envelopes without telemetry
+- [x] Expand method catalog toward `OBLITERATUS` parity (surgical, optimized, nuclear profiles)
+- [x] Add informed pipeline scaffolding (recommend_abliterate_settings with new feature recommendations)
+- [x] Add reusable stage/result objects (InformedPipelineResult, PipelineStage)
+- [x] Add richer intermediate artifact capture (build_informed_run_artifact, pipeline exports)
+- [x] Add community/local result envelopes without telemetry (save/load/aggregate contributions)
 
 ## Mechanistic Analysis Modules
 
 - [x] Add analysis module registry
 - [x] Add activation probing
-- [ ] Add causal tracing
 - [x] Add causal tracing
 - [x] Add logit lens
-- [ ] Add tuned lens hooks where feasible
-- [ ] Add concept geometry analysis
+- [x] Add tuned lens hooks (analyze_tuned_lens with LayerNorm + KL convergence)
+- [x] Add concept geometry analysis
 - [x] Add cross-layer alignment analysis
-- [ ] Add cross-model transfer analysis
-- [ ] Add steering vector analysis
+- [x] Add cross-model transfer analysis
+- [x] Add steering vector analysis
 - [x] Add residual stream analysis
-- [ ] Add activation patching / causal patching
-- [ ] Add conditional abliteration analysis
+- [x] Add activation patching / causal patching
 - [x] Add conditional abliteration analysis
-- [ ] Add defense robustness analysis
-- [ ] Add sparse surgery / SAE-oriented analysis where feasible
-- [ ] Add Wasserstein / spectral / manifold modules where justified
+- [x] Add defense robustness analysis
+- [x] Add sparse surgery / SAE-oriented analysis (analyze_sparsity with Gini, concentration, recommended top_k)
+- [x] Document Wasserstein / spectral / manifold as research-only (see OBLITERATUS_MIGRATION_NOTES.md)
+
+## Core Algorithm Improvements
+
+- [x] Add bias projection (project_bias=True, --project-bias / --no-project-bias)
+- [x] Add whitened SVD direction extraction (--svd-method whitened)
+- [x] Add iterative refinement (--refine-passes N, --refine-threshold T)
+- [x] Add sparse surgery mode (--sparse-surgery --surgery-top-k)
 
 ## Reversible / Advanced Interventions
 
-- [ ] Add LoRA-based reversible ablation
+- [x] Add LoRA-based reversible ablation
 - [x] Add Bayesian/grid optimizer for ablation parameters
-- [ ] Add architecture profile system
-- [ ] Add MoE-aware interventions where architectures allow it
-- [ ] Add reproducibility helpers and run manifests
+- [x] Add architecture profile system
+- [x] Add MoE-aware interventions (--moe-expert-scale, surgical profile with 0.4 scale)
+- [x] Add reproducibility helpers and run manifests (enhanced with git hash, versions)
 
 ## Documentation
 
-- [ ] Document study presets and config format
-- [ ] Document migration decisions and deviations from `OBLITERATUS`
-- [ ] Document unsupported research-only modules and rationale
-- [ ] Add wiki pages for new study and analysis commands
+- [x] Document study presets and config format (examples/studies/README.md)
+- [x] Document migration decisions and deviations (OBLITERATUS_MIGRATION_NOTES.md)
+- [x] Document unsupported research-only modules (OBLITERATUS_MIGRATION_NOTES.md)
+- [x] Add wiki pages for new study and analysis commands (Study-Framework.md, Abliterate-Profiles.md)
 
 ## Current Slice
 

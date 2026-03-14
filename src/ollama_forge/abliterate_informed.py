@@ -46,7 +46,9 @@ def recommend_abliterate_settings(analysis_docs: list[dict[str, Any]]) -> dict[s
                 recommendation["notes"].append("Security eval shows strong refusal; increasing ablation strength.")
             if isinstance(asr_pct, (int, float)) and asr_pct >= 70:
                 recommendation["strength"] = min(float(recommendation["strength"]), 1.0)
-                recommendation["notes"].append("Security eval shows high baseline compliance; keeping ablation conservative.")
+                recommendation["notes"].append(
+                    "Security eval shows high baseline compliance; keeping ablation conservative."
+                )
         results = doc.get("results")
         if isinstance(results, dict) and results:
             numeric_scores: list[float] = []
@@ -60,7 +62,10 @@ def recommend_abliterate_settings(analysis_docs: list[dict[str, Any]]) -> dict[s
                 if mean_score < 0.35:
                     recommendation["profile"] = "safe"
                     recommendation["mlp_strength"] = min(float(recommendation["mlp_strength"]), 0.8)
-                    recommendation["notes"].append("External eval indicates weak capability baseline; reducing intervention strength.")
+                    recommendation["notes"].append(
+                        "External eval indicates weak capability baseline;"
+                        " reducing intervention strength."
+                    )
         if doc.get("arch_class") == "moe":
             recommendation["profile"] = "safe"
             recommendation["strength"] = min(float(recommendation["strength"]), 1.0)
@@ -73,11 +78,15 @@ def recommend_abliterate_settings(analysis_docs: list[dict[str, Any]]) -> dict[s
             cosine = float(doc.get("mean_adjacent_cosine", 0.0))
             if cosine >= 0.9:
                 recommendation["per_layer_directions"] = False
-                recommendation["notes"].append("High cross-layer alignment detected; global directions should be stable.")
+                recommendation["notes"].append(
+                    "High cross-layer alignment detected; global directions should be stable."
+                )
             elif cosine <= 0.65:
                 recommendation["per_layer_directions"] = True
                 recommendation["strength_kernel"] = "gaussian"
-                recommendation["notes"].append("Lower cross-layer alignment detected; per-layer directions recommended.")
+                recommendation["notes"].append(
+                    "Lower cross-layer alignment detected; per-layer directions recommended."
+                )
         if "top_layers_by_norm" in doc:
             top_layers = doc.get("top_layers_by_norm") or []
             if len(top_layers) >= 3:
@@ -88,31 +97,75 @@ def recommend_abliterate_settings(analysis_docs: list[dict[str, Any]]) -> dict[s
             recommendation["notes"].append("Polyhedral concept geometry detected; per-layer directions recommended.")
         if "strongest_layer" in doc and doc.get("strongest_layer") is not None:
             recommendation["strength"] = max(float(recommendation["strength"]), 1.1)
-            recommendation["notes"].append("Strong steering-vector separation detected; slightly stronger ablation recommended.")
+            recommendation["notes"].append(
+                "Strong steering-vector separation detected; slightly stronger ablation recommended."
+            )
         if "self_repair_risk" in doc:
             risk = float(doc.get("self_repair_risk", 0.0))
             if risk >= 0.65:
                 recommendation["per_layer_directions"] = True
                 recommendation["strength_kernel"] = "gaussian"
-                recommendation["notes"].append("Defense robustness indicates likely self-repair; use layered, center-weighted ablation.")
+                recommendation["notes"].append(
+                    "Defense robustness indicates likely self-repair;"
+                    " use layered, center-weighted ablation."
+                )
         if "entanglement_score" in doc:
             ent = float(doc.get("entanglement_score", 0.0))
             if ent >= 0.85:
                 recommendation["profile"] = "safe"
                 recommendation["mlp_strength"] = min(float(recommendation["mlp_strength"]), 0.7)
-                recommendation["notes"].append("High safety-capability entanglement detected; reducing destructive intervention strength.")
+                recommendation["notes"].append(
+                    "High safety-capability entanglement detected;"
+                    " reducing destructive intervention strength."
+                )
         if "largest_delta_layer" in doc and doc.get("largest_delta_layer") is not None:
             recommendation["strength"] = max(float(recommendation["strength"]), 1.1)
-            recommendation["notes"].append("Residual-stream shift is concentrated; slightly stronger ablation recommended.")
+            recommendation["notes"].append(
+                "Residual-stream shift is concentrated; slightly stronger ablation recommended."
+            )
         if "most_critical_layer" in doc and doc.get("most_critical_layer") is not None:
             recommendation["profile"] = "aggressive"
             recommendation["strength"] = max(float(recommendation["strength"]), 1.2)
-            recommendation["notes"].append("Causal tracing found a critical layer; aggressive settings may be justified.")
+            recommendation["notes"].append(
+                "Causal tracing found a critical layer; aggressive settings may be justified."
+            )
 
     if recommendation["profile"] == "aggressive":
         recommendation["atten_strength"] = max(float(recommendation["atten_strength"]), 1.2)
         recommendation["mlp_strength"] = max(float(recommendation["mlp_strength"]), 1.1)
         recommendation["norm_preserving"] = False
+
+    # Recommend new features based on analysis results
+    has_polyhedral = any(doc.get("most_polyhedral_layer") is not None for doc in analysis_docs)
+    has_high_self_repair = any(float(doc.get("self_repair_risk", 0)) >= 0.5 for doc in analysis_docs)
+    has_entanglement = any(float(doc.get("entanglement_score", 0)) >= 0.7 for doc in analysis_docs)
+    is_moe = any(doc.get("arch_class") == "moe" for doc in analysis_docs)
+
+    # Whitened SVD when polyhedral geometry detected (multi-direction benefits from cleaner separation)
+    if has_polyhedral:
+        recommendation["svd_method"] = "whitened"
+        recommendation["num_directions"] = max(int(recommendation.get("num_directions", 1)), 4)
+        recommendation["notes"].append(
+            "Polyhedral geometry detected; whitened SVD with multiple directions recommended."
+        )
+
+    # Iterative refinement when self-repair risk is high
+    if has_high_self_repair:
+        recommendation["refine_passes"] = max(int(recommendation.get("refine_passes", 0)), 2)
+        recommendation["notes"].append(
+            "Self-repair risk detected; iterative refinement recommended."
+        )
+
+    # Sparse surgery for MoE or highly entangled models
+    if is_moe or has_entanglement:
+        recommendation["sparse_surgery"] = True
+        recommendation["surgery_top_k"] = 0.3
+        recommendation["notes"].append(
+            "Sparse surgery recommended to preserve capability-critical weights."
+        )
+
+    # Always recommend bias projection
+    recommendation["project_bias"] = True
 
     return recommendation
 
@@ -208,14 +261,16 @@ def recommend_followup_settings(artifact: dict[str, Any]) -> dict[str, Any]:
     comparison_metrics = eval_comparison.get("metrics") or {}
     asr_compare = comparison_metrics.get("asr_pct") or {}
     refusal_compare = comparison_metrics.get("refusal_rate_pct") or {}
-    if isinstance(asr_compare.get("a"), (int, float)) and isinstance(asr_compare.get("b"), (int, float)):
-        if float(asr_compare["b"]) <= float(asr_compare["a"]):
-            recommendation["strength"] = max(float(recommendation.get("strength", 1.0)), 1.2)
-            notes.append("Benchmark ASR did not improve versus comparison report; increase intervention strength.")
-    if isinstance(refusal_compare.get("a"), (int, float)) and isinstance(refusal_compare.get("b"), (int, float)):
-        if float(refusal_compare["b"]) >= float(refusal_compare["a"]):
-            recommendation["mlp_strength"] = max(float(recommendation.get("mlp_strength", 0.9)), 1.1)
-            notes.append("Benchmark refusal did not decrease versus comparison report; increase MLP-side intervention.")
+    asr_a = asr_compare.get("a")
+    asr_b = asr_compare.get("b")
+    if isinstance(asr_a, (int, float)) and isinstance(asr_b, (int, float)) and float(asr_b) <= float(asr_a):
+        recommendation["strength"] = max(float(recommendation.get("strength", 1.0)), 1.2)
+        notes.append("Benchmark ASR did not improve; increase intervention strength.")
+    ref_a = refusal_compare.get("a")
+    ref_b = refusal_compare.get("b")
+    if isinstance(ref_a, (int, float)) and isinstance(ref_b, (int, float)) and float(ref_b) >= float(ref_a):
+        recommendation["mlp_strength"] = max(float(recommendation.get("mlp_strength", 0.9)), 1.1)
+        notes.append("Benchmark refusal did not decrease; increase MLP-side intervention.")
 
     recommendation["notes"] = notes
     return recommendation

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -112,10 +113,8 @@ def run_study(
     report.save_summary(output_root / "study-summary.txt")
     report.save_markdown(output_root / "study-report.md")
     report.save_html(output_root / "study-report.html")
-    try:
+    with contextlib.suppress(ImportError, ValueError):
         report.plot_impact(output_root / "study-impact.png")
-    except (ImportError, ValueError):
-        pass
     manifest = build_study_manifest(
         config=config.to_dict(),
         artifacts={

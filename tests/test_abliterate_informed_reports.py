@@ -15,5 +15,7 @@ def test_compare_informed_artifacts_tracks_profile_and_strength() -> None:
 
 
 def test_informed_artifact_markdown_includes_status() -> None:
-    text = informed_artifact_markdown({"run_status": "success", "recommendation": {"profile": "balanced", "strength": 1.0}})
+    text = informed_artifact_markdown(
+        {"run_status": "success", "recommendation": {"profile": "balanced", "strength": 1.0}},
+    )
     assert "Run status" in text

@@ -6,19 +6,22 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from ollama_forge.study_analysis import (
-    analyze_activation_probe,
+from ollama_forge.study_analysis import (  # noqa: E402
     analyze_activation_patching,
+    analyze_activation_probe,
     analyze_causal_patching,
     analyze_concept_geometry,
     analyze_conditional_similarity,
     analyze_cross_layer_similarity,
+    analyze_cross_model_transfer,
     analyze_defense_robustness,
     analyze_logit_lens,
     analyze_residual_stream,
+    analyze_sparsity,
     analyze_steering_vectors,
-    trace_causal_layers,
+    analyze_tuned_lens,
     available_analysis_modules,
+    trace_causal_layers,
 )
 
 
@@ -148,7 +151,10 @@ class _TraceHandle:
 
     def __init__(self) -> None:
         self.removed = None
-        self.tokenizer = lambda prompt, return_tensors="pt", truncation=True, max_length=256: {"input_ids": torch.tensor([[1, 2]])}
+        self.tokenizer = (
+            lambda prompt, return_tensors="pt", truncation=True, max_length=256:
+            {"input_ids": torch.tensor([[1, 2]])}
+        )
         self.model = self
 
     def __call__(self, **kwargs):
@@ -218,3 +224,108 @@ def test_analyze_defense_robustness_returns_entangled_layers() -> None:
     result = analyze_defense_robustness(grouped)
     assert 0.0 <= result.self_repair_risk <= 1.0
     assert result.entanglement_score >= 0.0
+
+
+class TestCrossModelTransfer:
+    def test_identical_directions_have_high_cosine(self) -> None:
+        d = torch.randn(8)
+        dirs = dict.fromkeys(range(4), d)
+        result = analyze_cross_model_transfer(dirs, dirs)
+        assert result.mean_cosine > 0.99
+        assert result.universality_index == 1.0
+
+    def test_orthogonal_directions_have_low_cosine(self) -> None:
+        dirs_a = {0: torch.tensor([1.0, 0.0, 0.0, 0.0])}
+        dirs_b = {0: torch.tensor([0.0, 1.0, 0.0, 0.0])}
+        result = analyze_cross_model_transfer(dirs_a, dirs_b)
+        assert result.mean_cosine < 0.01
+        assert result.universality_index == 0.0
+
+    def test_different_layer_counts_matched_by_fraction(self) -> None:
+        d = torch.randn(8)
+        dirs_a = {0: d, 3: d}  # 4-layer model
+        dirs_b = {0: d, 7: d}  # 8-layer model
+        result = analyze_cross_model_transfer(dirs_a, dirs_b)
+        assert len(result.layers) == 2
+        assert result.mean_cosine > 0.99
+
+    def test_empty_directions_return_zeros(self) -> None:
+        result = analyze_cross_model_transfer({}, {})
+        assert result.mean_cosine == 0.0
+        assert result.universality_index == 0.0
+        assert len(result.layers) == 0
+
+
+class TestSparsityAnalysis:
+    def test_sparse_signal_has_high_gini(self) -> None:
+        """A direction concentrated in one dimension should have high Gini."""
+        grouped = {
+            "harmful": {0: [torch.tensor([10.0, 0.0, 0.0, 0.0])]},
+            "harmless": {0: [torch.tensor([0.0, 0.0, 0.0, 0.0])]},
+        }
+        result = analyze_sparsity(grouped)
+        assert len(result.layers) == 1
+        assert result.layers[0].gini_coefficient > 0.5
+        assert result.layers[0].top_10pct_concentration > 0.8
+
+    def test_uniform_signal_has_low_gini(self) -> None:
+        """A direction spread equally has low Gini."""
+        grouped = {
+            "harmful": {0: [torch.tensor([1.0, 1.0, 1.0, 1.0])]},
+            "harmless": {0: [torch.tensor([0.0, 0.0, 0.0, 0.0])]},
+        }
+        result = analyze_sparsity(grouped)
+        assert result.layers[0].gini_coefficient < 0.1
+
+    def test_recommended_top_k_in_valid_range(self) -> None:
+        grouped = {
+            "harmful": {0: [torch.tensor([5.0, 1.0, 0.1, 0.01])]},
+            "harmless": {0: [torch.tensor([0.0, 0.0, 0.0, 0.0])]},
+        }
+        result = analyze_sparsity(grouped)
+        assert 0.1 <= result.recommended_surgery_top_k <= 0.5
+
+    def test_single_group_returns_empty(self) -> None:
+        grouped = {"harmless": {0: [torch.tensor([1.0, 0.0])]}}
+        result = analyze_sparsity(grouped)
+        assert len(result.layers) == 0
+        assert result.mean_gini == 0.0
+
+
+class _TunedLensHandle:
+    task = "causal_lm"
+    device = "cpu"
+
+    def __init__(self) -> None:
+        self.lm_head = torch.nn.Linear(4, 10, bias=False)
+        self.norm = torch.nn.LayerNorm(4)
+        model = type("M", (), {
+            "get_output_embeddings": lambda s: self.lm_head,
+            "model": type("Inner", (), {"norm": self.norm})(),
+        })()
+        self.model = model
+        self.tokenizer = lambda ids: "tok"
+        self.tokenizer.decode = lambda ids: "tok"
+
+
+class TestTunedLens:
+    def test_produces_results_with_kl(self) -> None:
+        handle = _TunedLensHandle()
+        vectors = {
+            0: [torch.randn(4)],
+            1: [torch.randn(4)],
+        }
+        result = analyze_tuned_lens(handle, vectors, top_k=3)
+        assert len(result.layers) == 2
+        assert result.final_layer_top_token is not None
+        # First layer should have non-zero KL from final
+        assert result.layers[0].kl_from_final >= 0.0
+
+    def test_convergence_layer_detected(self) -> None:
+        handle = _TunedLensHandle()
+        # Use identical vectors so KL ≈ 0 at both layers
+        v = torch.randn(4)
+        vectors = {0: [v], 1: [v]}
+        result = analyze_tuned_lens(handle, vectors)
+        # Both layers have ~same output, so convergence should be layer 0
+        assert result.convergence_layer == 0

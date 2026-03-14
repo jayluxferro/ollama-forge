@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
-def build_analysis_bundle(*, config_path: str, modules: list[str], results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_analysis_bundle(
+    *, config_path: str, modules: list[str], results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "config_path": config_path,

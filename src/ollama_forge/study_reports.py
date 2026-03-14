@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import csv
-import json
 import html
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -112,6 +112,50 @@ class StudyReport:
         axis.set_title(f"{self.model_name} - {metric}")
         axis.set_xlabel(metric)
         axis.set_ylabel("Component")
+        figure.tight_layout()
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(target, dpi=150, bbox_inches="tight")
+        plt.close(figure)
+        return target
+
+    def plot_heatmap(self, output_path: str | Path, metric: str | None = None) -> Path:
+        """Plot a strategy x layer heatmap of metric values."""
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError("study plot generation requires matplotlib") from exc
+
+        metric_names = sorted({name for item in self.results for name in item.metrics})
+        if not metric_names:
+            raise ValueError("No metrics available to plot")
+        metric = metric or metric_names[0]
+
+        strategies = sorted({item.strategy for item in self.results})
+        components = sorted({item.component for item in self.results if metric in item.metrics})
+        if not strategies or not components:
+            raise ValueError(f"Not enough data for heatmap with metric {metric!r}")
+
+        import numpy as np
+
+        data = np.full((len(strategies), len(components)), float("nan"))
+        strat_idx = {s: i for i, s in enumerate(strategies)}
+        comp_idx = {c: i for i, c in enumerate(components)}
+        for item in self.results:
+            if metric in item.metrics and item.strategy in strat_idx and item.component in comp_idx:
+                data[strat_idx[item.strategy], comp_idx[item.component]] = item.metrics[metric]
+
+        figure, axis = plt.subplots(figsize=(max(6, len(components) * 0.5), max(3, len(strategies) * 0.6)))
+        im = axis.imshow(data, aspect="auto", cmap="YlOrRd")
+        axis.set_xticks(range(len(components)))
+        axis.set_xticklabels(components, rotation=45, ha="right", fontsize=7)
+        axis.set_yticks(range(len(strategies)))
+        axis.set_yticklabels(strategies, fontsize=8)
+        axis.set_title(f"{self.model_name} - {metric} heatmap")
+        figure.colorbar(im, ax=axis, label=metric)
         figure.tight_layout()
         target = Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)

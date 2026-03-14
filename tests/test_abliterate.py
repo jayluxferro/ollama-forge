@@ -539,6 +539,148 @@ class TestOutputOnlyAblation:
         )
 
 
+class _FakeLinearWithBias:
+    """Linear layer with both weight and bias for bias projection tests."""
+
+    def __init__(self, out_f: int, in_f: int) -> None:
+        self.weight = torch.randn(out_f, in_f)
+        self.bias = torch.randn(out_f)
+
+
+class _FakeAttnWithBias:
+    def __init__(self, h: int) -> None:
+        self.q_proj = _FakeLinearWithBias(h, h)
+        self.k_proj = _FakeLinearWithBias(h, h)
+        self.v_proj = _FakeLinearWithBias(h, h)
+        self.o_proj = _FakeLinearWithBias(h, h)
+
+
+class _FakeMLPWithBias:
+    def __init__(self, h: int) -> None:
+        self.gate_proj = _FakeLinearWithBias(h * 2, h)
+        self.up_proj = _FakeLinearWithBias(h * 2, h)
+        self.down_proj = _FakeLinearWithBias(h, h * 2)
+
+
+class _FakeLayerWithBias:
+    def __init__(self, h: int) -> None:
+        self.self_attn = _FakeAttnWithBias(h)
+        self.mlp = _FakeMLPWithBias(h)
+
+
+class _FakeModelWithBias(_FakeModel):
+    def __init__(self, hidden: int = HIDDEN, n_layers: int = N_LAYERS) -> None:
+        super().__init__(hidden, n_layers)
+        self.model.layers = [_FakeLayerWithBias(hidden) for _ in range(n_layers)]
+
+
+class TestBiasProjection:
+    """Tests for project_bias=True: bias vectors are also projected."""
+
+    def test_bias_is_projected_by_default(self, tmp_path: Path) -> None:
+        """With project_bias=True (default), bias vectors should be modified."""
+        model = _FakeModelWithBias()
+        bias_before = model.model.layers[1].self_attn.o_proj.bias.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        bias_after = model.model.layers[1].self_attn.o_proj.bias
+        assert not torch.allclose(bias_before, bias_after), (
+            "bias should be modified with project_bias=True (default)"
+        )
+
+    def test_no_project_bias_leaves_bias_unchanged(self, tmp_path: Path) -> None:
+        """With project_bias=False, bias vectors should NOT be modified."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModelWithBias()
+        bias_before = model.model.layers[1].self_attn.o_proj.bias.clone()
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "checkpoint"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            apply_refusal_dir_and_save(
+                "fake/model", pt, out, verify=False,
+                skip_begin_layers=0, skip_end_layers=0,
+                project_bias=False,
+            )
+        bias_after = model.model.layers[1].self_attn.o_proj.bias
+        assert torch.allclose(bias_before, bias_after), (
+            "bias should NOT be modified with project_bias=False"
+        )
+
+    def test_mlp_bias_is_projected(self, tmp_path: Path) -> None:
+        """MLP bias vectors should also be projected."""
+        model = _FakeModelWithBias()
+        bias_before = model.model.layers[1].mlp.down_proj.bias.clone()
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        bias_after = model.model.layers[1].mlp.down_proj.bias
+        assert not torch.allclose(bias_before, bias_after), (
+            "MLP down_proj bias should be modified"
+        )
+
+    def test_no_bias_model_works_fine(self, tmp_path: Path) -> None:
+        """Models without bias (standard case) should still work."""
+        model = _FakeModel()
+        assert not hasattr(model.model.layers[0].self_attn.q_proj, "bias")
+        _apply_fake(tmp_path, model, skip_begin=0, skip_end=0)
+        # No error = success
+
+
+class TestSparseSurgery:
+    """Tests for sparse_surgery=True: only top-k rows are modified."""
+
+    def test_sparse_surgery_preserves_some_rows(self, tmp_path: Path) -> None:
+        """With sparse_surgery, some rows of o_proj (left-multiply) should be unchanged."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModel()
+        w_before = model.model.layers[1].self_attn.o_proj.weight.clone()
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "checkpoint"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            apply_refusal_dir_and_save(
+                "fake/model", pt, out, verify=False,
+                skip_begin_layers=0, skip_end_layers=0,
+                norm_preserving=False,
+                sparse_surgery=True, surgery_top_k=0.5,
+            )
+        w_after = model.model.layers[1].self_attn.o_proj.weight
+        row_changed = (w_before != w_after).any(dim=1).sum().item()
+        # At most ~50% of rows should be modified (norm_preserving off so no global rescale)
+        assert row_changed <= int(HIDDEN * 0.5) + 1, (
+            f"Sparse surgery (top_k=0.5) should modify at most ~50% rows, got {row_changed}/{HIDDEN}"
+        )
+        # But at least 1 row should be modified
+        assert row_changed >= 1, "At least one row should be modified"
+
+    def test_sparse_surgery_still_modifies_weights(self, tmp_path: Path) -> None:
+        """Sparse surgery should still modify at least some weights."""
+        from ollama_forge.abliterate import apply_refusal_dir_and_save
+
+        model = _FakeModel()
+        w_before = model.model.layers[1].self_attn.o_proj.weight.clone()
+        pt = _make_direction_pt(tmp_path)
+        out = tmp_path / "checkpoint"
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=model),
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            apply_refusal_dir_and_save(
+                "fake/model", pt, out, verify=False,
+                skip_begin_layers=0, skip_end_layers=0,
+                sparse_surgery=True, surgery_top_k=0.3,
+            )
+        w_after = model.model.layers[1].self_attn.o_proj.weight
+        assert not torch.allclose(w_before, w_after), "Some weights should be modified"
+
+
 class TestApplyRefusalDirPerLayer:
     """Tests for per-layer direction .pt format."""
 

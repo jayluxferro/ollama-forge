@@ -10,62 +10,61 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
 import streamlit as st
 
 try:
-    from ollama_forge.study_analysis import available_analysis_modules, save_analysis_result
     from ollama_forge.abliterate_pipeline import compare_pipeline_results, load_informed_pipeline_result
+    from ollama_forge.study_analysis import (
+        analyze_activation_patching,
+        analyze_activation_probe,
+        analyze_conditional_similarity,
+        analyze_cross_layer_similarity,
+        analyze_logit_lens,
+        analyze_residual_stream,
+        available_analysis_modules,
+        collect_grouped_layer_vectors,
+        collect_layer_vectors,
+        save_analysis_result,
+        trace_causal_layers,
+    )
     from ollama_forge.study_config import StudyConfig
-    from ollama_forge.study_reports import compare_study_reports
     from ollama_forge.study_model_presets import detect_hardware_tier, recommended_model_presets
     from ollama_forge.study_presets import list_study_presets
-    from ollama_forge.study_reports import load_study_report
+    from ollama_forge.study_reports import compare_study_reports, load_study_report
     from ollama_forge.study_runner import plan_study, run_study
     from ollama_forge.study_runtime import (
         StudyEvaluator,
         load_study_dataset,
         load_study_model,
-    )
-    from ollama_forge.study_analysis import (
-        analyze_activation_probe,
-        analyze_activation_patching,
-        analyze_conditional_similarity,
-        analyze_cross_layer_similarity,
-        analyze_logit_lens,
-        analyze_residual_stream,
-        collect_grouped_layer_vectors,
-        collect_layer_vectors,
-        trace_causal_layers,
     )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from ollama_forge.study_analysis import available_analysis_modules, save_analysis_result
     from ollama_forge.abliterate_pipeline import compare_pipeline_results, load_informed_pipeline_result
+    from ollama_forge.study_analysis import (
+        analyze_activation_patching,
+        analyze_activation_probe,
+        analyze_conditional_similarity,
+        analyze_cross_layer_similarity,
+        analyze_logit_lens,
+        analyze_residual_stream,
+        available_analysis_modules,
+        collect_grouped_layer_vectors,
+        collect_layer_vectors,
+        save_analysis_result,
+        trace_causal_layers,
+    )
     from ollama_forge.study_config import StudyConfig
-    from ollama_forge.study_reports import compare_study_reports
     from ollama_forge.study_model_presets import detect_hardware_tier, recommended_model_presets
     from ollama_forge.study_presets import list_study_presets
-    from ollama_forge.study_reports import load_study_report
+    from ollama_forge.study_reports import compare_study_reports, load_study_report
     from ollama_forge.study_runner import plan_study, run_study
     from ollama_forge.study_runtime import (
         StudyEvaluator,
         load_study_dataset,
         load_study_model,
-    )
-    from ollama_forge.study_analysis import (
-        analyze_activation_probe,
-        analyze_activation_patching,
-        analyze_conditional_similarity,
-        analyze_cross_layer_similarity,
-        analyze_logit_lens,
-        analyze_residual_stream,
-        collect_grouped_layer_vectors,
-        collect_layer_vectors,
-        trace_causal_layers,
     )
 
 
@@ -215,7 +214,11 @@ def _render_run_tab(st_module) -> None:
 
 
 def _render_reports_tab(st_module) -> None:
-    mode = st_module.radio("Mode", options=["Study report", "Study compare", "Pipeline report", "Pipeline compare"], horizontal=True)
+    mode = st_module.radio(
+        "Mode",
+        options=["Study report", "Study compare", "Pipeline report", "Pipeline compare"],
+        horizontal=True,
+    )
     if mode == "Study report":
         report_a = st_module.text_input("Study report path", value="study-results/study-results.json")
         if st_module.button("Load study report"):
@@ -231,8 +234,12 @@ def _render_reports_tab(st_module) -> None:
         return
 
     if mode == "Study compare":
-        report_a = st_module.text_input("Study report A", value="study-results/study-results.json", key="study_compare_a")
-        report_b = st_module.text_input("Study report B", value="study-results-2/study-results.json", key="study_compare_b")
+        report_a = st_module.text_input(
+            "Study report A", value="study-results/study-results.json", key="study_compare_a",
+        )
+        report_b = st_module.text_input(
+            "Study report B", value="study-results-2/study-results.json", key="study_compare_b",
+        )
         if st_module.button("Compare study reports"):
             try:
                 payload = compare_study_reports(load_study_report(report_a), load_study_report(report_b))
@@ -252,7 +259,9 @@ def _render_reports_tab(st_module) -> None:
         return
 
     report_a = st_module.text_input("Pipeline A", value="abliterate-demo/informed-pipeline.json", key="pipe_compare_a")
-    report_b = st_module.text_input("Pipeline B", value="abliterate-demo-2/informed-pipeline.json", key="pipe_compare_b")
+    report_b = st_module.text_input(
+        "Pipeline B", value="abliterate-demo-2/informed-pipeline.json", key="pipe_compare_b",
+    )
     if st_module.button("Compare pipelines"):
         try:
             payload = compare_pipeline_results(

@@ -133,9 +133,9 @@ def _macro_f1(predictions: list[int], references: list[int]) -> float:
         return 0.0
     scores = []
     for label in labels:
-        tp = sum(int(p == label and r == label) for p, r in zip(predictions, references))
-        fp = sum(int(p == label and r != label) for p, r in zip(predictions, references))
-        fn = sum(int(p != label and r == label) for p, r in zip(predictions, references))
+        tp = sum(int(p == label and r == label) for p, r in zip(predictions, references, strict=True))
+        fp = sum(int(p == label and r != label) for p, r in zip(predictions, references, strict=True))
+        fn = sum(int(p != label and r == label) for p, r in zip(predictions, references, strict=True))
         if tp == 0 and fp == 0 and fn == 0:
             scores.append(0.0)
             continue
@@ -244,7 +244,11 @@ class StudyModelHandle:
             touched.append((module.weight, slice(start, min(end, module.weight.shape[0])), None))
             if getattr(module, "bias", None) is not None:
                 touched.append((module.bias, slice(start, min(end, module.bias.shape[0])), None))
-        out_proj = getattr(attention, "o_proj", None) or getattr(attention, "out_proj", None) or getattr(attention, "c_proj", None)
+        out_proj = (
+            getattr(attention, "o_proj", None)
+            or getattr(attention, "out_proj", None)
+            or getattr(attention, "c_proj", None)
+        )
         if out_proj is not None and hasattr(out_proj, "weight"):
             touched.append((out_proj.weight, None, slice(start, min(end, out_proj.weight.shape[1]))))
         if not touched:
@@ -322,7 +326,6 @@ class StudyModelHandle:
         *,
         strength: float = 1.0,
     ) -> None:
-        import torch
 
         layer = _extract_layers(self.model)[layer_index]
         strength = max(0.0, min(1.0, float(strength)))
@@ -437,7 +440,6 @@ class StudyEvaluator:
         return self._evaluate_causal_lm()
 
     def _evaluate_causal_lm(self) -> dict[str, float]:
-        import torch
         from ollama_forge.study_metrics import effective_rank, mean_token_entropy
 
         dataset = self.dataset
@@ -478,6 +480,7 @@ class StudyEvaluator:
 
     def _evaluate_classification(self) -> dict[str, float]:
         import torch
+
         from ollama_forge.study_metrics import classification_logit_margin
 
         dataset = self.dataset
@@ -505,7 +508,7 @@ class StudyEvaluator:
                 margins.append(classification_logit_margin(logits.detach().cpu()))
         results: dict[str, float] = {}
         if "accuracy" in self.metrics:
-            correct = sum(int(p == r) for p, r in zip(predictions, references))
+            correct = sum(int(p == r) for p, r in zip(predictions, references, strict=True))
             results["accuracy"] = correct / max(len(references), 1)
         if "f1" in self.metrics:
             results["f1"] = _macro_f1(predictions, references)

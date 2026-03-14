@@ -83,7 +83,7 @@ def aggregate_study_contributions(records: list[dict[str, Any]]) -> dict[str, An
             {
                 metric
                 for report in reports
-                for metric in (report.get("baseline_metrics") or {}).keys()
+                for metric in (report.get("baseline_metrics") or {})
             }
         )
         summary: dict[str, Any] = {"n_reports": len(reports)}

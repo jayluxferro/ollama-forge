@@ -274,6 +274,61 @@ def get_layers(model: Any) -> Any:
     )
 
 
+def _leace_direction(harmful_mat: Any, harmless_mat: Any, eps: float = 1e-4) -> Any:
+    """Compute refusal direction via Fisher's Linear Discriminant (LEACE-inspired).
+
+    Instead of a simple diff-of-means, this computes v = S_w^{-1} @ delta where:
+      - delta = mean(harmful) - mean(harmless)
+      - S_w = (cov(harmful) + cov(harmless)) / 2  (within-class covariance)
+
+    The within-class normalization prevents high-variance but non-discriminative
+    dimensions from dominating the direction, producing a cleaner erasure signal.
+
+    Args:
+        harmful_mat: (n_h, hidden_dim) tensor of harmful activations.
+        harmless_mat: (n_b, hidden_dim) tensor of harmless activations.
+        eps: Tikhonov regularization for S_w inversion (numerical stability).
+
+    Returns:
+        (hidden_dim, 1) unit-norm direction tensor (same shape as diff-means output).
+    """
+    import torch
+
+    n_h, d = harmful_mat.shape
+    n_b = harmless_mat.shape[0]
+
+    mu_h = harmful_mat.mean(dim=0)
+    mu_b = harmless_mat.mean(dim=0)
+    delta = mu_h - mu_b
+
+    # Within-class covariance: S_w = (S_h + S_b) / 2
+    H_centered = harmful_mat - mu_h.unsqueeze(0)
+    B_centered = harmless_mat - mu_b.unsqueeze(0)
+    S_h = (H_centered.T @ H_centered) / max(n_h - 1, 1)
+    S_b = (B_centered.T @ B_centered) / max(n_b - 1, 1)
+    S_w = (S_h + S_b) / 2.0
+
+    # Regularize for numerical stability
+    S_w_reg = S_w + eps * torch.eye(d, device=S_w.device, dtype=S_w.dtype)
+
+    # Fisher direction: v = S_w^{-1} @ delta
+    try:
+        v = torch.linalg.solve(S_w_reg, delta)
+    except torch.linalg.LinAlgError:
+        # Fallback: least-squares pseudoinverse
+        v = torch.linalg.lstsq(S_w_reg, delta.unsqueeze(1)).solution.squeeze(1)
+
+    v_norm = v.norm()
+    if v_norm > 1e-8:
+        direction = v / v_norm
+    else:
+        # Degenerate case: fall back to normalized mean difference
+        delta_norm = delta.norm()
+        direction = delta / max(delta_norm.item(), 1e-8)
+
+    return direction.unsqueeze(1)
+
+
 def compute_refusal_dir(
     model_id: str,
     harmful_path: str | Path,
@@ -290,6 +345,8 @@ def compute_refusal_dir(
     load_in_8bit: bool = False,
     gguf_file: str | Path | None = None,
     per_layer_directions: bool = False,
+    svd_method: str = "standard",
+    direction_method: str = "diff_means",
 ) -> dict[str, float | int] | None:
     """
     Compute refusal direction(s) from harmful vs harmless instructions and save to output_path (.pt).
@@ -298,6 +355,9 @@ def compute_refusal_dir(
     Saves one direction (mean difference) or n_directions (top-k from SVD on difference matrix).
     agg: last (default), mean (over non-special tokens), last_non_special.
     paired: when True, sample the same indices from harmful and harmless lists (for parallel lists).
+    svd_method: "standard" (default SVD) or "whitened" (covariance-normalized SVD for cleaner signal).
+    direction_method: "diff_means" (default, simple mean difference) or "leace" (Fisher Linear
+        Discriminant: S_w^{-1} @ delta, better handles high-variance non-discriminative dimensions).
     Requires torch and transformers. Use: uv sync --extra abliterate.
     Returns a small summary dict (layer_frac, layer_index, gap_norm) when not per_layer_directions; else None.
     """
@@ -506,14 +566,20 @@ def compute_refusal_dir(
                     vec = _select_hidden(out.hidden_states[idx + 1], toks)
                     harmless_by_layer[idx].append(vec.cpu())
         per_layer_list = []
+        if direction_method == "leace":
+            log.info("Using LEACE (Fisher Linear Discriminant) for per-layer direction extraction")
         for layer_idx in all_layer_indices:
-            harm_mean = torch.cat(harmful_by_layer[layer_idx], dim=0).mean(dim=0).float()
-            safe_mean = torch.cat(harmless_by_layer[layer_idx], dim=0).mean(dim=0).float()
-            gap = harm_mean - safe_mean
-            nrm = gap.norm().item()
-            if nrm > 1e-8:
-                gap = gap / nrm
-            per_layer_list.append(gap)
+            harm_mat = torch.cat(harmful_by_layer[layer_idx], dim=0).float()
+            safe_mat = torch.cat(harmless_by_layer[layer_idx], dim=0).float()
+            if direction_method == "leace":
+                d_vec = _leace_direction(harm_mat, safe_mat).squeeze(1)
+            else:
+                gap = harm_mat.mean(dim=0) - safe_mat.mean(dim=0)
+                nrm = gap.norm().item()
+                if nrm > 1e-8:
+                    gap = gap / nrm
+                d_vec = gap
+            per_layer_list.append(d_vec)
         directions_tensor = torch.stack(per_layer_list, dim=0)
         torch.save({"per_layer": True, "directions": directions_tensor}, output_path)
         if offload_folder:
@@ -558,11 +624,29 @@ def compute_refusal_dir(
     hidden_size = harmful_mat.size(1)
 
     if n_directions <= 1:
-        refusal_dir = (harmful_mat.mean(0) - harmless_mat.mean(0)).unsqueeze(1)
-        refusal_dir = refusal_dir / refusal_dir.norm()
+        if direction_method == "leace":
+            log.info("Using LEACE (Fisher Linear Discriminant) for direction extraction")
+            refusal_dir = _leace_direction(harmful_mat, harmless_mat)
+        else:
+            refusal_dir = (harmful_mat.mean(0) - harmless_mat.mean(0)).unsqueeze(1)
+            refusal_dir = refusal_dir / refusal_dir.norm()
     else:
         diff = harmful_mat - harmless_mat
         k = min(n_directions, diff.size(0), hidden_size)
+        if svd_method == "whitened":
+            # Whitened SVD: normalize by harmless covariance for cleaner signal separation.
+            # Centers the harmless activations and computes covariance, then whitens both
+            # harmful and harmless before computing the difference matrix for SVD.
+            harmless_centered = harmless_mat - harmless_mat.mean(0)
+            cov = (harmless_centered.T @ harmless_centered) / max(harmless_centered.size(0) - 1, 1)
+            # Regularize to avoid singular covariance
+            cov += 1e-6 * torch.eye(cov.size(0), device=cov.device)
+            L = torch.linalg.cholesky(cov)
+            # Whiten: multiply by inverse of Cholesky factor
+            whitened_harmful = torch.linalg.solve_triangular(L, harmful_mat.T, upper=False).T
+            whitened_harmless = torch.linalg.solve_triangular(L, harmless_mat.T, upper=False).T
+            diff = whitened_harmful - whitened_harmless
+            log.info("Using whitened SVD (covariance-normalized) for direction extraction")
         U, S, Vh = torch.linalg.svd(diff, full_matrices=False)
         D = Vh[:k, :].T
         for j in range(D.size(1)):
@@ -653,6 +737,14 @@ def apply_refusal_dir_and_save(
     kernel_center_frac: float = 0.5,
     kernel_width_frac: float = 0.4,
     output_only: bool = False,
+    project_bias: bool = True,
+    sparse_surgery: bool = False,
+    surgery_top_k: float = 0.3,
+    moe_expert_scale: float = 1.0,
+    refine_passes: int = 0,
+    refine_threshold: float = 0.1,
+    harmful_instructions: list[str] | None = None,
+    harmless_instructions: list[str] | None = None,
 ) -> None:
     """
     Bake the refusal-direction ablation into the model weights and save to output_dir.
@@ -660,6 +752,8 @@ def apply_refusal_dir_and_save(
     (dict with per_layer=True, directions (L,H)). direction_index: with per-layer, int = use that
     layer's direction for all; float = blend two layers; None = use each layer's own direction.
     strength_kernel: constant (default), linear_peak, or gaussian for layer-dependent strength.
+    project_bias: also project bias vectors b' = b - s*(D^T @ b)*D (default True).
+    sparse_surgery: only modify rows with high projection magnitude (top surgery_top_k fraction).
     """
     import torch
     from transformers import AutoTokenizer
@@ -789,33 +883,60 @@ def apply_refusal_dir_and_save(
         Handles naming variants: o_proj (LLaMA), out_proj (OPT/BERT), dense (Falcon/GPT-NeoX), c_proj (GPT-2)."""
         return [getattr(attn, n) for n in ("o_proj", "out_proj", "dense", "c_proj") if hasattr(attn, n)]
 
+    def _project_bias(linear: object, D: torch.Tensor, s: float) -> None:
+        """Project bias vector: b' = b - s * (D^T @ b) * D. Only when bias size == hidden_size."""
+        if not project_bias:
+            return
+        b = getattr(linear, "bias", None)
+        if b is None or b.shape[0] != hidden_size:
+            return
+        with torch.no_grad():
+            bf = b.data.float()
+            d = D.squeeze() if D.dim() == 2 and D.shape[1] == 1 else D
+            proj = s * torch.dot(d, bf) * d if d.dim() == 1 else s * (d @ (d.T @ bf))
+            b.data.copy_((bf - proj).to(b.dtype))
+
+    def _sparse_mask(w: torch.Tensor, new_w: torch.Tensor) -> torch.Tensor:
+        """Return new_w with only the top surgery_top_k fraction of rows modified."""
+        if not sparse_surgery:
+            return new_w
+        delta = (new_w - w).abs()
+        row_norms = delta.norm(dim=1)  # per-row modification magnitude
+        k = max(1, int(row_norms.numel() * surgery_top_k))
+        _, top_indices = row_norms.topk(k)
+        result = w.clone()
+        result[top_indices] = new_w[top_indices]
+        return result.to(new_w.dtype)
+
     def _apply_right(linear: object, I_minus_DDT: torch.Tensor) -> None:
         w = linear.weight.data.float()
         if w.shape[1] != hidden_size:
             return
         with torch.no_grad():
-            new_w = (w @ I_minus_DDT).to(linear.weight.dtype)
+            new_w = _sparse_mask(w, w @ I_minus_DDT)
             if norm_preserving:
                 orig_norm = torch.linalg.norm(w).item()
                 new_norm = torch.linalg.norm(new_w).item()
                 if new_norm > 1e-8:
                     new_w = new_w * (orig_norm / new_norm)
-            linear.weight.data.copy_(new_w)
+            linear.weight.data.copy_(new_w.to(linear.weight.dtype))
 
     def _apply_left(linear: object, I_minus_DDT: torch.Tensor) -> None:
         w = linear.weight.data.float()
         if w.shape[0] != hidden_size:
             return
         with torch.no_grad():
-            new_w = (I_minus_DDT @ w).to(linear.weight.dtype)
+            new_w = _sparse_mask(w, I_minus_DDT @ w)
             if norm_preserving:
                 orig_norm = torch.linalg.norm(w).item()
                 new_norm = torch.linalg.norm(new_w).item()
                 if new_norm > 1e-8:
                     new_w = new_w * (orig_norm / new_norm)
-            linear.weight.data.copy_(new_w)
+            linear.weight.data.copy_(new_w.to(linear.weight.dtype))
 
-    def _apply_mlp_module(mlp: object, I_minus_DDT_mlp: torch.Tensor) -> None:
+    def _apply_mlp_module(
+        mlp: object, I_minus_DDT_mlp: torch.Tensor, direction: torch.Tensor, eff_strength: float,
+    ) -> None:
         if mlp is None:
             return
         if not output_only:
@@ -834,20 +955,37 @@ def apply_refusal_dir_and_save(
                 proj = getattr(mlp, name, None)
                 if proj is not None:
                     _apply_right(proj, I_minus_DDT_mlp)
+                    _project_bias(proj, direction, eff_strength)
         for name in ("down_proj", "c_proj", "fc2", "dense_4h_to_h", "w2", "out_proj"):
             proj = getattr(mlp, name, None)
             if proj is not None:
                 _apply_left(proj, I_minus_DDT_mlp)
-        # MoE experts: apply the same projection to each expert module.
+                _project_bias(proj, direction, eff_strength)
+        # MoE experts: apply projection to each expert, with optional scaling.
+        # Research (SAFEx NeurIPS 2025) shows safety is concentrated in <0.2% of experts,
+        # so full-strength ablation of all experts damages capabilities.
+        # moe_expert_scale < 1.0 reduces intervention on individual experts while
+        # keeping shared expert at full strength.
         for exp_attr in ("experts", "expert_layers", "local_experts", "experts_list", "ffn_experts"):
             experts = getattr(mlp, exp_attr, None)
             if experts is None:
                 continue
-            for expert in list(experts):
-                _apply_mlp_module(expert, I_minus_DDT_mlp)
+            if moe_expert_scale < 1.0 and moe_expert_scale > 0:
+                scaled_s = eff_strength * moe_expert_scale
+                expert_DDT = (
+                    direction @ direction.T if direction.dim() == 2
+                    else direction.unsqueeze(1) @ direction.unsqueeze(0)
+                )
+                I_exp = torch.eye(hidden_size) - scaled_s * expert_DDT
+                for expert in list(experts):
+                    _apply_mlp_module(expert, I_exp, direction, scaled_s)
+            else:
+                for expert in list(experts):
+                    _apply_mlp_module(expert, I_minus_DDT_mlp, direction, eff_strength)
         shared = getattr(mlp, "shared_expert", None)
         if shared is not None:
-            _apply_mlp_module(shared, I_minus_DDT_mlp)
+            # Shared expert gets full strength — it's the primary intervention target in MoE
+            _apply_mlp_module(shared, I_minus_DDT_mlp, direction, eff_strength)
 
     for layer_idx, layer in enumerate(layers):
         if layer_idx < start_idx or layer_idx >= end_idx:
@@ -870,12 +1008,16 @@ def apply_refusal_dir_and_save(
             or getattr(layer, "attention", None)
             or getattr(layer, "attn", None)
         )
+        eff_s_attn = s_attn * scale
+        eff_s_mlp = s_mlp * scale
         if attn is not None:
             if not output_only:
                 for linear in _get_attn_input_linears(attn):
                     _apply_right(linear, I_minus_DDT_attn)
+                    _project_bias(linear, D, eff_s_attn)
             for linear in _get_attn_output_linears(attn):
                 _apply_left(linear, I_minus_DDT_attn)
+                _project_bias(linear, D, eff_s_attn)
         # Linear attention (Mamba / GatedDeltaNet / SSM, e.g. Qwen3.5 hybrid layers).
         # These layers have input projections (in_proj_qkv, in_proj_z) and output (out_proj)
         # that operate on hidden_size and must also be ablated.
@@ -886,16 +1028,18 @@ def apply_refusal_dir_and_save(
                     proj = getattr(lin_attn, name, None)
                     if proj is not None:
                         _apply_right(proj, I_minus_DDT_attn)
+                        _project_bias(proj, D, eff_s_attn)
             for name in ("out_proj",):
                 proj = getattr(lin_attn, name, None)
                 if proj is not None:
                     _apply_left(proj, I_minus_DDT_attn)
+                    _project_bias(proj, D, eff_s_attn)
         # MLP: input projections (right-multiply) cover LLaMA gate_proj/up_proj, GPT-2 c_fc,
         # OPT fc1, Falcon/GPT-NeoX dense_h_to_4h, Mixtral/Yi w1/w3.
         # Output projections (left-multiply) cover LLaMA down_proj, GPT-2 c_proj, OPT fc2,
         # Falcon/GPT-NeoX dense_4h_to_h, Mixtral/Yi w2.
         for mlp_attr in ("mlp", "ffn", "feed_forward", "feedforward", "ff", "mlp_block", "ff_layer"):
-            _apply_mlp_module(getattr(layer, mlp_attr, None), I_minus_DDT_mlp)
+            _apply_mlp_module(getattr(layer, mlp_attr, None), I_minus_DDT_mlp, D, eff_s_mlp)
 
     if verify:
         with torch.inference_mode():
@@ -908,6 +1052,23 @@ def apply_refusal_dir_and_save(
                     log.warning("Verification forward pass produced non-finite loss.")
             except Exception as e:
                 log.warning("Verification forward pass failed: %s", e)
+
+    # Iterative refinement: re-probe for residual refusal and apply additional passes
+    if refine_passes > 0 and harmful_instructions and harmless_instructions:
+        extra = refine_ablation(
+            model, tokenizer,
+            harmful_instructions, harmless_instructions,
+            max_passes=refine_passes,
+            threshold=refine_threshold,
+            strength=strength,
+            output_only=output_only,
+            norm_preserving=norm_preserving,
+            skip_begin_layers=skip_begin_layers,
+            skip_end_layers=skip_end_layers,
+            project_bias=project_bias,
+        )
+        if extra > 0:
+            log.info("Applied %d refinement pass(es).", extra)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -931,6 +1092,143 @@ def apply_refusal_dir_and_save(
         _sanitize_text_config(output_dir, model)
         log.info("Checkpoint saved.")
     tokenizer.save_pretrained(output_dir)
+
+
+def refine_ablation(
+    model: Any,
+    tokenizer: Any,
+    harmful_instructions: list[str],
+    harmless_instructions: list[str],
+    *,
+    max_passes: int = 2,
+    threshold: float = 0.1,
+    strength: float = 1.0,
+    output_only: bool = False,
+    norm_preserving: bool = False,
+    skip_begin_layers: int = 1,
+    skip_end_layers: int = 1,
+    project_bias: bool = True,
+) -> int:
+    """Run iterative refinement passes on an already-ablated in-memory model.
+
+    After initial ablation, re-probes for residual refusal direction. If the
+    residual direction norm exceeds ``threshold``, applies another pass.
+    Repeats up to ``max_passes`` additional passes.
+
+    Returns the number of extra passes applied (0 if no residual direction found).
+    """
+    import torch
+
+    layers = get_layers(model)
+    n_layers = len(layers)
+    hidden_size = model.config.hidden_size
+    device = next(model.parameters()).device
+
+    start_idx = skip_begin_layers
+    end_idx = n_layers - skip_end_layers
+
+    passes_applied = 0
+    for pass_num in range(max_passes):
+        # Collect activations from modified model
+        harmful_acts: list[torch.Tensor] = []
+        harmless_acts: list[torch.Tensor] = []
+        # Use middle layer for direction probing
+        probe_layer_idx = min(n_layers // 2, n_layers - 1)
+
+        with torch.inference_mode():
+            for prompt in harmful_instructions[:32]:
+                toks = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
+                toks = {k: v.to(device) for k, v in toks.items()}
+                out = model(**toks, output_hidden_states=True)
+                hs = out.hidden_states[probe_layer_idx + 1]  # +1 for embedding layer
+                harmful_acts.append(hs[0, -1].detach().cpu().float())
+            for prompt in harmless_instructions[:32]:
+                toks = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=256)
+                toks = {k: v.to(device) for k, v in toks.items()}
+                out = model(**toks, output_hidden_states=True)
+                hs = out.hidden_states[probe_layer_idx + 1]
+                harmless_acts.append(hs[0, -1].detach().cpu().float())
+
+        if not harmful_acts or not harmless_acts:
+            break
+
+        harm_mean = torch.stack(harmful_acts).mean(0)
+        safe_mean = torch.stack(harmless_acts).mean(0)
+        residual = harm_mean - safe_mean
+        residual_norm = residual.norm().item()
+
+        log.info("Refinement pass %d: residual direction norm = %.4f (threshold = %.4f)",
+                 pass_num + 1, residual_norm, threshold)
+
+        if residual_norm < threshold:
+            log.info("Residual direction below threshold; stopping refinement.")
+            break
+
+        # Apply the residual direction removal
+        D = (residual / residual.norm()).unsqueeze(1)
+        DDT = D @ D.T
+        I_minus_DDT = torch.eye(hidden_size) - strength * DDT
+
+        for layer_idx, layer in enumerate(layers):
+            if layer_idx < start_idx or layer_idx >= end_idx:
+                continue
+            attn = (
+                getattr(layer, "self_attn", None)
+                or getattr(layer, "attention", None)
+                or getattr(layer, "attn", None)
+            )
+            if attn is not None:
+                if not output_only:
+                    for name in ("q_proj", "k_proj", "v_proj"):
+                        proj = getattr(attn, name, None)
+                        if proj is not None and proj.weight.data.shape[1] == hidden_size:
+                            with torch.no_grad():
+                                w = proj.weight.data.float()
+                                new_w = w @ I_minus_DDT
+                                if norm_preserving:
+                                    on = torch.linalg.norm(w).item()
+                                    nn_ = torch.linalg.norm(new_w).item()
+                                    if nn_ > 1e-8:
+                                        new_w = new_w * (on / nn_)
+                                proj.weight.data.copy_(new_w.to(proj.weight.dtype))
+                                if project_bias and hasattr(proj, "bias") and proj.bias is not None:
+                                    bf = proj.bias.data.float()
+                                    if bf.shape[0] == hidden_size:
+                                        d = D.squeeze()
+                                        proj.bias.data.copy_((bf - strength * torch.dot(d, bf) * d).to(proj.bias.dtype))
+                for name in ("o_proj", "out_proj", "dense", "c_proj"):
+                    proj = getattr(attn, name, None)
+                    if proj is not None and proj.weight.data.shape[0] == hidden_size:
+                        with torch.no_grad():
+                            w = proj.weight.data.float()
+                            new_w = I_minus_DDT @ w
+                            if norm_preserving:
+                                on = torch.linalg.norm(w).item()
+                                nn_ = torch.linalg.norm(new_w).item()
+                                if nn_ > 1e-8:
+                                    new_w = new_w * (on / nn_)
+                            proj.weight.data.copy_(new_w.to(proj.weight.dtype))
+
+            for mlp_attr in ("mlp", "ffn", "feed_forward"):
+                mlp = getattr(layer, mlp_attr, None)
+                if mlp is None:
+                    continue
+                for name in ("down_proj", "c_proj", "fc2", "w2", "out_proj"):
+                    proj = getattr(mlp, name, None)
+                    if proj is not None and proj.weight.data.shape[0] == hidden_size:
+                        with torch.no_grad():
+                            w = proj.weight.data.float()
+                            new_w = I_minus_DDT @ w
+                            if norm_preserving:
+                                on = torch.linalg.norm(w).item()
+                                nn_ = torch.linalg.norm(new_w).item()
+                                if nn_ > 1e-8:
+                                    new_w = new_w * (on / nn_)
+                            proj.weight.data.copy_(new_w.to(proj.weight.dtype))
+
+        passes_applied += 1
+
+    return passes_applied
 
 
 def evaluate_abliteration(

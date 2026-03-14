@@ -9,7 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 nn = torch.nn
 
-from ollama_forge.study_runtime import StudyEvaluator, StudyModelHandle, _macro_f1
+from ollama_forge.study_runtime import StudyEvaluator, StudyModelHandle, _macro_f1  # noqa: E402
 
 
 class _FakeAttn(nn.Module):

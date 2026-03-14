@@ -208,6 +208,39 @@ class TestComputeRefusalDir:
         assert abs(norm - 1.0) < 1e-4, f"Direction not unit-norm: {norm}"
 
 
+    def test_whitened_svd_produces_direction(self, tmp: Path) -> None:
+        """svd_method='whitened' should still produce a valid direction .pt file."""
+        from ollama_forge.abliterate import compute_refusal_dir
+
+        harmful, harmless = self._make_inputs(tmp)
+        out_pt = tmp / "refusal_dir_whitened.pt"
+
+        with (
+            patch("ollama_forge.abliterate._load_model_with_gguf_version_workaround", return_value=_FakeModel()),
+            patch("transformers.AutoTokenizer") as mock_tok,
+        ):
+            mock_tok.from_pretrained.return_value = _FakeTokenizer()
+            compute_refusal_dir(
+                "fake/model-id",
+                str(harmful),
+                str(harmless),
+                str(out_pt),
+                num_instructions=4,
+                layer_fracs=(0.5,),
+                n_directions=2,
+                svd_method="whitened",
+            )
+
+        assert out_pt.is_file(), "whitened SVD refusal_dir.pt was not created"
+        loaded = torch.load(str(out_pt), map_location="cpu", weights_only=True)
+        assert loaded.dim() == 2
+        assert loaded.shape[0] == HIDDEN
+        assert loaded.shape[1] == 2, "Should have 2 directions"
+        # Columns should be normalized
+        for j in range(loaded.shape[1]):
+            assert abs(loaded[:, j].norm().item() - 1.0) < 1e-5
+
+
 # ---------------------------------------------------------------------------
 # Integration: apply_refusal_dir_and_save modifies weights and saves checkpoint
 # ---------------------------------------------------------------------------

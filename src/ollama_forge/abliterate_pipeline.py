@@ -148,8 +148,14 @@ def pipeline_html(result: InformedPipelineResult) -> str:
                 html.escape(json.dumps(stage.details, sort_keys=True)),
             )
         )
-    selected = f"<p><strong>Selected pass:</strong> {html.escape(result.selected_pass or '')}</p>" if result.selected_pass else ""
-    reason = f"<p><strong>Selection reason:</strong> {html.escape(result.selection_reason or '')}</p>" if result.selection_reason else ""
+    selected = (
+        f"<p><strong>Selected pass:</strong> {html.escape(result.selected_pass or '')}</p>"
+        if result.selected_pass else ""
+    )
+    reason = (
+        f"<p><strong>Selection reason:</strong> {html.escape(result.selection_reason or '')}</p>"
+        if result.selection_reason else ""
+    )
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Informed Pipeline</title></head><body>"
         "<h1>Informed Abliteration Pipeline</h1>"

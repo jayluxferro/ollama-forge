@@ -6,7 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from ollama_forge.study_metrics import (
+from ollama_forge.study_metrics import (  # noqa: E402
     classification_logit_margin,
     effective_rank,
     kl_divergence_from_logits,
