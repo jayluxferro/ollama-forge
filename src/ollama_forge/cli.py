@@ -747,6 +747,87 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
     return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
 
 
+def _fetch_download_only_convert(args: argparse.Namespace) -> int:
+    """Download HF safetensors and convert to GGUF (no Ollama model). Used by fetch --download-only."""
+    repo_id = args.repo_id
+    revision = getattr(args, "revision", "main") or "main"
+    quant = getattr(args, "quant", "Q4_K_M") or "Q4_K_M"
+
+    print(f"No GGUF files in {repo_id}; downloading safetensors and converting to GGUF...", file=sys.stderr)
+
+    # Resolve llama.cpp
+    llama_cpp_dir = _resolve_llama_cpp_dir_from_arg(args)
+    if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
+        print_actionable_error(
+            "convert_hf_to_gguf.py not found (needed to convert safetensors → GGUF)",
+            next_steps=[
+                "Run: ollama-forge setup-llama-cpp",
+                "Or pass --llama-cpp-dir <path-to-llama.cpp-clone>",
+            ],
+        )
+        return 1
+
+    output_dir = Path(tempfile.mkdtemp(prefix="ollama-forge-fetch-"))
+    checkpoint_dir = output_dir / "checkpoint"
+
+    log.info("Downloading %s (revision=%s)...", repo_id, revision)
+    try:
+        download_adapter(repo_id, revision=revision, local_dir=checkpoint_dir)
+    except Exception as e:
+        print_actionable_error(
+            f"Failed to download {repo_id}",
+            cause=str(e),
+            next_steps=[
+                "Check the repo ID is correct",
+                "Ensure you are logged in: huggingface-cli login",
+            ],
+        )
+        return 1
+
+    gguf_path = output_dir / "model.gguf"
+
+    # Remap architecture if needed
+    from ollama_forge.model_family import remap_architecture_in_config
+    config_path = checkpoint_dir / "config.json"
+    if config_path.is_file():
+        orig_arch = remap_architecture_in_config(config_path)
+        if orig_arch:
+            log.info("Remapped architecture %r for GGUF conversion", orig_arch)
+
+    # Convert to GGUF
+    outtype = getattr(args, "outtype", "bf16") or "bf16"
+    rc = _convert_gguf_checkpoint(
+        checkpoint_dir=checkpoint_dir,
+        gguf_path=gguf_path,
+        llama_cpp_dir=llama_cpp_dir,
+        outtype=outtype,
+        quant_type=quant,
+        gguf_converter="auto",
+    )
+    if rc != 0:
+        return rc
+
+    # Optionally quantize
+    gguf_to_use = gguf_path
+    quantize_bin = _which_quantize()
+    if quantize_bin:
+        quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant}.gguf"
+        print(f"Quantizing to {quant}...", file=sys.stderr)
+        try:
+            subprocess.run(
+                [quantize_bin, str(gguf_path), str(quant_gguf), quant],
+                check=True,
+                timeout=3600,
+            )
+            gguf_to_use = quant_gguf
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            log.warning("Quantization failed (%s); using unquantized GGUF", e)
+
+    print(gguf_to_use)
+    print(f"\nServe with: ollama-forge serve {gguf_to_use}", file=sys.stderr)
+    return 0
+
+
 def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Download a GGUF from Hugging Face and create an Ollama model (one command)."""
     download_only = getattr(args, "download_only", False)
@@ -806,11 +887,14 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         else:
             gguf_files = list_gguf_files(args.repo_id, revision=args.revision)
             if not gguf_files:
+                if download_only:
+                    return _fetch_download_only_convert(args)
                 print_actionable_error(
                     f"no .gguf files found in {args.repo_id}",
                     next_steps=[
                         "Use a repo that already includes GGUF files",
-                        "Or convert from HF to GGUF first, then run: ollama-forge convert --gguf <path> --name <name>",
+                        f"Or convert: ollama-forge import {args.repo_id} --name <name>",
+                        "Or download + convert: ollama-forge fetch --download-only " + args.repo_id,
                     ],
                 )
                 return 1
@@ -9227,8 +9311,14 @@ def main() -> int:
     p_fetch.add_argument(
         "--download-only",
         action="store_true",
-        help="Download the GGUF file only (skip Ollama model creation); prints the local path. "
+        help="Download the GGUF only (skip Ollama model creation); prints the local path. "
+             "If the repo has no GGUF files, downloads safetensors and converts to GGUF automatically. "
              "Use with: ollama-forge serve <path>",
+    )
+    p_fetch.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Path to llama.cpp clone (used when --download-only converts safetensors to GGUF)",
     )
     p_fetch.set_defaults(handler=_cmd_fetch)
 
