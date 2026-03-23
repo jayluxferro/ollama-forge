@@ -108,6 +108,33 @@ def _which_quantize() -> str | None:
     return shutil.which("quantize") or shutil.which("llama-quantize")
 
 
+def _which_llama_server(llama_cpp_dir: Path | None = None) -> str | None:
+    """Resolve llama-server binary: check PATH, then llama.cpp build dirs."""
+    on_path = shutil.which("llama-server")
+    if on_path:
+        return on_path
+    candidates: list[Path] = []
+    if llama_cpp_dir:
+        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-server")
+    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+        candidates.append(d / "build" / "bin" / "llama-server")
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+    return None
+
+
+def _resolve_llama_cpp_dir_from_arg(args: argparse.Namespace) -> Path | None:
+    """Resolve llama.cpp directory from --llama-cpp-dir or well-known locations."""
+    llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
+    if not llama_cpp_dir:
+        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+            if candidate.is_dir():
+                llama_cpp_dir = candidate
+                break
+    return llama_cpp_dir
+
+
 def _convert_gguf_with_llama_cpp(
     checkpoint_dir: Path,
     gguf_path: Path,
@@ -722,37 +749,52 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
 
 def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Download a GGUF from Hugging Face and create an Ollama model (one command)."""
+    download_only = getattr(args, "download_only", False)
     repo_id = getattr(args, "repo_id", None)
     name = getattr(args, "name", None)
-    non_interactive = getattr(args, "non_interactive", False)
-    if repo_id is None or name is None:
-        if (non_interactive or not sys.stdin.isatty()):
-            if repo_id is None:
-                repo_id = "TheBloke/Llama-2-7B-GGUF"
-            if name is None:
-                name = "my-model"
-        elif sys.stdin.isatty():
-            if repo_id is None:
+
+    # --download-only only needs a repo_id
+    if download_only:
+        if repo_id is None:
+            if sys.stdin.isatty():
                 repo_id = _prompt_for_value(
                     "Repo ID [TheBloke/Llama-2-7B-GGUF]: ",
                     "TheBloke/Llama-2-7B-GGUF",
                 )
-            if name is None:
-                name = _prompt_for_value("Model name [my-model]: ", "my-model")
+            else:
+                repo_id = "TheBloke/Llama-2-7B-GGUF"
+        args.repo_id = repo_id
+    else:
+        non_interactive = getattr(args, "non_interactive", False)
         if repo_id is None or name is None:
-            print_actionable_error(
-                "repo_id and --name are required",
-                next_steps=[
-                    "Run: ollama-forge fetch <repo_id> --name <name>",
-                    "Or use --non-interactive to use defaults (repo: TheBloke/Llama-2-7B-GGUF, name: my-model)",
-                ],
-            )
-            return 1
+            if non_interactive or not sys.stdin.isatty():
+                if repo_id is None:
+                    repo_id = "TheBloke/Llama-2-7B-GGUF"
+                if name is None:
+                    name = "my-model"
+            elif sys.stdin.isatty():
+                if repo_id is None:
+                    repo_id = _prompt_for_value(
+                        "Repo ID [TheBloke/Llama-2-7B-GGUF]: ",
+                        "TheBloke/Llama-2-7B-GGUF",
+                    )
+                if name is None:
+                    name = _prompt_for_value("Model name [my-model]: ", "my-model")
+            if repo_id is None or name is None:
+                print_actionable_error(
+                    "repo_id and --name are required",
+                    next_steps=[
+                        "Run: ollama-forge fetch <repo_id> --name <name>",
+                        "Or use --download-only to skip Ollama model creation",
+                        "Or use --non-interactive to use defaults",
+                    ],
+                )
+                return 1
         args.repo_id = repo_id
         args.name = name
-    exit_code = require_ollama()
-    if exit_code is not None:
-        return exit_code
+        exit_code = require_ollama()
+        if exit_code is not None:
+            return exit_code
     try:
         if args.gguf_file:
             downloaded_gguf_filename = args.gguf_file
@@ -808,6 +850,12 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             ],
         )
         return 1
+
+    if getattr(args, "download_only", False):
+        print(gguf_path)
+        print(f"\nServe with: ollama-forge serve {gguf_path}", file=sys.stderr)
+        return 0
+
     # Run convert with the downloaded path
     fake = argparse.Namespace(
         gguf=gguf_path,
@@ -2256,6 +2304,22 @@ def _build_llama_cpp(target_dir: Path) -> int:
     """Run cmake configure + build in target_dir/build. Returns exit code."""
     build_dir = target_dir / "build"
     build_dir.mkdir(exist_ok=True)
+    # Remove stale CMakeCache.txt if it references a different source directory
+    # (e.g. the repo was moved or cloned to a new location).
+    cache_file = build_dir / "CMakeCache.txt"
+    if cache_file.is_file():
+        try:
+            cache_text = cache_file.read_text(encoding="utf-8", errors="replace")
+            for line in cache_text.splitlines():
+                if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
+                    cached_src = line.split("=", 1)[1].strip()
+                    if cached_src != str(target_dir.resolve()):
+                        log.info("Stale CMakeCache.txt (was %s), removing build dir...", cached_src)
+                        shutil.rmtree(build_dir)
+                        build_dir.mkdir()
+                    break
+        except OSError:
+            pass
     log.info("Building (cmake)...")
     code = run_cmd(
         ["cmake", ".."],
@@ -2393,6 +2457,306 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
     if code != 0:
         return code
     return _build_llama_cpp(target_dir)
+
+
+# ---------------------------------------------------------------------------
+# serve – spin up llama-server with a GGUF model
+# ---------------------------------------------------------------------------
+
+def _llama_server_lib_env(server_bin: str) -> dict[str, str]:
+    """Build environment dict so llama-server can find its shared libraries."""
+    env = dict(os.environ)
+    bin_dir = str(Path(server_bin).resolve().parent)
+    if sys.platform == "darwin":
+        existing = env.get("DYLD_LIBRARY_PATH", "")
+        env["DYLD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
+    elif sys.platform == "linux":
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
+    return env
+
+
+def _wait_for_server(url: str, timeout: float = 30.0, interval: float = 0.5) -> bool:
+    """Poll GET ``url`` until it responds 200 or *timeout* seconds elapse."""
+    import time
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return True
+        except (OSError, urllib.error.URLError, ValueError):
+            pass
+        time.sleep(interval)
+    return False
+
+
+def _resolve_gguf_from_hf_cache(repo_id: str) -> Path | None:
+    """Search the HF cache for a GGUF file belonging to *repo_id*. Returns the best match or None."""
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError:
+        return None
+    try:
+        cache_info = scan_cache_dir()
+    except Exception:
+        return None
+    for repo in cache_info.repos:
+        if repo.repo_id != repo_id:
+            continue
+        gguf_files: list[Path] = []
+        for rev in repo.revisions:
+            for f in rev.files:
+                if f.file_name.endswith(".gguf"):
+                    gguf_files.append(f.file_path)
+        if not gguf_files:
+            return None
+        # Prefer a quantised file over the raw bf16/f16 one
+        from ollama_forge.hf_fetch import pick_one_gguf
+        names = [p.name for p in gguf_files]
+        best = pick_one_gguf(names)
+        return next(p for p in gguf_files if p.name == best)
+    return None
+
+
+def _hf_cache_has_repo(repo_id: str) -> bool:
+    """Return True if the HF cache contains any snapshot for *repo_id*."""
+    try:
+        from huggingface_hub import scan_cache_dir
+        cache_info = scan_cache_dir()
+    except Exception:
+        return False
+    return any(r.repo_id == repo_id for r in cache_info.repos)
+
+
+def _cmd_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Start llama-server to serve a GGUF model via an OpenAI-compatible API."""
+    model_arg = args.model
+    gguf = Path(model_arg)
+
+    # If not a local file, try resolving from the HF cache by repo ID
+    if not gguf.is_file() and "/" in model_arg:
+        cached = _resolve_gguf_from_hf_cache(model_arg)
+        if cached and cached.is_file():
+            print(f"Resolved from HF cache: {cached}", file=sys.stderr)
+            gguf = cached
+        elif _hf_cache_has_repo(model_arg):
+            print_actionable_error(
+                f"Repo {model_arg} is in the HF cache but has no GGUF files",
+                next_steps=[
+                    f"Convert to GGUF first: ollama-forge import {model_arg} --name my-model",
+                    "Or fetch a GGUF repo: ollama-forge fetch <GGUF_REPO> --name my-model",
+                ],
+            )
+            return 1
+
+    if not gguf.is_file():
+        print_actionable_error(
+            f"GGUF file not found: {model_arg}",
+            next_steps=[
+                "Provide a valid path to a .gguf file",
+                "Or use a HF repo ID that has GGUF files in the cache",
+                "Download one with: ollama-forge fetch <HF_REPO>",
+            ],
+        )
+        return 1
+
+    llama_cpp_dir = _resolve_llama_cpp_dir_from_arg(args)
+    server_bin = _which_llama_server(llama_cpp_dir)
+    if not server_bin:
+        print_actionable_error(
+            "llama-server not found",
+            next_steps=[
+                "Run: ollama-forge setup-llama-cpp (builds llama-server)",
+                "Or install llama.cpp and add its bin dir to PATH",
+                "Or pass --llama-cpp-dir <path-to-llama.cpp-clone>",
+            ],
+        )
+        return 1
+
+    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
+    port = getattr(args, "port", 11434) or 11434
+    ctx_size = getattr(args, "ctx_size", None)
+    n_gpu_layers = getattr(args, "n_gpu_layers", None)
+    threads = getattr(args, "threads", None)
+    parallel = getattr(args, "parallel", None)
+    api_key = getattr(args, "api_key", None)
+    extra_args = getattr(args, "server_args", None) or []
+
+    cmd: list[str] = [
+        server_bin,
+        "-m", str(gguf.resolve()),
+        "--host", host,
+        "--port", str(port),
+    ]
+    if ctx_size is not None:
+        cmd += ["-c", str(ctx_size)]
+    if n_gpu_layers is not None:
+        cmd += ["-ngl", str(n_gpu_layers)]
+    if threads is not None:
+        cmd += ["-t", str(threads)]
+    if parallel is not None:
+        cmd += ["-np", str(parallel)]
+    if api_key:
+        cmd += ["--api-key", api_key]
+    cmd += extra_args
+
+    env = _llama_server_lib_env(server_bin)
+    base_url = f"http://{host}:{port}"
+
+    print(f"Starting llama-server: {shlex.join(cmd)}", file=sys.stderr)
+    print(f"Endpoint: {base_url}/v1/chat/completions", file=sys.stderr)
+    if api_key:
+        print(f"API key : {api_key}", file=sys.stderr)
+
+    try:
+        proc = subprocess.Popen(cmd, env=env)
+    except FileNotFoundError:
+        print_actionable_error(
+            f"Could not execute: {server_bin}",
+            next_steps=["Rebuild llama.cpp: ollama-forge setup-llama-cpp --update"],
+        )
+        return 1
+
+    health_url = f"{base_url}/health"
+    timeout = getattr(args, "timeout", 60) or 60
+    print(f"Waiting for server to be ready (up to {timeout}s)...", file=sys.stderr)
+    if _wait_for_server(health_url, timeout=timeout):
+        print(f"\nServer ready at {base_url}", file=sys.stderr)
+        print(f"  Chat:       {base_url}/v1/chat/completions", file=sys.stderr)
+        print(f"  Completions:{base_url}/v1/completions", file=sys.stderr)
+        print(f"  Health:     {health_url}", file=sys.stderr)
+        print(f"\nConnect:  ollama-forge chat --base-url {base_url}", file=sys.stderr)
+        print("Press Ctrl+C to stop the server.", file=sys.stderr)
+    else:
+        print(
+            f"\nWarning: server did not respond at {health_url} within {timeout}s. "
+            "It may still be loading the model — check its output above.",
+            file=sys.stderr,
+        )
+
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        print("\nShutting down llama-server...", file=sys.stderr)
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# chat – interactive chat against a running llama-server (OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+def _cmd_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Interactive chat session with a running llama-server (or any OpenAI-compatible endpoint)."""
+    import urllib.request as _urlreq
+
+    base_url = (getattr(args, "base_url", None) or "http://127.0.0.1:11434").rstrip("/")
+    model = getattr(args, "model", None) or ""
+    system = getattr(args, "system", None)
+    api_key = getattr(args, "api_key", None)
+    temperature = getattr(args, "temperature", None)
+
+    # Quick health check
+    health = f"{base_url}/health"
+    try:
+        req = _urlreq.Request(health, method="GET")
+        with _urlreq.urlopen(req, timeout=5) as resp:
+            if resp.status != 200:
+                print(f"Warning: server at {base_url} returned {resp.status}", file=sys.stderr)
+    except (OSError, ValueError):
+        print(f"Warning: cannot reach {base_url}/health — is the server running?", file=sys.stderr)
+        print("  Start with: ollama-forge serve <model.gguf>", file=sys.stderr)
+
+    url = f"{base_url}/v1/chat/completions"
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+
+    print(f"Connected to {base_url}  (type 'quit' or Ctrl+C to exit)\n", file=sys.stderr)
+
+    try:
+        while True:
+            try:
+                user_input = input("You: ").strip()
+            except EOFError:
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("quit", "exit", "/quit", "/exit"):
+                break
+            if user_input.lower() in ("/clear", "/reset"):
+                messages.clear()
+                if system:
+                    messages.append({"role": "system", "content": system})
+                print("(conversation cleared)", file=sys.stderr)
+                continue
+
+            messages.append({"role": "user", "content": user_input})
+
+            payload: dict[str, Any] = {
+                "messages": messages,
+                "stream": True,
+            }
+            if model:
+                payload["model"] = model
+            if temperature is not None:
+                payload["temperature"] = temperature
+
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            body = json.dumps(payload).encode("utf-8")
+            req = _urlreq.Request(url, data=body, headers=headers, method="POST")
+
+            assistant_text = ""
+            try:
+                with _urlreq.urlopen(req, timeout=300) as resp:
+                    print("Assistant: ", end="", flush=True)
+                    while True:
+                        raw_line = resp.readline()
+                        if not raw_line:
+                            break
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                print(token, end="", flush=True)
+                                assistant_text += token
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            continue
+                    print()  # newline after streamed response
+            except Exception as e:
+                print(f"\nError: {e}", file=sys.stderr)
+                # Remove the failed user message so conversation stays consistent
+                if messages and messages[-1]["role"] == "user":
+                    messages.pop()
+                continue
+
+            if assistant_text:
+                messages.append({"role": "assistant", "content": assistant_text})
+
+    except KeyboardInterrupt:
+        print("\n", file=sys.stderr)
+
+    print("Bye!", file=sys.stderr)
+    return 0
 
 
 def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -8576,6 +8940,107 @@ def main() -> int:
     )
     p_setup.set_defaults(handler=_cmd_setup_llama_cpp)
 
+    # serve (spin up llama-server with a GGUF model)
+    p_serve = subparsers.add_parser(
+        "serve",
+        help="Start llama-server to serve a GGUF model via an OpenAI-compatible API",
+    )
+    p_serve.add_argument(
+        "model",
+        help="Path to a .gguf model file",
+    )
+    p_serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind (default: 127.0.0.1)",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=11434,
+        help="Port to listen on (default: 11434)",
+    )
+    p_serve.add_argument(
+        "-c", "--ctx-size",
+        type=int,
+        default=None,
+        help="Context size in tokens (default: model default)",
+    )
+    p_serve.add_argument(
+        "-ngl", "--n-gpu-layers",
+        type=int,
+        default=None,
+        help="Number of layers to offload to GPU (-1 = all)",
+    )
+    p_serve.add_argument(
+        "-t", "--threads",
+        type=int,
+        default=None,
+        help="Number of CPU threads (default: auto)",
+    )
+    p_serve.add_argument(
+        "-np", "--parallel",
+        type=int,
+        default=None,
+        help="Number of parallel request slots (default: auto)",
+    )
+    p_serve.add_argument(
+        "--api-key",
+        default=None,
+        help="Require this API key for all requests",
+    )
+    p_serve.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Path to llama.cpp clone (for finding llama-server binary)",
+    )
+    p_serve.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Seconds to wait for server to become ready (default: 60)",
+    )
+    p_serve.add_argument(
+        "server_args",
+        nargs="*",
+        metavar="-- ...",
+        help="Extra arguments passed through to llama-server (place after --)",
+    )
+    p_serve.set_defaults(handler=_cmd_serve)
+
+    # chat (interactive chat with a running llama-server or OpenAI-compatible endpoint)
+    p_chat = subparsers.add_parser(
+        "chat",
+        help="Interactive chat with a running llama-server (or any OpenAI-compatible endpoint)",
+    )
+    p_chat.add_argument(
+        "--base-url",
+        default="http://127.0.0.1:11434",
+        help="Server base URL (default: http://127.0.0.1:11434)",
+    )
+    p_chat.add_argument(
+        "--model",
+        default=None,
+        help="Model name to send in requests (optional; llama-server ignores this)",
+    )
+    p_chat.add_argument(
+        "--system",
+        default=None,
+        help="System message for the conversation",
+    )
+    p_chat.add_argument(
+        "--api-key",
+        default=None,
+        help="API key (Bearer token) if the server requires authentication",
+    )
+    p_chat.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (e.g. 0.7)",
+    )
+    p_chat.set_defaults(handler=_cmd_chat)
+
     # create-from-base
     p_create = subparsers.add_parser(
         "create-from-base",
@@ -8759,6 +9224,12 @@ def main() -> int:
         help="After download, verify file SHA256 against Hub ETag when available (LFS files)",
     )
     p_fetch.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_fetch.add_argument(
+        "--download-only",
+        action="store_true",
+        help="Download the GGUF file only (skip Ollama model creation); prints the local path. "
+             "Use with: ollama-forge serve <path>",
+    )
     p_fetch.set_defaults(handler=_cmd_fetch)
 
     # fetch-adapter (HF adapter repo → download → create-from-base)
