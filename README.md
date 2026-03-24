@@ -70,6 +70,9 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | GGUF file → Ollama | `convert --gguf <path> --name <name>` |
 | Find / use adapters | `adapters search`, `adapters recommend`, `fetch-adapter`, `retrain` |
 | One-file config build | `build recipe.yaml` |
+| Serve GGUF directly (llama.cpp) | `serve <model.gguf> [--port 11434] [-ngl -1]` |
+| Chat with a running server | `chat [--base-url <url>]` |
+| Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp | `setup-llama-cpp` |
 
@@ -104,6 +107,15 @@ Use `--quant Q4_K_M` to pick size. For gated or private repos, set `HF_TOKEN` or
 **Local GGUF:** `uv run ollama-forge convert --gguf /path/to/model.gguf --name my-model`. Optional `--quantize Q4_K_M` (needs llama.cpp on PATH). See [Quantization](wiki/Quantization.md).
 
 **Recipe (one file):** `uv run ollama-forge build recipe.yaml`. See [Recipes](wiki/Recipes.md) for format and examples. Sampling options (`temperature`, `top_p`, `repeat_penalty`) are available on fetch, convert, build, and create-from-base ([Modelfile](wiki/Modelfile.md), [Recipes](wiki/Recipes.md)).
+
+**Serve a model directly (without Ollama):** Download a GGUF and spin up an OpenAI-compatible server:
+```bash
+uv run ollama-forge fetch janhq/Jan-code-4b-gguf --download-only
+uv run ollama-forge serve /path/to/model.gguf
+# In another terminal:
+uv run ollama-forge chat
+```
+`serve` auto-detects GPU (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). `fetch --download-only` also handles repos with safetensors — it converts to GGUF automatically.
 
 **Adapters:** `adapters search "llama lora"`, then `fetch-adapter <repo> --base <base> --name <name>`, or `retrain --base <base> --adapter <path> --name <name>`. See [Adapters](wiki/Adapters.md).
 

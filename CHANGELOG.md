@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The project version is 
 
 ---
 
+## [1.0.2]
+
+### Serve & Chat
+
+- **serve** — New command: start llama-server to serve a GGUF model via an OpenAI-compatible API. Auto-discovers `llama-server` binary from PATH or `llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Key flags: `--host`, `--port` (default 11434), `-c` (context size), `-ngl` (GPU layers), `-t` (threads), `-np` (parallel slots), `--api-key`. Extra llama-server flags can be passed after `--`.
+- **chat** — New command: interactive chat with a running llama-server or any OpenAI-compatible endpoint. Streams responses token-by-token. Supports `--base-url`, `--model`, `--system`, `--api-key`, `--temperature`. In-session: `/clear` resets history, `quit` exits.
+- **serve** resolves HF repo IDs from the local cache — `serve openai/gpt-oss-20b` finds the GGUF in `~/.cache/huggingface/hub` automatically. When the cached repo has safetensors but no GGUF, an actionable error suggests converting with `import`.
+
+### Fetch
+
+- **fetch --download-only** — Download a GGUF without creating an Ollama model; prints the local path. No `--name` required. If the repo has no GGUF files (only safetensors), automatically downloads and converts to GGUF via llama.cpp.
+- Improved error messages when a repo has no GGUF files: now suggests the exact `import` or `fetch --download-only` command.
+
+### Build
+
+- **setup-llama-cpp --update** — Now detects stale `CMakeCache.txt` (e.g. repo moved to a new path) and clears the build directory before rebuilding.
+
+---
+
 ## [1.0.1]
 
 ### Plan

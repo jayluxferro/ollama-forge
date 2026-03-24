@@ -35,6 +35,8 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **adapters** | Find and use adapters (search, recommend) |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
 | **security-eval** | Run prompt sets against Ollama (run), or optional UI (ui) for refusal/compliance KPIs |
+| **serve** | Start llama-server to serve a GGUF model via an OpenAI-compatible API (auto GPU: Metal/CUDA/CPU) |
+| **chat** | Interactive chat with a running llama-server or any OpenAI-compatible endpoint |
 | **hf-cache** | List or remove Hugging Face Hub local cache (ls, rm) |
 
 ---
@@ -69,6 +71,9 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | One-file config build | `build recipe.yaml` |
 | Validate recipe only | `validate-recipe recipe.yaml` |
 | List HF cache | `hf-cache ls` |
+| Serve GGUF directly (no Ollama) | `serve <model.gguf> [--host 127.0.0.1] [--port 11434] [-ngl -1]` |
+| Chat with a running server | `chat [--base-url http://127.0.0.1:11434] [--system "..."] [--temperature 0.7]` |
+| Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` (auto-converts safetensors if no GGUF) |
 | Remove HF cache repo(s) | `hf-cache rm <repo_id> [repo_id ...] [--yes]` |
 
 ---
@@ -77,7 +82,9 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
-- **Ports:** Ollama 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).
+- **serve** starts llama-server from llama.cpp; auto-discovers the binary from PATH or `./llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Pass extra llama-server flags after `--`.
+- **chat** connects to any OpenAI-compatible `/v1/chat/completions` endpoint. In-session commands: `/clear` (reset history), `quit` (exit).
+- **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).
 
 Use `ollama-forge <command> --help` for options and examples.
 

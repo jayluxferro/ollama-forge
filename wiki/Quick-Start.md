@@ -53,8 +53,44 @@ Use `--system "..."` to override the task's prompt.
 
 ---
 
+## Serve directly (without Ollama)
+
+You can skip Ollama entirely and run a GGUF model with llama-server using `serve`:
+
+```bash
+# Download a GGUF (no Ollama model created)
+uv run ollama-forge fetch janhq/Jan-code-4b-gguf --download-only
+
+# Serve it — GPU is used automatically (Metal / CUDA / CPU fallback)
+uv run ollama-forge serve /path/to/model.gguf
+```
+
+This starts an OpenAI-compatible API at `http://127.0.0.1:11434`. Then chat with it:
+
+```bash
+# In another terminal
+uv run ollama-forge chat
+```
+
+`chat` supports `/clear` to reset conversation and `quit` to exit. Use `--system "You are helpful."` to set a system prompt.
+
+If the HF repo has no GGUF files (only safetensors), `fetch --download-only` will automatically download and convert to GGUF:
+
+```bash
+uv run ollama-forge fetch huihui-ai/some-model --download-only
+```
+
+You can also pass a HF repo ID directly to `serve` — it resolves the GGUF from the local HF cache:
+
+```bash
+uv run ollama-forge serve janhq/Jan-code-4b-gguf
+```
+
+---
+
 ## Summary
 
 - **start** = quickstart with defaults; good for first-time users.
 - **quickstart** = same behavior, with **--profile** and **--task** for presets.
-- After the command finishes, run **ollama run &lt;name&gt;** to use your model.
+- **serve** = run a GGUF model directly via llama-server (no Ollama needed).
+- After quickstart/start, run **ollama run &lt;name&gt;** to use your model.

@@ -67,6 +67,9 @@ ollama run my-model
 | GGUF file → Ollama model | `convert --gguf <path> --name <name>` |
 | Find / use adapters | `adapters search`, `adapters recommend`, `fetch-adapter`, `retrain` |
 | One-file config build | `build recipe.yaml` |
+| Serve GGUF directly (llama.cpp) | `serve <model.gguf> [--port 11434] [-ngl -1]` |
+| Chat with a running server | `chat [--base-url <url>]` |
+| Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp (finetune, quantize) | `setup-llama-cpp` |
 
