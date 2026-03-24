@@ -356,10 +356,10 @@ def _hf_checkpoint_to_ollama(
     # -- 2. Optionally requantize (skip when unsloth already quantized) -----------------
     gguf_to_use = gguf_path
     if requantize and gguf_converter != "unsloth":
-        quantize_bin = _which_quantize()
+        quantize_bin = _which_quantize_full(llama_cpp_dir)
         if not quantize_bin:
             print_actionable_error(
-                "requantize (default) requires llama.cpp quantize on PATH",
+                "requantize (default) requires llama.cpp quantize",
                 next_steps=[
                     "Run: ollama-forge setup-llama-cpp; add the build dir to PATH",
                     "Or pass --no-requantize to keep full-size GGUF (no quantize step)",
@@ -368,11 +368,13 @@ def _hf_checkpoint_to_ollama(
             return 1
         quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
         print(f"Quantizing to {quant_type}...", file=sys.stderr)
+        env = _llama_cpp_lib_env(quantize_bin)
         try:
             subprocess.run(
                 [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
                 check=True,
-                timeout=3600,
+                timeout=7200,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             print_actionable_error(
@@ -1557,25 +1559,33 @@ def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     gguf_to_use = str(gguf)
     if getattr(args, "quantize", None):
         q = args.quantize
-        quantize_bin = _which_quantize()
+        quantize_bin = _which_quantize_full()
         if not quantize_bin:
             print_actionable_error(
-                "--quantize requires llama.cpp 'quantize' or 'llama-quantize' on PATH",
+                "--quantize requires llama.cpp quantize binary",
                 next_steps=[
                     "Run: ollama-forge setup-llama-cpp",
-                    "Add its build/bin path to PATH",
                     "Or use a pre-quantized GGUF and skip --quantize",
                 ],
             )
             return 1
         out_gguf = gguf.parent / f"{gguf.stem}-{q}.gguf"
-        code = run_cmd(
-            [quantize_bin, str(gguf), str(out_gguf), q],
-            not_found_message="Error: quantize not found.",
-            process_error_message="Quantize failed: {e}",
-        )
-        if code != 0:
-            return code
+        env = _llama_cpp_lib_env(quantize_bin)
+        try:
+            subprocess.run(
+                [quantize_bin, str(gguf), str(out_gguf), q],
+                check=True, env=env, timeout=7200,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            print_actionable_error(
+                "quantize failed",
+                cause=str(e),
+                next_steps=[
+                    "Run: ollama-forge setup-llama-cpp --update",
+                    "Or use a pre-quantized GGUF and skip --quantize",
+                ],
+            )
+            return 1
         log.info("Quantized to %s", out_gguf)
         gguf_to_use = str(out_gguf)
     adapter_path: str | None = None
@@ -7438,23 +7448,25 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
     requantize = not getattr(args, "no_requantize", False)
     if requantize:
         quant_type = getattr(args, "quant", "Q4_K_M")
-        quantize_bin = _which_quantize()
+        quantize_bin = _which_quantize_full(llama_cpp_dir)
         if not quantize_bin:
             print_actionable_error(
-                "requantize (default) requires llama.cpp quantize on PATH",
+                "requantize (default) requires llama.cpp quantize",
                 next_steps=[
-                    "Run: ollama-forge setup-llama-cpp; add the build dir to PATH",
+                    "Run: ollama-forge setup-llama-cpp",
                     "Or pass --no-requantize to keep full-size GGUF (no quantize step)",
                 ],
             )
             return 1
         quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
         print(f"Quantizing to {quant_type}...", file=sys.stderr)
+        env = _llama_cpp_lib_env(quantize_bin)
         try:
             subprocess.run(
                 [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
                 check=True,
-                timeout=3600,
+                timeout=7200,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             print_actionable_error(
