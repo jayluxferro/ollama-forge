@@ -74,3 +74,4 @@ blog/
 
 # Misc
 /.claude
+/models/
