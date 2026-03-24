@@ -108,6 +108,23 @@ def _which_quantize() -> str | None:
     return shutil.which("quantize") or shutil.which("llama-quantize")
 
 
+def _which_quantize_full(llama_cpp_dir: Path | None = None) -> str | None:
+    """Resolve quantize binary: check PATH, then llama.cpp build dirs."""
+    on_path = _which_quantize()
+    if on_path:
+        return on_path
+    candidates: list[Path] = []
+    if llama_cpp_dir:
+        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-quantize")
+    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+        candidates.append(d / "build" / "bin" / "llama-quantize")
+        candidates.append(d / "build" / "bin" / "quantize")
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+    return None
+
+
 def _which_llama_server(llama_cpp_dir: Path | None = None) -> str | None:
     """Resolve llama-server binary: check PATH, then llama.cpp build dirs."""
     on_path = shutil.which("llama-server")
@@ -758,12 +775,23 @@ def _gguf_cache_dir_for_repo(repo_id: str) -> Path:
 
 
 def _resolve_gguf_from_forge_cache(repo_id: str) -> Path | None:
-    """Look for a previously converted GGUF in the ollama-forge cache."""
+    """Look for a previously converted GGUF in the ollama-forge cache.
+
+    Prefers quantized files (smaller) over raw bf16/f16 ones.
+    """
     cache = _gguf_cache_dir_for_repo(repo_id)
     if not cache.is_dir():
         return None
-    gguf_files = sorted(cache.glob("*.gguf"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return gguf_files[0] if gguf_files else None
+    gguf_files = list(cache.glob("*.gguf"))
+    if not gguf_files:
+        return None
+    if len(gguf_files) == 1:
+        return gguf_files[0]
+    # Prefer quantized (smaller) files — they have quant tags like Q4_K_M in the name
+    from ollama_forge.hf_fetch import pick_one_gguf
+    names = [p.name for p in gguf_files]
+    best = pick_one_gguf(names)
+    return next(p for p in gguf_files if p.name == best)
 
 
 def _fetch_download_only_convert(args: argparse.Namespace) -> int:
@@ -839,15 +867,17 @@ def _fetch_download_only_convert(args: argparse.Namespace) -> int:
 
     # Optionally quantize
     gguf_to_use = gguf_path
-    quantize_bin = _which_quantize()
+    quantize_bin = _which_quantize_full(llama_cpp_dir)
     if quantize_bin:
         quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant}.gguf"
         print(f"Quantizing to {quant}...", file=sys.stderr)
+        env = _llama_cpp_lib_env(quantize_bin)
         try:
             subprocess.run(
                 [quantize_bin, str(gguf_path), str(quant_gguf), quant],
                 check=True,
-                timeout=3600,
+                timeout=7200,
+                env=env,
             )
             gguf_to_use = quant_gguf
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -2434,6 +2464,15 @@ def _build_llama_cpp(target_dir: Path) -> int:
                     break
         except OSError:
             pass
+    # Clean cmake artifacts that may have leaked into the source directory
+    # (e.g. from a previous failed build or misconfigured cmake run).
+    for stale in ["CMakeCache.txt", "CMakeFiles", "Makefile", "cmake_install.cmake"]:
+        stale_path = target_dir / stale
+        if stale_path.is_file():
+            stale_path.unlink()
+        elif stale_path.is_dir():
+            shutil.rmtree(stale_path)
+
     log.info("Building (cmake)...")
     code = run_cmd(
         ["cmake", ".."],
@@ -2574,10 +2613,91 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
 
 
 # ---------------------------------------------------------------------------
+# quantize – requantize a GGUF file
+# ---------------------------------------------------------------------------
+
+
+def _cmd_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Quantize (or requantize) a GGUF file."""
+    input_path = Path(args.input).resolve()
+    if not input_path.is_file():
+        # Try resolving from forge/HF cache by repo ID
+        if "/" in args.input:
+            cached = _resolve_gguf_from_forge_cache(args.input) or _resolve_gguf_from_hf_cache(args.input)
+            if cached and cached.is_file():
+                input_path = cached
+                print(f"Resolved from cache: {input_path}", file=sys.stderr)
+        if not input_path.is_file():
+            print_actionable_error(
+                f"File not found: {args.input}",
+                next_steps=["Provide a path to a .gguf file or a cached repo ID (org/model)"],
+            )
+            return 1
+
+    quant = getattr(args, "quant", "Q4_K_M") or "Q4_K_M"
+    output = getattr(args, "output", None)
+    output_path = Path(output).resolve() if output else input_path.parent / f"{input_path.stem}-{quant}.gguf"
+
+    llama_cpp_dir = _resolve_llama_cpp_dir_from_arg(args)
+    quantize_bin = _which_quantize_full(llama_cpp_dir)
+    if not quantize_bin:
+        print_actionable_error(
+            "quantize binary not found",
+            next_steps=[
+                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
+                "Or pass --llama-cpp-dir <path-to-llama.cpp-clone>",
+            ],
+        )
+        return 1
+
+    size_gb = input_path.stat().st_size / (1024 ** 3)
+    print(f"Quantizing {input_path.name} ({size_gb:.1f} GiB) → {quant}...", file=sys.stderr)
+    print(f"Output: {output_path}", file=sys.stderr)
+
+    env = _llama_cpp_lib_env(quantize_bin)
+    try:
+        subprocess.run(
+            [quantize_bin, str(input_path), str(output_path), quant],
+            check=True,
+            timeout=7200,
+            env=env,
+        )
+    except FileNotFoundError:
+        print_actionable_error(
+            f"Could not execute: {quantize_bin}",
+            next_steps=["Rebuild llama.cpp: ollama-forge setup-llama-cpp --update"],
+        )
+        return 1
+    except subprocess.TimeoutExpired:
+        print_actionable_error(
+            "Quantization timed out after 2 hours",
+            next_steps=["Try a smaller model or a faster quant type (e.g. Q4_0)"],
+        )
+        return 1
+    except subprocess.CalledProcessError as e:
+        print_actionable_error(
+            "Quantization failed",
+            cause=str(e),
+            next_steps=[
+                "Ensure the input is a valid GGUF file",
+                "Try a different quant type: Q4_K_M, Q4_0, Q8_0, Q3_K_M",
+                "Rebuild llama.cpp: ollama-forge setup-llama-cpp --update",
+            ],
+        )
+        return 1
+
+    out_size_gb = output_path.stat().st_size / (1024 ** 3)
+    print(f"\nDone: {output_path} ({out_size_gb:.1f} GiB)", file=sys.stderr)
+    print(f"Serve with: ollama-forge serve {output_path}", file=sys.stderr)
+    print(output_path)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # serve – spin up llama-server with a GGUF model
 # ---------------------------------------------------------------------------
 
-def _llama_server_lib_env(server_bin: str) -> dict[str, str]:
+def _llama_cpp_lib_env(server_bin: str) -> dict[str, str]:
     """Build environment dict so llama-server can find its shared libraries."""
     env = dict(os.environ)
     bin_dir = str(Path(server_bin).resolve().parent)
@@ -2726,7 +2846,7 @@ def _cmd_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         cmd += ["--api-key", api_key]
     cmd += extra_args
 
-    env = _llama_server_lib_env(server_bin)
+    env = _llama_cpp_lib_env(server_bin)
     base_url = f"http://{host}:{port}"
 
     print(f"Starting llama-server: {shlex.join(cmd)}", file=sys.stderr)
@@ -9148,6 +9268,32 @@ def main() -> int:
         help="Pull latest changes and rebuild an existing llama.cpp clone (git fetch + reset + cmake build)",
     )
     p_setup.set_defaults(handler=_cmd_setup_llama_cpp)
+
+    # quantize (requantize a GGUF file)
+    p_quantize = subparsers.add_parser(
+        "quantize",
+        help="Quantize a GGUF model file (e.g. bf16 → Q4_K_M) to reduce size and memory usage",
+    )
+    p_quantize.add_argument(
+        "input",
+        help="Path to the .gguf file (or a cached repo ID like org/model)",
+    )
+    p_quantize.add_argument(
+        "--quant", "-q",
+        default="Q4_K_M",
+        help="Quantization type (default: Q4_K_M). Common: Q4_K_M, Q4_0, Q3_K_M, Q5_K_M, Q8_0",
+    )
+    p_quantize.add_argument(
+        "-o", "--output",
+        default=None,
+        help="Output file path (default: <input_stem>-<quant>.gguf in the same directory)",
+    )
+    p_quantize.add_argument(
+        "--llama-cpp-dir",
+        default=None,
+        help="Path to llama.cpp clone (for finding the quantize binary)",
+    )
+    p_quantize.set_defaults(handler=_cmd_quantize)
 
     # serve (spin up llama-server with a GGUF model)
     p_serve = subparsers.add_parser(

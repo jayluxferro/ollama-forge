@@ -170,15 +170,15 @@ def test_serve_no_server_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 # ---------------------------------------------------------------------------
-# _llama_server_lib_env tests
+# _llama_cpp_lib_env tests
 # ---------------------------------------------------------------------------
 
 
 def test_lib_env_adds_bin_dir() -> None:
-    """_llama_server_lib_env sets library path for the server binary's directory."""
-    from ollama_forge.cli import _llama_server_lib_env
+    """_llama_cpp_lib_env sets library path for the server binary's directory."""
+    from ollama_forge.cli import _llama_cpp_lib_env
 
-    env = _llama_server_lib_env("/some/path/build/bin/llama-server")
+    env = _llama_cpp_lib_env("/some/path/build/bin/llama-server")
     if sys.platform == "darwin":
         assert "/some/path/build/bin" in env.get("DYLD_LIBRARY_PATH", "")
     elif sys.platform == "linux":
