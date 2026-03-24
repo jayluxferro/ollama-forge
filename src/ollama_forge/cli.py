@@ -3168,6 +3168,94 @@ def _cmd_hf_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) 
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cache – manage the ollama-forge GGUF cache
+# ---------------------------------------------------------------------------
+
+
+def _cmd_cache_add(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Copy (or move) a GGUF file into the ollama-forge cache."""
+    gguf = Path(args.gguf).resolve()
+    if not gguf.is_file():
+        print_actionable_error(
+            f"File not found: {gguf}",
+            next_steps=["Provide a valid path to a .gguf file"],
+        )
+        return 1
+    name: str = args.name
+    if "/" not in name:
+        print_actionable_error(
+            f"--name must be in org/model format, got: {name!r}",
+            next_steps=["Example: --name my-org/my-model"],
+        )
+        return 1
+    dest_dir = _gguf_cache_dir_for_repo(name)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / gguf.name
+    move = getattr(args, "move", False)
+    if move:
+        shutil.move(str(gguf), str(dest))
+        print(f"Moved {gguf} → {dest}")
+    else:
+        shutil.copy2(str(gguf), str(dest))
+        print(f"Copied {gguf} → {dest}")
+    print(f"\nServe with: ollama-forge serve {name}", file=sys.stderr)
+    return 0
+
+
+def _cmd_cache_ls(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """List GGUF files in the ollama-forge cache."""
+    cache_root = _ollama_forge_cache_dir() / "gguf"
+    if not cache_root.is_dir():
+        print("Cache is empty.")
+        return 0
+    found = False
+    for org_dir in sorted(cache_root.iterdir()):
+        if not org_dir.is_dir():
+            continue
+        for repo_dir in sorted(org_dir.iterdir()):
+            if not repo_dir.is_dir():
+                continue
+            gguf_files = sorted(repo_dir.glob("*.gguf"))
+            if not gguf_files:
+                continue
+            repo_id = f"{org_dir.name}/{repo_dir.name}"
+            for gf in gguf_files:
+                size_mb = gf.stat().st_size / (1024 ** 2)
+                print(f"{repo_id}\t{gf.name}\t{size_mb:.0f} MiB")
+                found = True
+    if not found:
+        print("Cache is empty.")
+    return 0
+
+
+def _cmd_cache_rm(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Remove a repo from the ollama-forge GGUF cache."""
+    name: str = args.name
+    cache_dir = _gguf_cache_dir_for_repo(name)
+    if not cache_dir.is_dir():
+        print_actionable_error(
+            f"No cache entry for {name!r}",
+            next_steps=["Run: ollama-forge cache ls"],
+        )
+        return 1
+    gguf_files = list(cache_dir.glob("*.gguf"))
+    total = sum(f.stat().st_size for f in gguf_files)
+    size_str = f"{total / (1024 ** 2):.0f} MiB" if total >= 1024 ** 2 else f"{total} B"
+    if not getattr(args, "yes", False):
+        print(f"Will remove {len(gguf_files)} file(s) ({size_str}) from {cache_dir}")
+        try:
+            answer = input("Proceed? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer != "y":
+            print("Cancelled.", file=sys.stderr)
+            return 0
+    shutil.rmtree(cache_dir)
+    print(f"Removed {name} ({size_str})")
+    return 0
+
+
 def _cmd_security_eval_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Run security eval: load prompt set, query model, score, print KPIs and optionally write CSV/JSON."""
     if getattr(args, "schema", False):
@@ -9808,6 +9896,43 @@ def main() -> int:
     p_hf_cache_rm.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     p_hf_cache_rm.set_defaults(handler=_cmd_hf_cache_rm)
 
+    # cache (ollama-forge GGUF cache: add, ls, rm)
+    p_cache = subparsers.add_parser(
+        "cache",
+        help="Manage the ollama-forge GGUF cache (add, list, remove converted/imported models)",
+    )
+    cache_sub = p_cache.add_subparsers(dest="cache_command")
+    p_cache_add = cache_sub.add_parser(
+        "add",
+        help="Add a GGUF file to the cache so it can be served by repo name",
+    )
+    p_cache_add.add_argument(
+        "gguf",
+        help="Path to the .gguf file to add",
+    )
+    p_cache_add.add_argument(
+        "--name",
+        required=True,
+        help="Cache key in org/model format (e.g. my-org/my-model)",
+    )
+    p_cache_add.add_argument(
+        "--move",
+        action="store_true",
+        help="Move the file instead of copying (deletes the original)",
+    )
+    p_cache_add.set_defaults(handler=_cmd_cache_add)
+
+    p_cache_ls = cache_sub.add_parser("ls", help="List cached GGUF models")
+    p_cache_ls.set_defaults(handler=_cmd_cache_ls)
+
+    p_cache_rm = cache_sub.add_parser("rm", help="Remove a model from the GGUF cache")
+    p_cache_rm.add_argument(
+        "name",
+        help="Cache key to remove (org/model format, from 'cache ls')",
+    )
+    p_cache_rm.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    p_cache_rm.set_defaults(handler=_cmd_cache_rm)
+
     # study (generic ablation study planning/configuration)
     p_study = subparsers.add_parser(
         "study",
@@ -10210,6 +10335,9 @@ def main() -> int:
         return 0
     if parsed.command == "hf-cache" and not getattr(parsed, "hf_cache_command", None):
         p_hf_cache.print_help()
+        return 0
+    if parsed.command == "cache" and not getattr(parsed, "cache_command", None):
+        p_cache.print_help()
         return 0
     if parsed.command == "study" and not getattr(parsed, "study_command", None):
         p_study.print_help()
