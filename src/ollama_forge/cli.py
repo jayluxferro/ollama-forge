@@ -747,11 +747,40 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
     return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
 
 
+def _ollama_forge_cache_dir() -> Path:
+    """Return the ollama-forge cache root (``~/.cache/ollama-forge`` or ``OLLAMA_FORGE_CACHE``)."""
+    return Path(os.environ.get("OLLAMA_FORGE_CACHE", Path.home() / ".cache" / "ollama-forge"))
+
+
+def _gguf_cache_dir_for_repo(repo_id: str) -> Path:
+    """Return ``<cache>/gguf/<owner>/<repo>/`` for storing converted GGUFs."""
+    return _ollama_forge_cache_dir() / "gguf" / repo_id.replace("/", os.sep)
+
+
+def _resolve_gguf_from_forge_cache(repo_id: str) -> Path | None:
+    """Look for a previously converted GGUF in the ollama-forge cache."""
+    cache = _gguf_cache_dir_for_repo(repo_id)
+    if not cache.is_dir():
+        return None
+    gguf_files = sorted(cache.glob("*.gguf"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return gguf_files[0] if gguf_files else None
+
+
 def _fetch_download_only_convert(args: argparse.Namespace) -> int:
     """Download HF safetensors and convert to GGUF (no Ollama model). Used by fetch --download-only."""
     repo_id = args.repo_id
     revision = getattr(args, "revision", "main") or "main"
     quant = getattr(args, "quant", "Q4_K_M") or "Q4_K_M"
+    user_output = getattr(args, "output", None)
+
+    # Check if we already have a converted GGUF cached
+    if not user_output:
+        cached = _resolve_gguf_from_forge_cache(repo_id)
+        if cached:
+            print(f"Found cached GGUF: {cached}", file=sys.stderr)
+            print(cached)
+            print(f"\nServe with: ollama-forge serve {cached}", file=sys.stderr)
+            return 0
 
     print(f"No GGUF files in {repo_id}; downloading safetensors and converting to GGUF...", file=sys.stderr)
 
@@ -767,7 +796,8 @@ def _fetch_download_only_convert(args: argparse.Namespace) -> int:
         )
         return 1
 
-    output_dir = Path(tempfile.mkdtemp(prefix="ollama-forge-fetch-"))
+    output_dir = Path(user_output).resolve() if user_output else _gguf_cache_dir_for_repo(repo_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_dir / "checkpoint"
 
     log.info("Downloading %s (revision=%s)...", repo_id, revision)
@@ -2622,13 +2652,20 @@ def _cmd_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     model_arg = args.model
     gguf = Path(model_arg)
 
-    # If not a local file, try resolving from the HF cache by repo ID
+    # If not a local file, try resolving from caches by repo ID
     if not gguf.is_file() and "/" in model_arg:
-        cached = _resolve_gguf_from_hf_cache(model_arg)
-        if cached and cached.is_file():
-            print(f"Resolved from HF cache: {cached}", file=sys.stderr)
-            gguf = cached
-        elif _hf_cache_has_repo(model_arg):
+        # 1. Check ollama-forge GGUF cache (converted models)
+        forge_cached = _resolve_gguf_from_forge_cache(model_arg)
+        if forge_cached and forge_cached.is_file():
+            print(f"Resolved from cache: {forge_cached}", file=sys.stderr)
+            gguf = forge_cached
+        # 2. Check HF cache (downloaded GGUFs)
+        if not gguf.is_file():
+            cached = _resolve_gguf_from_hf_cache(model_arg)
+            if cached and cached.is_file():
+                print(f"Resolved from HF cache: {cached}", file=sys.stderr)
+                gguf = cached
+        if not gguf.is_file() and _hf_cache_has_repo(model_arg):
             print_actionable_error(
                 f"Repo {model_arg} is in the HF cache but has no GGUF files",
                 next_steps=[
@@ -9314,6 +9351,11 @@ def main() -> int:
         help="Download the GGUF only (skip Ollama model creation); prints the local path. "
              "If the repo has no GGUF files, downloads safetensors and converts to GGUF automatically. "
              "Use with: ollama-forge serve <path>",
+    )
+    p_fetch.add_argument(
+        "-o", "--output",
+        default=None,
+        help="Output directory for the downloaded/converted GGUF (default: ~/.cache/ollama-forge/gguf/<repo>/)",
     )
     p_fetch.add_argument(
         "--llama-cpp-dir",
