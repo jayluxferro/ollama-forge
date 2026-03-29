@@ -21,14 +21,14 @@ Strip refusal behavior by computing a "refusal direction" and applying ablation.
 ## Optional dependency
 
 ```bash
-uv sync --extra abliterate
+uv sync
 ```
 
 For large or MXFP4-quantized models, use **`--load-in-8bit`** to avoid "Invalid buffer size" (loads in 8-bit). Install bitsandbytes first: `pip install bitsandbytes` (Linux/CUDA; not supported on macOS).
 
 ### Proxy-only (minimal deps)
 
-If you only run **`abliterate proxy`** (format prompts with HF tokenizer, forward to Ollama) and do not run compute/apply or chat/serve with loaded models, you can use minimal deps: **`transformers`** is enough to load tokenizers; **`torch`** is only required for `abliterate run`, `compute-dir`, and in-process chat/serve. Example: `pip install ollama-forge transformers` or `uv sync` then `pip install transformers`. For full abliterate (run, compute-dir, etc.) use `uv sync --extra abliterate`.
+If you only run **`abliterate proxy`** (format prompts with HF tokenizer, forward to Ollama) and do not run compute/apply or chat/serve with loaded models, you can use minimal deps: **`transformers`** is enough to load tokenizers; **`torch`** is only required for `abliterate run`, `compute-dir`, and in-process chat/serve. Example: `pip install ollama-forge transformers` or just use `uv sync` for the full project environment.
 
 ---
 

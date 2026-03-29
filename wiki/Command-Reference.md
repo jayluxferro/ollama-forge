@@ -8,7 +8,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 
 | Command | Description |
 |---------|-------------|
-| **check** | Verify ollama, Hugging Face, optional deps, and llama.cpp |
+| **check** | Verify ollama, Hugging Face, Python deps, and llama.cpp |
 | **doctor** | Diagnose environment and optionally apply common fixes |
 | **plan** | Preview major operations without executing (quickstart, auto, doctor-fix, adapters-apply) |
 | **quickstart** | One-command setup: fetch a default model and create an Ollama model |
@@ -33,6 +33,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **retrain** | Create an Ollama model from base + adapter (adapter: dir or .bin/.gguf file) |
 | **abliterate** | Refusal removal: compute-dir, run, chat, serve, **proxy** (lightweight tokenizer proxy for agents), evaluate, optimize, fix-ollama-template, download-lists |
 | **adapters** | Find and use adapters (search, recommend) |
+| **turboquant** | TurboQuant: extreme quantization + inference (quantize, serve, chat, info) — no llama.cpp needed |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
 | **security-eval** | Run prompt sets against Ollama (run), or optional UI (ui) for refusal/compliance KPIs |
 | **serve** | Start llama-server to serve a GGUF model via an OpenAI-compatible API (auto GPU: Metal/CUDA/CPU) |
@@ -71,6 +72,9 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | One-file config build | `build recipe.yaml` |
 | Validate recipe only | `validate-recipe recipe.yaml` |
 | List HF cache | `hf-cache ls` |
+| Quantize to TurboQuant | `turboquant quantize <hf_model_or_path> --bits 3` |
+| Serve TurboQuant model | `turboquant serve <model.tqf> --port 8811` |
+| Chat with TurboQuant model | `turboquant chat <model.tqf>` |
 | Serve GGUF directly (no Ollama) | `serve <model.gguf> [--host 127.0.0.1] [--port 11434] [-ngl -1]` |
 | Chat with a running server | `chat [--base-url http://127.0.0.1:11434] [--system "..."] [--temperature 0.7]` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` (auto-converts safetensors if no GGUF) |
@@ -82,6 +86,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
+- **turboquant** has subcommands: `quantize`, `serve`, `chat`, `info`. See [TurboQuant](TurboQuant) for details.
 - **serve** starts llama-server from llama.cpp; auto-discovers the binary from PATH or `./llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Pass extra llama-server flags after `--`.
 - **chat** connects to any OpenAI-compatible `/v1/chat/completions` endpoint. In-session commands: `/clear` (reset history), `quit` (exit).
 - **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).

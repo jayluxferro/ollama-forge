@@ -47,7 +47,7 @@ Sample files are in `src/ollama_forge/security_eval/data/`. For a full list of b
 | Command | Description |
 |---------|-------------|
 | `security-eval run PROMPT_SET` | Run eval: load prompts, query model, score, print KPIs. |
-| `security-eval ui` | Launch Streamlit UI (requires `uv sync --extra security-eval-ui`). |
+| `security-eval ui` | Launch Streamlit UI (install deps with `uv sync`). |
 
 **Run options:** `--model`, `--base-url` (or `OLLAMA_HOST`), `--output-csv`, `--output-json`, `--save-history`, `--system`, `--no-chat` (use /api/generate), `--timeout`, `-q`.
 
@@ -67,7 +67,7 @@ Sample files are in `src/ollama_forge/security_eval/data/`. For a full list of b
 Use `--save-history` to append the run to SQLite at `~/.ollama_forge/security_eval_runs.db`. The Streamlit UI (`security-eval ui`) can run evals and shows run history with an ASR-over-time plot. Install UI deps first:
 
 ```bash
-uv sync --extra security-eval-ui
+uv sync
 uv run ollama-forge security-eval ui
 ```
 

@@ -53,7 +53,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 - **Python 3.10+**. **From PyPI:** `pip install ollama-forge` or `uv tool install ollama-forge` ([PyPI](https://pypi.org/project/ollama-forge/)). **From repo:** `uv sync` then `uv run ollama-forge`; use `uv tool install .` from the repo root to put `ollama-forge` on your PATH.
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
 - **Verify:** `ollama-forge check` — see what’s installed. `ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
-- **Optional extras:** `pip install ollama-forge[net]` adds `requests` for HTTP paths (proxy, security-eval, download-lists); `ollama-forge[abliterate]` for abliterate run/proxy (see [Abliterate](wiki/Abliterate.md)).
+- **Dependencies:** install with `uv sync` to get the full local toolchain.
 - **Optional:** Run Ruff and tests before commit/push: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md). To fix lint before pushing without hooks: `./scripts/lint-fix.sh`.
 
 ---
@@ -126,7 +126,7 @@ uv run ollama-forge chat
 ## Other topics
 
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
-- **Refusal removal (abliterate)** — Quickstart: `abliterate easy --model <id> --name <name>` or `abliterate wizard` for prompts. Optional deps: `uv sync --extra abliterate`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
+- **Refusal removal (abliterate)** — Quickstart: `abliterate easy --model <id> --name <name>` or `abliterate wizard` for prompts. Install deps with `uv sync`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
-- **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Optional UI: `uv sync --extra security-eval-ui` then `security-eval ui`. [Wiki: Security Eval](wiki/Security-Eval.md).
+- **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Install deps with `uv sync`, then run `security-eval ui` for the UI. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).

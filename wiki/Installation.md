@@ -37,7 +37,7 @@ Then run `ollama-forge` from any directory.
 
 ## Verify environment
 
-**Quick check** — see what's installed (ollama, Hugging Face, optional deps, llama.cpp):
+**Quick check** — see what's installed (ollama, Hugging Face, Python deps, llama.cpp):
 
 ```bash
 uv run ollama-forge check
@@ -58,7 +58,7 @@ Doctor reports:
 - **huggingface_hub** — required for fetch/fetch-adapter
 - **pyyaml** — required for recipes
 - **HF_TOKEN** — optional; needed for gated/private Hugging Face repos
-- **abliterate deps** — optional; for refusal removal (`uv sync --extra abliterate`)
+- **abliterate deps** — included in the main install (`uv sync`)
 - **llama.cpp finetune** — optional; for training pipeline
 - **llama.cpp quantize** — optional; for `convert --quantize` (accepts `quantize` or `llama-quantize` on PATH)
 

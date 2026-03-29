@@ -30,7 +30,7 @@ End-to-end flow: **fetch a model → abliterate (refusal removal) → serve → 
 
 ```bash
 # Abliterate expects HF model id or path; compute-dir downloads if needed
-uv sync --extra abliterate
+uv sync
 uv run ollama-forge abliterate compute-dir --model <hf_id> --output refusal.pt
 uv run ollama-forge abliterate run --model <hf_id> --name my-abliterated --refusal-dir refusal.pt
 # Then export to GGUF and create Ollama model (see Abliterate doc)
@@ -43,7 +43,7 @@ Use the base model name in step 4 for “base” eval. For abliteration you stil
 ### 2. Abliterate (compute direction + run)
 
 ```bash
-uv sync --extra abliterate
+uv sync
 # Compute refusal direction (optional: --harmful / --harmless, or use built-in lists)
 uv run ollama-forge abliterate compute-dir --model <hf_id> --output refusal.pt
 # Apply ablation and create Ollama model

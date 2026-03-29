@@ -1,7 +1,7 @@
 """
 Streamlit UI for LLM security evaluation.
 Run with: streamlit run ollama_forge.security_eval.app
-Or: uv run ollama-forge security-eval ui  (with uv sync --extra security-eval-ui)
+Or: uv run ollama-forge security-eval ui  (after `uv sync`)
 """
 
 from __future__ import annotations

@@ -23,7 +23,7 @@ Sample files: `src/ollama_forge/security_eval/data/sample_prompts.txt`, `sample_
 ## CLI
 
 - **Run eval:** `ollama-forge security-eval run PROMPT_SET [--model NAME] [--base-url URL] [--output-csv PATH] [--output-json PATH] [--save-history]`
-- **Launch UI:** `ollama-forge security-eval ui` (requires `uv sync --extra security-eval-ui`)
+- **Launch UI:** `ollama-forge security-eval ui` (install deps with `uv sync`)
 
 ## KPIs
 

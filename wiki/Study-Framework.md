@@ -8,7 +8,7 @@ Systematic ablation studies for understanding how LLM capabilities are distribut
 
 ```bash
 # Install study dependencies
-uv sync --extra study
+uv sync
 
 # Interactive setup (detects hardware, suggests models)
 uv run ollama-forge study interactive

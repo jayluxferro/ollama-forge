@@ -41,6 +41,24 @@ def is_gpu_available() -> bool:
     return is_cuda_available() or is_mps_available()
 
 
+def is_mlx_available() -> bool:
+    """Check if MLX (Apple ML framework) is installed and usable."""
+    try:
+        import mlx.core  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def is_triton_available() -> bool:
+    """Check if Triton (GPU kernel compiler) is installed."""
+    try:
+        import triton  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def get_device(preference: str = "auto") -> str:
     """Resolve a device string.
 
@@ -57,6 +75,23 @@ def get_device(preference: str = "auto") -> str:
     if is_mps_available():
         return "mps"
     return "cpu"
+
+
+def get_turboquant_backend(preference: str = "auto") -> str:
+    """Select the best TurboQuant inference backend.
+
+    Returns:
+        "mlx" — MLX on Apple Silicon (fastest on Mac)
+        "triton" — Triton kernels on CUDA (fastest on NVIDIA)
+        "pytorch" — Pure PyTorch (universal fallback)
+    """
+    if preference != "auto":
+        return preference
+    if is_mlx_available() and is_mps_available():
+        return "mlx"
+    if is_triton_available() and is_cuda_available():
+        return "triton"
+    return "pytorch"
 
 
 def get_device_name() -> str:

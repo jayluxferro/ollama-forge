@@ -75,3 +75,5 @@ blog/
 # Misc
 /.claude
 /models/
+*.tqf
+/tmp/

@@ -18,5 +18,6 @@
 - [Downsizing](Downsizing)
 - [Hugging Face without GGUF](Hugging-Face-Without-GGUF)
 - [Quantization](Quantization)
+- [TurboQuant](TurboQuant)
 - [CI / Automation](CI-Automation)
 - [Command Reference](Command-Reference)

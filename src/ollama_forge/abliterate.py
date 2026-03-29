@@ -1,4 +1,4 @@
-"""Refusal-direction computation for abliterated models (optional deps: torch, transformers)."""
+"""Refusal-direction computation for abliterated models."""
 
 from __future__ import annotations
 
@@ -358,7 +358,7 @@ def compute_refusal_dir(
     svd_method: "standard" (default SVD) or "whitened" (covariance-normalized SVD for cleaner signal).
     direction_method: "diff_means" (default, simple mean difference) or "leace" (Fisher Linear
         Discriminant: S_w^{-1} @ delta, better handles high-variance non-discriminative dimensions).
-    Requires torch and transformers. Use: uv sync --extra abliterate.
+    Requires torch and transformers. Use: uv sync.
     Returns a small summary dict (layer_frac, layer_index, gap_norm) when not per_layer_directions; else None.
     """
     import torch
