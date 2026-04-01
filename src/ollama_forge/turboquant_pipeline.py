@@ -11,7 +11,10 @@ import gc
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import torch
 
 # torch and turboquant imports are lazy — load_tqf must work without torch
 # installed (MLX-only environments).  quantize_model imports them at call time.
@@ -141,9 +144,7 @@ def quantize_model(
 
     stats = CompressionStats()
     total = len(tensor_index)
-    step = 0
-    for name, sf_path in tensor_index.items():
-        step += 1
+    for step, (name, sf_path) in enumerate(tensor_index.items(), start=1):
         if progress_callback:
             progress_callback(step, total, name)
 
@@ -211,32 +212,6 @@ def _save_tqf(model: TurboQuantModel, output_dir: Path):
         },
     }
     (output_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-
-def _save_chunked(
-    tensors: dict[str, torch.Tensor], output_dir: Path, prefix: str,
-    max_bytes: int = 500 * 1024 * 1024,
-):
-    """Save tensors across multiple safetensors files if needed."""
-    from safetensors.torch import save_file
-
-    chunk: dict[str, torch.Tensor] = {}
-    chunk_bytes = 0
-    chunk_idx = 0
-
-    for name, t in tensors.items():
-        t_bytes = t.numel() * t.element_size()
-        if chunk_bytes + t_bytes > max_bytes and chunk:
-            save_file(chunk, str(output_dir / f"{prefix}_{chunk_idx:04d}.safetensors"))
-            chunk = {}
-            chunk_bytes = 0
-            chunk_idx += 1
-        chunk[name] = t
-        chunk_bytes += t_bytes
-
-    if chunk:
-        save_file(chunk, str(output_dir / f"{prefix}_{chunk_idx:04d}.safetensors"))
-
 
 def load_tqf(tqf_dir: str | Path) -> TurboQuantModel:
     """Load a .tqf model from disk."""

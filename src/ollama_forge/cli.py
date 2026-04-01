@@ -2969,30 +2969,13 @@ def _cmd_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             body = json.dumps(payload).encode("utf-8")
             req = _urlreq.Request(url, data=body, headers=headers, method="POST")
 
-            assistant_text = ""
             try:
                 with _urlreq.urlopen(req, timeout=300) as resp:
                     print("Assistant: ", end="", flush=True)
-                    while True:
-                        raw_line = resp.readline()
-                        if not raw_line:
-                            break
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            token = delta.get("content", "")
-                            if token:
-                                print(token, end="", flush=True)
-                                assistant_text += token
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            continue
+                    assistant_text, finish_reason = _stream_openai_chat_sse(resp)
                     print()  # newline after streamed response
+                    if finish_reason and finish_reason != "stop":
+                        print(f"(response stopped: {finish_reason})", file=sys.stderr)
             except Exception as e:
                 print(f"\nError: {e}", file=sys.stderr)
                 # Remove the failed user message so conversation stays consistent
@@ -3008,6 +2991,79 @@ def _cmd_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     print("Bye!", file=sys.stderr)
     return 0
+
+
+def _extract_stream_text(choice: dict[str, Any]) -> str:
+    """Best-effort text extraction from a streamed chat chunk."""
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+            return "".join(parts)
+    message = choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def _stream_openai_chat_sse(resp: Any) -> tuple[str, str | None]:
+    """Read an SSE chat-completions response and print streamed text."""
+    assistant_text = ""
+    finish_reason = None
+    event_data: list[str] = []
+
+    def _consume_event(lines: list[str]) -> tuple[str, str | None, bool]:
+        if not lines:
+            return "", None, False
+        payload = "\n".join(lines)
+        if payload == "[DONE]":
+            return "", None, True
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            return "", None, False
+        choice = chunk.get("choices", [{}])[0]
+        return _extract_stream_text(choice), choice.get("finish_reason"), False
+
+    while True:
+        raw_line = resp.readline()
+        if not raw_line:
+            token, finish, done = _consume_event(event_data)
+            if token:
+                print(token, end="", flush=True)
+                assistant_text += token
+            if finish is not None:
+                finish_reason = finish
+            if done:
+                break
+            break
+
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            token, finish, done = _consume_event(event_data)
+            event_data.clear()
+            if token:
+                print(token, end="", flush=True)
+                assistant_text += token
+            if finish is not None:
+                finish_reason = finish
+            if done:
+                break
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            event_data.append(line[5:].lstrip())
+
+    return assistant_text, finish_reason
 
 
 def _cmd_adapters_search(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -3936,7 +3992,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
             generate,
             load_model,
         )
-        from ollama_forge.turboquant_serve import _resolve_default_max_tokens
+        from ollama_forge.turboquant_serve import _build_stop_token_sequences, _resolve_default_max_tokens
         from ollama_forge.turboquant_text import ReasoningScrubber, clean_generated_text
     except ImportError as exc:
         print_actionable_error(
@@ -3954,6 +4010,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
     if tokenizer is None:
         print("Error: no tokenizer found in the .tqf directory.")
         return 1
+    text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
 
     messages: list[dict[str, str]] = []
     system = getattr(args, "system", None)
@@ -3966,6 +4023,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
         max_new_tokens=2048,
         temperature=getattr(args, "temperature", 0.7),
         top_p=getattr(args, "top_p", 0.9),
+        stop_token_sequences=_build_stop_token_sequences(text_tokenizer),
     )
 
     print("Ready. Type your message (Ctrl-C to quit).\n")
@@ -3980,7 +4038,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
                 continue
             messages.append({"role": "user", "content": user_input})
 
-            input_ids = _tokenize_chat(tokenizer, messages)
+            input_ids = _tokenize_chat(text_tokenizer, messages)
             gen_cfg.max_new_tokens = _resolve_default_max_tokens(
                 model,
                 tokenizer,
@@ -3993,7 +4051,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
             scrubber = ReasoningScrubber()
             for tok in generate(model, input_ids, gen_cfg, tokenizer):
                 tokens.append(tok)
-                piece = tokenizer.decode([tok], skip_special_tokens=False)
+                piece = text_tokenizer.decode([tok], skip_special_tokens=False)
                 visible = scrubber.feed(piece, tokenizer)
                 if visible:
                     print(visible, end="", flush=True)
@@ -4001,7 +4059,7 @@ def _cmd_turboquant_chat(parser: argparse.ArgumentParser, args: argparse.Namespa
             if tail:
                 print(tail, end="", flush=True)
             print()
-            full_text = tokenizer.decode(tokens, skip_special_tokens=False)
+            full_text = text_tokenizer.decode(tokens, skip_special_tokens=False)
             messages.append({"role": "assistant", "content": clean_generated_text(full_text, tokenizer)})
     except KeyboardInterrupt:
         print("\nBye.")
@@ -4094,30 +4152,13 @@ def _turboquant_chat_remote(args: argparse.Namespace, base_url: str) -> int:
                                   headers={"Content-Type": "application/json"},
                                   method="POST")
 
-            assistant_text = ""
             try:
                 with _urlreq.urlopen(req, timeout=300) as resp:
                     print("Assistant: ", end="", flush=True)
-                    while True:
-                        raw_line = resp.readline()
-                        if not raw_line:
-                            break
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line.startswith("data: "):
-                            continue
-                        data = line[6:]
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            token = delta.get("content", "")
-                            if token:
-                                print(token, end="", flush=True)
-                                assistant_text += token
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            continue
+                    assistant_text, finish_reason = _stream_openai_chat_sse(resp)
                     print()
+                    if finish_reason and finish_reason != "stop":
+                        print(f"(response stopped: {finish_reason})", file=sys.stderr)
             except Exception as e:
                 print(f"\nError: {e}", file=sys.stderr)
                 if messages and messages[-1]["role"] == "user":

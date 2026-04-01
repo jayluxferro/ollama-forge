@@ -50,6 +50,7 @@ ollama run my-model
 | [Downsizing](Downsizing) | Teacher → student distillation |
 | [Hugging Face without GGUF](Hugging-Face-Without-GGUF) | When the repo has no GGUF |
 | [Quantization](Quantization) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |
+| [TurboQuant](TurboQuant) | Extreme 2-4 bit quantization, KV cache compression, layer-adaptive, temporal decay |
 | [CI / Automation](CI-Automation) | Example GitHub Actions |
 | [Command Reference](Command-Reference) | All commands at a glance |
 
@@ -69,6 +70,9 @@ ollama run my-model
 | One-file config build | `build recipe.yaml` |
 | Serve GGUF directly (llama.cpp) | `serve <model.gguf> [--port 11434] [-ngl -1]` |
 | Chat with a running server | `chat [--base-url <url>]` |
+| Quantize HF model (TurboQuant) | `turboquant quantize <model> --bits 3` |
+| Serve TurboQuant model | `turboquant serve <model.tqf> --port 8811` |
+| Chat with TurboQuant model | `turboquant chat <model.tqf>` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp (finetune, quantize) | `setup-llama-cpp` |

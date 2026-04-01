@@ -14,12 +14,14 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
-from ollama_forge.turboquant_text import ReasoningScrubber, clean_generated_text
+from ollama_forge.abliterate_proxy import _normalize_message, _parse_tool_calls
+from ollama_forge.chat_util import ollama_tools_to_hf
+from ollama_forge.turboquant_text import ReasoningScrubber, clean_generated_text, _boundary_markers
 
 # ---------------------------------------------------------------------------
 # Generation config — framework-independent dataclass so we don't need
@@ -34,6 +36,7 @@ class _GenConfig:
     top_k: int = 50
     repetition_penalty: float = 1.1
     stop_tokens: list[int] | None = None
+    stop_token_sequences: list[list[int]] | None = None
 
 
 def _build_gen_config(kwargs: dict, tokenizer: Any, default_max_tokens: int = 512) -> _GenConfig:
@@ -54,6 +57,33 @@ def _build_gen_config(kwargs: dict, tokenizer: Any, default_max_tokens: int = 51
     )
 
 
+def _build_stop_token_sequences(tokenizer: Any) -> list[list[int]]:
+    """Encode common chat boundary markers as stop sequences."""
+    tok = getattr(tokenizer, "tokenizer", tokenizer)
+    if tok is None or not hasattr(tok, "encode"):
+        return []
+
+    sequences: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for marker in _boundary_markers(tok):
+        try:
+            ids = tok.encode(marker, add_special_tokens=False)
+        except TypeError:
+            try:
+                ids = tok.encode(marker)
+            except Exception:
+                continue
+        except Exception:
+            continue
+        if not ids:
+            continue
+        key = tuple(int(i) for i in ids)
+        if key not in seen:
+            seen.add(key)
+            sequences.append(list(key))
+    return sequences
+
+
 def _infer_context_window(model: Any, tokenizer: Any = None) -> int | None:
     """Best-effort max context window for a loaded model/tokenizer."""
     candidates: list[int] = []
@@ -67,8 +97,9 @@ def _infer_context_window(model: Any, tokenizer: Any = None) -> int | None:
             if isinstance(value, int) and 0 < value < 10_000_000:
                 candidates.append(value)
 
-    if tokenizer is not None:
-        value = getattr(tokenizer, "model_max_length", None)
+    tok = getattr(tokenizer, "tokenizer", tokenizer)
+    if tok is not None:
+        value = getattr(tok, "model_max_length", None)
         if isinstance(value, int) and 0 < value < 10_000_000:
             candidates.append(value)
 
@@ -88,6 +119,27 @@ def _resolve_default_max_tokens(model: Any, tokenizer: Any, prompt_len: int, req
     return max(remaining, 1)
 
 
+def _format_openai_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    """Convert parsed tool calls to OpenAI-compatible response objects."""
+    formatted: list[dict] = []
+    for idx, tool_call in enumerate(tool_calls):
+        fn = tool_call.get("function") or {}
+        arguments = fn.get("arguments") or {}
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+        formatted.append(
+            {
+                "id": f"call_{idx}",
+                "type": "function",
+                "function": {
+                    "name": fn.get("name") or "",
+                    "arguments": arguments,
+                },
+            }
+        )
+    return formatted
+
+
 # ---------------------------------------------------------------------------
 # Server core — holds model, tokenizer, and the backend's generate function
 # ---------------------------------------------------------------------------
@@ -98,19 +150,97 @@ class TurboQuantServer:
     def __init__(self, model: Any, tokenizer: Any, model_name: str,
                  generate_fn: Callable, gen_config_cls: type):
         self.model = model
-        self.tokenizer = tokenizer
+        self.io = tokenizer
+        self.tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
         self.model_name = model_name
         self.lock = Lock()
         self._generate_fn = generate_fn
         self._gen_config_cls = gen_config_cls
 
-    def _encode_messages(self, messages: list[dict]) -> list[int]:
-        if hasattr(self.tokenizer, "apply_chat_template") and getattr(self.tokenizer, "chat_template", None):
+    def _has_multimodal_content(self, messages: list[dict]) -> bool:
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") in {"image", "image_url", "video", "audio"}:
+                        return True
+        return False
+
+    def _flatten_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content or "")
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                parts.append(str(item))
+                continue
+            kind = item.get("type")
+            if kind == "text":
+                parts.append(item.get("text", ""))
+            elif kind in {"image", "image_url"}:
+                parts.append("[image]")
+            elif kind == "video":
+                parts.append("[video]")
+            elif kind == "audio":
+                parts.append("[audio]")
+        return "".join(parts)
+
+    def _normalize_messages(self, messages: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for msg in messages:
+            clone = dict(msg)
+            if not isinstance(clone.get("content"), list):
+                clone["content"] = clone.get("content") or ""
+            normalized.append(_normalize_message(clone))
+        return normalized
+
+    def _prompt_length(self, encoded: Any) -> int:
+        if isinstance(encoded, dict):
+            input_ids = encoded.get("input_ids")
+            if hasattr(input_ids, "shape"):
+                return int(input_ids.shape[-1])
+            if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+                return len(input_ids[0])
+            return len(input_ids or [])
+        return len(encoded)
+
+    def _supports_tools(self, tools: list[dict] | None) -> list[dict] | None:
+        hf_tools = ollama_tools_to_hf(tools)
+        if not hf_tools or not hasattr(self.io, "apply_chat_template"):
+            return None
+        try:
+            self.io.apply_chat_template(
+                [{"role": "user", "content": "ping"}],
+                tools=hf_tools,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return hf_tools
+        except Exception:
+            return None
+
+    def _encode_messages(self, messages: list[dict], tools: list[dict] | None = None) -> list[int] | dict[str, Any]:
+        normalized = self._normalize_messages(messages)
+        hf_tools = self._supports_tools(tools)
+        is_multimodal = self._has_multimodal_content(normalized)
+
+        if hasattr(self.io, "apply_chat_template") and getattr(self.io, "chat_template", None):
             try:
-                ids = self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True,
-                )
-                # Handle dict-like BatchEncoding from newer transformers
+                apply_kwargs: dict[str, Any] = {"add_generation_prompt": True}
+                if hf_tools:
+                    apply_kwargs["tools"] = hf_tools
+                if hasattr(self.io, "tokenizer"):
+                    encoded = self.io.apply_chat_template(
+                        normalized,
+                        tokenize=True,
+                        return_dict=True,
+                        return_tensors="pt",
+                        **apply_kwargs,
+                    )
+                    return dict(encoded)
+                ids = self.io.apply_chat_template(normalized, **apply_kwargs)
                 if hasattr(ids, "keys"):
                     ids = ids["input_ids"]
                 if hasattr(ids, "tolist"):
@@ -119,12 +249,13 @@ class TurboQuantServer:
                     ids = ids[0]
                 return ids
             except Exception:
-                pass
+                if is_multimodal:
+                    raise
         # Fallback: simple concatenation
         text = ""
-        for msg in messages:
+        for msg in normalized:
             role = msg.get("role", "user")
-            content = msg.get("content", "")
+            content = self._flatten_content(msg.get("content", ""))
             text += f"<|{role}|>\n{content}\n"
         text += "<|assistant|>\n"
         return self.tokenizer.encode(text)
@@ -149,32 +280,59 @@ class TurboQuantServer:
             top_k=kwargs.get("top_k", 50),
             repetition_penalty=kwargs.get("repetition_penalty", 1.1),
             stop_tokens=stop_tokens or None,
+            stop_token_sequences=_build_stop_token_sequences(self.tokenizer),
         )
 
-    def chat_completion(self, messages: list[dict], **kwargs) -> tuple[str, list[int]]:
-        input_ids = self._encode_messages(messages)
-        gen_cfg = self._make_gen_config(kwargs, prompt_len=len(input_ids))
+    def chat_completion(self, messages: list[dict], **kwargs) -> tuple[str, list[int], list[dict] | None, str]:
+        input_ids = self._encode_messages(messages, kwargs.get("tools"))
+        gen_cfg = self._make_gen_config(kwargs, prompt_len=self._prompt_length(input_ids))
         tokens = []
         with self.lock:
             for tok in self._generate_fn(self.model, input_ids, gen_cfg, self.tokenizer):
                 tokens.append(tok)
         text = self.tokenizer.decode(tokens, skip_special_tokens=False)
-        return clean_generated_text(text, self.tokenizer), tokens
+        cleaned = clean_generated_text(text, self.tokenizer)
+        tool_calls = _parse_tool_calls(cleaned) if kwargs.get("tools") else None
+        if tool_calls:
+            cleaned = ""
+            return cleaned, tokens, tool_calls, "tool_calls"
+        # Detect truncation: if we generated exactly max_new_tokens, it was likely
+        # a length-limited stop rather than a natural stop token.
+        finish_reason = "length" if len(tokens) >= gen_cfg.max_new_tokens else "stop"
+        return cleaned, tokens, tool_calls, finish_reason
 
     def chat_completion_stream(self, messages: list[dict], **kwargs):
-        input_ids = self._encode_messages(messages)
-        gen_cfg = self._make_gen_config(kwargs, prompt_len=len(input_ids))
+        input_ids = self._encode_messages(messages, kwargs.get("tools"))
+        gen_cfg = self._make_gen_config(kwargs, prompt_len=self._prompt_length(input_ids))
+        if kwargs.get("tools"):
+            tokens = []
+            with self.lock:
+                for tok in self._generate_fn(self.model, input_ids, gen_cfg, self.tokenizer):
+                    tokens.append(tok)
+            text = self.tokenizer.decode(tokens, skip_special_tokens=False)
+            cleaned = clean_generated_text(text, self.tokenizer)
+            tool_calls = _parse_tool_calls(cleaned)
+            if tool_calls:
+                yield {"tool_calls": _format_openai_tool_calls(tool_calls), "content": ""}, "tool_calls"
+                return
+            finish = "length" if len(tokens) >= gen_cfg.max_new_tokens else "stop"
+            yield {"content": cleaned}, finish
+            return
+
         scrubber = ReasoningScrubber()
+        n_tokens = 0
         with self.lock:
             for tok in self._generate_fn(self.model, input_ids, gen_cfg, self.tokenizer):
+                n_tokens += 1
                 piece = self.tokenizer.decode([tok], skip_special_tokens=False)
                 visible = scrubber.feed(piece, self.tokenizer)
                 if visible:
-                    yield visible, None
+                    yield {"content": visible}, None
         tail = scrubber.finalize(self.tokenizer)
         if tail:
-            yield tail, None
-        yield "", "stop"
+            yield {"content": tail}, None
+        finish = "length" if n_tokens >= gen_cfg.max_new_tokens else "stop"
+        yield {"content": ""}, finish
 
     def completion(self, prompt: str, **kwargs) -> tuple[str, list[int]]:
         input_ids = self.tokenizer.encode(prompt)
@@ -253,7 +411,7 @@ class _Handler(BaseHTTPRequestHandler):
         req_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
         params = {k: body[k] for k in (
-            "max_tokens", "temperature", "top_p", "top_k", "repetition_penalty",
+            "max_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "tools",
         ) if k in body}
 
         if stream:
@@ -263,7 +421,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
 
-            for piece, finish in srv.chat_completion_stream(messages, **params):
+            for delta, finish in srv.chat_completion_stream(messages, **params):
                 chunk = {
                     "id": req_id,
                     "object": "chat.completion.chunk",
@@ -271,7 +429,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "model": srv.model_name,
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": piece} if finish is None else {},
+                        "delta": delta if finish is None or finish == "tool_calls" else {},
                         "finish_reason": finish,
                     }],
                 }
@@ -279,7 +437,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_sse("[DONE]")
             self.wfile.flush()
         else:
-            text, tokens = srv.chat_completion(messages, **params)
+            text, tokens, tool_calls, finish_reason = srv.chat_completion(messages, **params)
+            message = {"role": "assistant", "content": text}
+            if tool_calls:
+                message["tool_calls"] = _format_openai_tool_calls(tool_calls)
             self._send_json({
                 "id": req_id,
                 "object": "chat.completion",
@@ -287,8 +448,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "model": srv.model_name,
                 "choices": [{
                     "index": 0,
-                    "message": {"role": "assistant", "content": text},
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": finish_reason,
                 }],
                 "usage": {
                     "prompt_tokens": 0,

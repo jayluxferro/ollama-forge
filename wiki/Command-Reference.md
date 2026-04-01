@@ -86,10 +86,10 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
-- **turboquant** has subcommands: `quantize`, `serve`, `chat`, `info`. See [TurboQuant](TurboQuant) for details.
+- **turboquant** has subcommands: `quantize`, `serve`, `chat`, `info`. Supports asymmetric K/V cache compression, layer-adaptive precision (`TURBO_LAYER_ADAPTIVE` env var), and temporal decay for long contexts. See [TurboQuant](TurboQuant) for details.
 - **serve** starts llama-server from llama.cpp; auto-discovers the binary from PATH or `./llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Pass extra llama-server flags after `--`.
 - **chat** connects to any OpenAI-compatible `/v1/chat/completions` endpoint. In-session commands: `/clear` (reset history), `quit` (exit).
-- **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436 (defaults; override with `--port`).
+- **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436, turboquant serve 8811 (defaults; override with `--port`).
 
 Use `ollama-forge <command> --help` for options and examples.
 

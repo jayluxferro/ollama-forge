@@ -325,3 +325,487 @@ class TestBackendDetection:
         from ollama_forge.turboquant_kernels import is_triton_available
         # Should return bool without crashing
         assert isinstance(is_triton_available(), bool)
+
+
+# ---------------------------------------------------------------------------
+# Class-based API tests (mirrors reference turboquant_plus)
+# ---------------------------------------------------------------------------
+
+from ollama_forge.turboquant import (  # noqa: E402
+    CompressedKVCache,
+    CompressedVector,
+    KVCacheCompressor,
+    OutlierTurboQuant,
+    PolarQuant,
+    QJLQuantizer,
+    TurboQuant,
+    TurboQuantMSE,
+)
+
+
+class TestPolarQuant:
+    def test_roundtrip_shape(self):
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(64)
+        indices, norms = pq.quantize(x)
+        assert indices.shape == (64,)
+        x_hat = pq.dequantize(indices, norms)
+        assert x_hat.shape == (64,)
+
+    def test_batch_roundtrip(self):
+        pq = PolarQuant(d=128, bit_width=3, seed=42)
+        x = torch.randn(8, 128)
+        indices, norms = pq.quantize(x)
+        assert indices.shape == (8, 128)
+        assert norms.shape == (8,)
+        x_hat = pq.dequantize(indices, norms)
+        assert x_hat.shape == (8, 128)
+
+    def test_norm_preservation(self):
+        """Original L2 norm should be roughly preserved after dequantize."""
+        pq = PolarQuant(d=128, bit_width=4, seed=42)
+        x = torch.randn(128) * 3.0  # non-unit norm
+        indices, norms = pq.quantize(x)
+        x_hat = pq.dequantize(indices, norms)
+        assert abs(x_hat.norm().item() - x.norm().item()) / x.norm().item() < 0.3
+
+    def test_quantize_and_residual(self):
+        pq = PolarQuant(d=64, bit_width=2, seed=42)
+        x = torch.randn(64)
+        indices, norms, residual = pq.quantize_and_residual(x)
+        x_hat = pq.dequantize(indices, norms)
+        assert torch.allclose(residual, x - x_hat, atol=1e-5)
+
+
+class TestQJLQuantizer:
+    def test_roundtrip_shape(self):
+        qjl = QJLQuantizer(d=64, seed=42)
+        r = torch.randn(64)
+        signs, norms = qjl.quantize(r)
+        assert signs.shape == (64,)
+        r_hat = qjl.dequantize(signs, norms)
+        assert r_hat.shape == (64,)
+
+    def test_batch(self):
+        qjl = QJLQuantizer(d=32, seed=42)
+        r = torch.randn(4, 32)
+        signs, norms = qjl.quantize(r)
+        assert signs.shape == (4, 32)
+        assert norms.shape == (4,)
+        r_hat = qjl.dequantize(signs, norms)
+        assert r_hat.shape == (4, 32)
+
+    def test_signs_are_pm1(self):
+        qjl = QJLQuantizer(d=128, seed=42)
+        r = torch.randn(128)
+        signs, _ = qjl.quantize(r)
+        assert ((signs == 1) | (signs == -1)).all()
+
+
+class TestTurboQuantClass:
+    def test_requires_min_bits(self):
+        with pytest.raises(ValueError):
+            TurboQuant(d=64, bit_width=1)
+
+    def test_roundtrip(self):
+        tq = TurboQuant(d=128, bit_width=3, seed=42)
+        x = torch.randn(128)
+        compressed = tq.quantize(x)
+        assert isinstance(compressed, CompressedVector)
+        assert compressed.bit_width == 3
+        x_hat = tq.dequantize(compressed)
+        assert x_hat.shape == (128,)
+
+    def test_batch_roundtrip(self):
+        tq = TurboQuant(d=64, bit_width=4, seed=42)
+        x = torch.randn(8, 64)
+        compressed = tq.quantize(x)
+        x_hat = tq.dequantize(compressed)
+        assert x_hat.shape == (8, 64)
+
+    def test_quality_improves_with_bits(self):
+        """Higher bits → lower MSE."""
+        x = torch.randn(16, 128)
+        tq2 = TurboQuant(d=128, bit_width=2, seed=42)
+        tq4 = TurboQuant(d=128, bit_width=4, seed=42)
+        mse2 = (x - tq2.dequantize(tq2.quantize(x))).pow(2).mean().item()
+        mse4 = (x - tq4.dequantize(tq4.quantize(x))).pow(2).mean().item()
+        assert mse4 < mse2
+
+    def test_compression_ratio(self):
+        tq = TurboQuant(d=128, bit_width=3)
+        ratio = tq.compression_ratio(original_bits=16)
+        assert ratio > 4.0  # 16 / (3 + 32/128) ≈ 4.9
+
+    def test_inner_product_correlation(self):
+        """Approximate inner products should correlate with true ones."""
+        d = 128
+        tq = TurboQuant(d=d, bit_width=4, seed=42)
+        torch.manual_seed(0)
+        true_ips = []
+        approx_ips = []
+        for _ in range(50):
+            x = torch.randn(d)
+            y = torch.randn(d)
+            true_ips.append((x @ y).item())
+            approx_ips.append(
+                (tq.dequantize(tq.quantize(x)) @ tq.dequantize(tq.quantize(y))).item()
+            )
+        # Pearson correlation should be positive (reconstruction is useful)
+        t = torch.tensor(true_ips)
+        a = torch.tensor(approx_ips)
+        corr = ((t - t.mean()) * (a - a.mean())).sum() / (t.std() * a.std() * len(t))
+        assert corr > 0.3, f"IP correlation too low: {corr:.3f}"
+
+
+class TestTurboQuantMSEClass:
+    def test_roundtrip(self):
+        tqm = TurboQuantMSE(d=128, bit_width=3, seed=42)
+        x = torch.randn(128)
+        indices, norms = tqm.quantize(x)
+        x_hat = tqm.dequantize(indices, norms)
+        assert x_hat.shape == (128,)
+
+    def test_batch(self):
+        tqm = TurboQuantMSE(d=64, bit_width=4, seed=42)
+        x = torch.randn(8, 64)
+        indices, norms = tqm.quantize(x)
+        x_hat = tqm.dequantize(indices, norms)
+        assert x_hat.shape == (8, 64)
+
+
+class TestKVCacheCompressor:
+    def test_compress_decompress(self):
+        compressor = KVCacheCompressor(head_dim=32, k_bits=3, v_bits=3)
+        num_layers, num_heads, seq_len = 2, 4, 8
+        k = torch.randn(num_layers, num_heads, seq_len, 32)
+        v = torch.randn(num_layers, num_heads, seq_len, 32)
+        compressed = compressor.compress(k, v)
+        assert isinstance(compressed, CompressedKVCache)
+        assert compressed.num_layers == 2
+        assert compressed.num_heads == 4
+        assert compressed.seq_len == 8
+        k_hat, v_hat = compressor.decompress(compressed)
+        assert k_hat.shape == k.shape
+        assert v_hat.shape == v.shape
+
+    def test_memory_stats(self):
+        compressor = KVCacheCompressor(head_dim=128, k_bits=3, v_bits=3)
+        stats = compressor.memory_stats(seq_len=1024, num_layers=32, num_heads=32)
+        # K uses 3 bits + 32-bit norm, V uses 3 bits → ~2.5x compression at 3-bit
+        assert stats["compression_ratio"] > 2.0
+        assert stats["original_mb"] > stats["compressed_mb"]
+
+
+class TestOutlierTurboQuant:
+    def test_effective_bits_2_5(self):
+        oq = OutlierTurboQuant(d=128, target_bits=2.5, seed=42)
+        assert abs(oq.effective_bits - 2.5) < 0.1
+
+    def test_effective_bits_3_5(self):
+        oq = OutlierTurboQuant(d=128, target_bits=3.5, seed=42)
+        assert abs(oq.effective_bits - 3.5) < 0.1
+
+    def test_quantize_shape(self):
+        oq = OutlierTurboQuant(d=64, target_bits=2.5, seed=42)
+        x = torch.randn(64)
+        compressed = oq.quantize(x)
+        assert isinstance(compressed, CompressedVector)
+        assert compressed.qjl_signs.shape == (64,)
+
+    def test_compression_ratio(self):
+        oq = OutlierTurboQuant(d=128, target_bits=2.5, seed=42)
+        ratio = oq.compression_ratio(original_bits=16)
+        assert ratio > 4.0  # 16 / ~3.25 ≈ 4.9
+
+
+# ---------------------------------------------------------------------------
+# Layer-Adaptive KV Cache tests
+# ---------------------------------------------------------------------------
+
+from ollama_forge.turboquant import (  # noqa: E402
+    LayerAdaptivePolicy,
+    LayerAdaptiveKVCacheCompressor,
+    TemporalDecayManager,
+)
+
+
+class TestLayerAdaptivePolicy:
+    def test_mode_0_uniform(self):
+        """Mode 0: all layers get base_bits."""
+        policy = LayerAdaptivePolicy(num_layers=40, mode=0, base_bits=3)
+        for i in range(40):
+            assert policy.kv_bits(i) == 3
+        assert len(policy.protected_layers) == 0
+
+    def test_mode_2_last_n_protected(self):
+        """Mode 2: last N layers use protected_bits (0 = no compression)."""
+        policy = LayerAdaptivePolicy(
+            num_layers=40, mode=2, base_bits=3,
+            protected_bits=0, n_protected=8,
+        )
+        # First 32 layers: compressed at 3 bits
+        for i in range(32):
+            assert policy.kv_bits(i) == 3
+            assert not policy.is_protected(i)
+        # Last 8 layers: full precision
+        for i in range(32, 40):
+            assert policy.kv_bits(i) == 0
+            assert policy.is_protected(i)
+
+    def test_mode_7_boundary(self):
+        """Mode 7: first 2 + last 2 layers protected."""
+        policy = LayerAdaptivePolicy(
+            num_layers=10, mode=7, base_bits=3, protected_bits=0,
+        )
+        assert policy.is_protected(0)
+        assert policy.is_protected(1)
+        assert not policy.is_protected(2)
+        assert not policy.is_protected(7)
+        assert policy.is_protected(8)
+        assert policy.is_protected(9)
+        assert len(policy.protected_layers) == 4
+
+    def test_invalid_mode_raises(self):
+        with pytest.raises(ValueError):
+            LayerAdaptivePolicy(num_layers=10, mode=99)
+
+    def test_effective_compression(self):
+        """Protected layers reduce overall compression."""
+        # All compressed at 3 bits
+        p_uniform = LayerAdaptivePolicy(num_layers=10, mode=0, base_bits=3)
+        # Last 2 uncompressed
+        p_adaptive = LayerAdaptivePolicy(
+            num_layers=10, mode=2, base_bits=3,
+            protected_bits=0, n_protected=2,
+        )
+        # Adaptive should have lower compression ratio (some layers uncompressed)
+        assert p_adaptive.effective_compression() < p_uniform.effective_compression()
+
+    def test_small_model(self):
+        """Edge case: fewer layers than n_protected."""
+        policy = LayerAdaptivePolicy(
+            num_layers=4, mode=2, base_bits=3,
+            protected_bits=0, n_protected=8,
+        )
+        # All layers protected since n_protected > num_layers
+        for i in range(4):
+            assert policy.is_protected(i)
+
+
+class TestLayerAdaptiveKVCacheCompressor:
+    def test_compress_decompress_mode_0(self):
+        """Mode 0 should behave identically to KVCacheCompressor."""
+        head_dim = 64
+        nl, nh, sl = 4, 2, 8
+        compressor = LayerAdaptiveKVCacheCompressor(
+            head_dim=head_dim, num_layers=nl, base_bits=3, mode=0,
+        )
+        k = torch.randn(nl, nh, sl, head_dim)
+        v = torch.randn(nl, nh, sl, head_dim)
+
+        compressed = compressor.compress(k, v)
+        k_hat, v_hat = compressor.decompress(compressed)
+        assert k_hat.shape == k.shape
+        assert v_hat.shape == v.shape
+
+    def test_compress_decompress_mode_2(self):
+        """Mode 2: protected layers should be lossless."""
+        head_dim = 64
+        nl, nh, sl = 6, 2, 8
+        compressor = LayerAdaptiveKVCacheCompressor(
+            head_dim=head_dim, num_layers=nl, base_bits=3, mode=2,
+            n_protected=2,
+        )
+        k = torch.randn(nl, nh, sl, head_dim)
+        v = torch.randn(nl, nh, sl, head_dim)
+
+        compressed = compressor.compress(k, v)
+        k_hat, v_hat = compressor.decompress(compressed)
+        assert k_hat.shape == k.shape
+
+        # Last 2 layers should be perfectly preserved (raw storage)
+        for layer_idx in [4, 5]:
+            assert torch.allclose(k[layer_idx], k_hat[layer_idx])
+            assert torch.allclose(v[layer_idx], v_hat[layer_idx])
+
+        # First 4 layers should have some quantization error
+        for layer_idx in range(4):
+            k_err = (k[layer_idx] - k_hat[layer_idx]).abs().mean().item()
+            assert k_err > 0  # not lossless
+
+    def test_memory_stats(self):
+        compressor = LayerAdaptiveKVCacheCompressor(
+            head_dim=128, num_layers=10, base_bits=3, mode=2, n_protected=2,
+        )
+        stats = compressor.memory_stats(seq_len=1024, num_heads=32)
+        assert stats["compression_ratio"] > 1.0
+        assert stats["n_protected"] == 2
+        assert stats["mode"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Temporal Decay tests
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalDecayManager:
+    def test_requires_lower_target(self):
+        with pytest.raises(ValueError):
+            TemporalDecayManager(d=64, source_bits=3, target_bits=3)
+
+    def test_no_decay_before_interval(self):
+        """Decay should only trigger at decay_interval steps."""
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=4, batch_size=8,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(32, 64)
+        indices, norms = pq.quantize(x)
+
+        # Steps 1-3 should not trigger decay
+        for step in range(3):
+            new_idx, new_norms, did_decay = decay.maybe_decay(indices, norms, total_seq_len=32)
+            assert not did_decay
+
+    def test_decay_triggers_at_interval(self):
+        """Decay should trigger every decay_interval steps."""
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=4, batch_size=64,
+            sink_len=2,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(32, 64)
+        indices, norms = pq.quantize(x)
+
+        # Run 4 steps to trigger first decay
+        for step in range(4):
+            new_idx, new_norms, did_decay = decay.maybe_decay(
+                indices, norms, total_seq_len=32, recent_window=4,
+            )
+        assert did_decay
+        assert decay.n_decayed > 0
+
+    def test_sinks_exempted(self):
+        """Attention sinks (positions 0..sink_len-1) should never be decayed."""
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=100,
+            sink_len=4,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(20, 64)
+        indices, norms = pq.quantize(x)
+
+        # Run enough steps to decay everything eligible
+        for step in range(10):
+            indices, norms, _ = decay.maybe_decay(
+                indices, norms, total_seq_len=20, recent_window=2,
+            )
+
+        # Sink positions (0-3) should not be in decayed set
+        for pos in range(4):
+            assert pos not in decay._decayed_positions
+
+    def test_recent_window_protected(self):
+        """Tokens in the recent window should not be decayed."""
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=100,
+            sink_len=0,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(16, 64)
+        indices, norms = pq.quantize(x)
+
+        # recent_window=8 protects last 8 positions
+        for step in range(10):
+            indices, norms, _ = decay.maybe_decay(
+                indices, norms, total_seq_len=16, recent_window=8,
+            )
+
+        # Positions 8-15 should never be decayed
+        for pos in range(8, 16):
+            assert pos not in decay._decayed_positions
+
+    def test_batch_size_limit(self):
+        """Only batch_size positions should be decayed per interval."""
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=4,
+            sink_len=0,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(32, 64)
+        indices, norms = pq.quantize(x)
+
+        # First decay: should only decay 4 positions
+        _, _, did_decay = decay.maybe_decay(
+            indices, norms, total_seq_len=32, recent_window=4,
+        )
+        assert did_decay
+        assert decay.n_decayed == 4
+
+    def test_requantize_quality(self):
+        """Requantized vectors should still correlate with originals."""
+        decay = TemporalDecayManager(
+            d=128, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=100,
+            sink_len=0,
+        )
+        pq_source = PolarQuant(d=128, bit_width=3, seed=42)
+        x = torch.randn(16, 128)
+        indices, norms = pq_source.quantize(x)
+
+        # Get source reconstruction for comparison
+        x_source = pq_source.dequantize(indices, norms)
+
+        # Decay all positions
+        new_idx, new_norms, _ = decay.maybe_decay(
+            indices, norms, total_seq_len=16, recent_window=0,
+        )
+
+        # Requantized vectors should still be in the right ballpark
+        # Use the source PQ to dequant (the norms carry the scale info)
+        x_decayed = decay._target_pq.dequantize(new_idx, new_norms)
+
+        # Check cosine similarity between source and decayed
+        cos_sims = torch.nn.functional.cosine_similarity(x_source, x_decayed, dim=1)
+        assert cos_sims.mean().item() > 0.5  # reasonable for 3→2 bit
+
+    def test_memory_savings_ratio(self):
+        """Memory savings ratio should reflect the bit reduction."""
+        decay = TemporalDecayManager(
+            d=128, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=100,
+            sink_len=0,
+        )
+        pq = PolarQuant(d=128, bit_width=3, seed=42)
+        x = torch.randn(100, 128)
+        indices, norms = pq.quantize(x)
+
+        # Decay everything
+        decay.maybe_decay(indices, norms, total_seq_len=100, recent_window=0)
+
+        ratio = decay.memory_savings_ratio(100)
+        # 2/3 = 0.667 — all positions decayed from 3→2 bits
+        assert ratio < 0.75
+        assert ratio > 0.5
+
+    def test_reset_clears_state(self):
+        decay = TemporalDecayManager(
+            d=64, source_bits=3, target_bits=2,
+            decay_interval=1, batch_size=100,
+        )
+        pq = PolarQuant(d=64, bit_width=3, seed=42)
+        x = torch.randn(16, 64)
+        indices, norms = pq.quantize(x)
+
+        decay.maybe_decay(indices, norms, total_seq_len=16, recent_window=0)
+        assert decay.n_decayed > 0
+
+        decay.reset()
+        assert decay.n_decayed == 0
+        assert decay._step_count == 0

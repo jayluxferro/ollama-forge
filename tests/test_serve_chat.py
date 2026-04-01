@@ -382,3 +382,94 @@ def test_chat_clear_command() -> None:
         assert request_count[0] == 2
     finally:
         server.shutdown()
+
+
+def test_chat_reports_non_stop_finish_reason(capsys: pytest.CaptureFixture[str]) -> None:
+    """Chat surfaces finish_reason when the server stops for length."""
+    from ollama_forge.cli import _cmd_chat
+
+    class LengthStopHandler(_ChatMockHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            chunk = {"choices": [{"delta": {"content": "Hello!"}, "index": 0}]}
+            stop_chunk = {"choices": [{"delta": {}, "index": 0, "finish_reason": "length"}]}
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(f"data: {json.dumps(stop_chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+    server = HTTPServer(("127.0.0.1", 0), LengthStopHandler)
+    port = server.server_address[1]
+    t = Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        args = argparse.Namespace(
+            base_url=f"http://127.0.0.1:{port}",
+            model=None,
+            system=None,
+            api_key=None,
+            temperature=None,
+        )
+        parser = argparse.ArgumentParser()
+
+        with patch("builtins.input", side_effect=["hi", "quit"]):
+            rc = _cmd_chat(parser, args)
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "Hello!" in captured.out
+        assert "(response stopped: length)" in captured.err
+    finally:
+        server.shutdown()
+
+
+def test_turboquant_remote_chat_reports_non_stop_finish_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """TurboQuant remote chat also reports length-stopped responses."""
+    from ollama_forge.cli import _turboquant_chat_remote
+
+    class LengthStopHandler(_ChatMockHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            chunk = {"choices": [{"delta": {"content": "Hello!"}, "index": 0}]}
+            stop_chunk = {"choices": [{"delta": {}, "index": 0, "finish_reason": "length"}]}
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            self.wfile.write(f"data: {json.dumps(stop_chunk)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+    server = HTTPServer(("127.0.0.1", 0), LengthStopHandler)
+    port = server.server_address[1]
+    t = Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        args = argparse.Namespace(
+            base_url=f"http://127.0.0.1:{port}",
+            model="",
+            system=None,
+            temperature=None,
+            max_tokens=1024,
+        )
+
+        with patch("builtins.input", side_effect=["hi", "quit"]):
+            rc = _turboquant_chat_remote(args, args.base_url)
+
+        captured = capsys.readouterr()
+        assert rc == 0
+        assert "Hello!" in captured.out
+        assert "(response stopped: length)" in captured.err
+    finally:
+        server.shutdown()

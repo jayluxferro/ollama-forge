@@ -669,3 +669,857 @@ class CompressionStats:
             total_params = sum(math.prod(entry["shape"]) for entry in self.layers)
             total_weighted = sum(math.prod(entry["shape"]) * entry["bits"] for entry in self.layers)
             self.effective_bits_avg = total_weighted / max(total_params, 1)
+
+
+# =========================================================================
+# Class-based API — mirrors the reference TurboQuant+ architecture.
+#
+# PolarQuant (Algorithm 1): random rotation + optimal scalar quantization.
+# QJL: 1-bit sign quantization via random projection for residual.
+# TurboQuant (Algorithm 2): PolarQuant(b-1) + QJL(1) for inner product.
+# TurboQuantMSE: PolarQuant only, optimises MSE (for V cache).
+# KVCacheCompressor: asymmetric K/V compression.
+# =========================================================================
+
+
+@dataclass
+class CompressedVector:
+    """Container for a TurboQuant-compressed vector (or batch)."""
+    mse_indices: torch.Tensor     # (d,) or (batch, d) — PolarQuant centroid indices
+    vector_norms: torch.Tensor    # scalar or (batch,) — original ||x||_2
+    qjl_signs: torch.Tensor       # (d,) or (batch, d) — QJL sign bits {-1,+1}
+    residual_norms: torch.Tensor  # scalar or (batch,) — ||residual||_2
+    bit_width: int                # total bits per coordinate
+
+
+class PolarQuant:
+    """MSE-optimised vector quantiser via random rotation + scalar quantisation.
+
+    Handles arbitrary-norm vectors by extracting norms before quantisation
+    and rescaling after dequantisation.
+
+    Usage::
+
+        pq = PolarQuant(d=128, bit_width=2, seed=42, device=device)
+        indices, norms = pq.quantize(x)       # x: (d,) or (batch, d)
+        x_hat = pq.dequantize(indices, norms)
+    """
+
+    def __init__(self, d: int, bit_width: int, seed: int = 42,
+                 device: torch.device | None = None):
+        if device is None:
+            device = torch.device("cpu")
+        self.d = d
+        self.bit_width = bit_width
+        self.device = device
+        self.n_centroids = 1 << bit_width
+        self.rotation = generate_rotation_matrix(d, device=device, seed=seed)
+        self.centroids = _get_codebook(bit_width, d, device)
+
+    def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantise vector(s).
+
+        Args:
+            x: shape ``(d,)`` or ``(batch, d)``.
+
+        Returns:
+            ``(indices, norms)`` — integer indices and L2 norms.
+        """
+        single = x.dim() == 1
+        if single:
+            x = x.unsqueeze(0)
+        x = x.float()
+
+        norms = x.norm(dim=1)
+        safe_norms = torch.where(norms > 0, norms, torch.ones_like(norms))
+        x_normed = x / safe_norms.unsqueeze(1)
+
+        y = x_normed @ self.rotation.T
+        indices = _scalar_quantize(y, self.centroids)
+
+        if single:
+            return indices.squeeze(0), norms.squeeze(0)
+        return indices, norms
+
+    def dequantize(self, indices: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        """Reconstruct vector(s) from indices and norms."""
+        single = indices.dim() == 1
+        if single:
+            indices = indices.unsqueeze(0)
+            norms = norms.unsqueeze(0)
+
+        y_hat = _scalar_dequantize(indices, self.centroids)
+        x_hat_unit = y_hat @ self.rotation
+        x_hat = x_hat_unit * norms.unsqueeze(1)
+
+        return x_hat.squeeze(0) if single else x_hat
+
+    def quantize_and_residual(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantise and return ``(indices, norms, residual)``."""
+        indices, norms = self.quantize(x)
+        x_hat = self.dequantize(indices, norms)
+        residual = x.float() - x_hat.float()
+        return indices, norms, residual
+
+
+class QJLQuantizer:
+    """Quantised Johnson-Lindenstrauss 1-bit quantiser.
+
+    Usage::
+
+        qjl = QJLQuantizer(d=128, seed=42, device=device)
+        signs, norms = qjl.quantize(residual)
+        r_hat = qjl.dequantize(signs, norms)
+    """
+
+    def __init__(self, d: int, seed: int = 123, device: torch.device | None = None):
+        if device is None:
+            device = torch.device("cpu")
+        self.d = d
+        self.device = device
+        self.S = generate_qjl_matrix(d, device=device, seed=seed)
+
+    def quantize(self, r: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantise residual to sign bits.
+
+        Returns:
+            ``(signs, norms)`` — signs in {-1,+1} and L2 norms.
+        """
+        single = r.dim() == 1
+        if single:
+            r = r.unsqueeze(0)
+        r = r.float()
+
+        norms = r.norm(dim=1)
+        signs = qjl_quantize(r, self.S)
+        signs[signs == 0] = 1
+
+        if single:
+            return signs.squeeze(0), norms.squeeze(0)
+        return signs, norms
+
+    def dequantize(self, signs: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        """Reconstruct approximate residual from signs and norms."""
+        single = signs.dim() == 1
+        if single:
+            signs = signs.unsqueeze(0)
+            norms = norms.unsqueeze(0)
+
+        m = self.S.shape[0]
+        scale = math.sqrt(math.pi / 2.0) / m
+        reconstructed = signs.float() @ self.S
+        reconstructed *= (scale * norms).unsqueeze(1)
+
+        return reconstructed.squeeze(0) if single else reconstructed
+
+
+class TurboQuant:
+    """Full TurboQuant quantiser: PolarQuant(b-1 bits) + QJL(1 bit).
+
+    Optimises inner-product preservation — use for K cache.
+
+    Usage::
+
+        tq = TurboQuant(d=128, bit_width=3, seed=42, device=device)
+        compressed = tq.quantize(x)
+        x_hat = tq.dequantize(compressed)
+    """
+
+    def __init__(self, d: int, bit_width: int, seed: int = 42,
+                 device: torch.device | None = None):
+        if bit_width < 2:
+            raise ValueError("TurboQuant requires bit_width >= 2 (1 PolarQuant + 1 QJL)")
+        self.d = d
+        self.bit_width = bit_width
+        self.polar_quant = PolarQuant(d, bit_width=bit_width - 1, seed=seed, device=device)
+        self.qjl = QJLQuantizer(d, seed=seed + 1000, device=device)
+
+    def quantize(self, x: torch.Tensor) -> CompressedVector:
+        """Quantise a vector or batch."""
+        mse_indices, vector_norms, residual = self.polar_quant.quantize_and_residual(x)
+        qjl_signs, residual_norms = self.qjl.quantize(residual)
+        return CompressedVector(
+            mse_indices=mse_indices,
+            vector_norms=vector_norms,
+            qjl_signs=qjl_signs,
+            residual_norms=residual_norms,
+            bit_width=self.bit_width,
+        )
+
+    def dequantize(self, compressed: CompressedVector) -> torch.Tensor:
+        """Reconstruct approximate vector."""
+        x_mse = self.polar_quant.dequantize(compressed.mse_indices, compressed.vector_norms)
+        x_qjl = self.qjl.dequantize(compressed.qjl_signs, compressed.residual_norms)
+        return x_mse + x_qjl
+
+    def compression_ratio(self, original_bits: int = 16) -> float:
+        """Compression ratio vs original precision."""
+        original = self.d * original_bits
+        compressed = self.d * self.bit_width + 32  # +32 for residual norm
+        return original / compressed
+
+
+class TurboQuantMSE:
+    """MSE-only TurboQuant (Algorithm 1) — no QJL stage.
+
+    Optimises MSE preservation — use for V cache.
+    """
+
+    def __init__(self, d: int, bit_width: int, seed: int = 42,
+                 device: torch.device | None = None):
+        self.d = d
+        self.bit_width = bit_width
+        self.polar_quant = PolarQuant(d, bit_width=bit_width, seed=seed, device=device)
+
+    def quantize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ``(indices, norms)``."""
+        return self.polar_quant.quantize(x)
+
+    def dequantize(self, indices: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
+        return self.polar_quant.dequantize(indices, norms)
+
+
+@dataclass
+class CompressedKVCache:
+    """Container for a compressed KV cache."""
+    k_compressed: list[list[CompressedVector]] = field(default_factory=list)
+    v_indices: list[list[torch.Tensor]] = field(default_factory=list)
+    v_norms: list[list[torch.Tensor]] = field(default_factory=list)
+    num_layers: int = 0
+    num_heads: int = 0
+    seq_len: int = 0
+    head_dim: int = 0
+    k_bit_width: int = 0
+    v_bit_width: int = 0
+
+
+class KVCacheCompressor:
+    """Compress and decompress transformer KV cache tensors.
+
+    Uses TurboQuant (Algorithm 2) for K cache — inner product preservation
+    for attention scores (Q @ K^T).
+    Uses TurboQuantMSE (Algorithm 1) for V cache — MSE preservation for
+    value reconstruction (attn_weights @ V).
+
+    Usage::
+
+        compressor = KVCacheCompressor(head_dim=128, k_bits=3, v_bits=3, device=device)
+        compressed = compressor.compress(k_cache, v_cache)
+        k_hat, v_hat = compressor.decompress(compressed)
+    """
+
+    def __init__(self, head_dim: int, k_bits: int = 3, v_bits: int = 3,
+                 seed: int = 42, device: torch.device | None = None):
+        self.head_dim = head_dim
+        self.k_bits = k_bits
+        self.v_bits = v_bits
+        self.k_quantizer = TurboQuant(head_dim, bit_width=k_bits, seed=seed, device=device)
+        self.v_quantizer = TurboQuantMSE(head_dim, bit_width=v_bits, seed=seed + 500, device=device)
+
+    def compress(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> CompressedKVCache:
+        """Compress full KV cache tensors.
+
+        Args:
+            k_cache: shape ``(num_layers, num_heads, seq_len, head_dim)``.
+            v_cache: same shape.
+        """
+        num_layers, num_heads, seq_len, head_dim = k_cache.shape
+        assert head_dim == self.head_dim
+        assert v_cache.shape == k_cache.shape
+
+        result = CompressedKVCache(
+            num_layers=num_layers, num_heads=num_heads,
+            seq_len=seq_len, head_dim=head_dim,
+            k_bit_width=self.k_bits, v_bit_width=self.v_bits,
+        )
+
+        for layer in range(num_layers):
+            k_layer: list[CompressedVector] = []
+            v_layer_idx: list[torch.Tensor] = []
+            v_layer_norms: list[torch.Tensor] = []
+            for head in range(num_heads):
+                k_vecs = k_cache[layer, head]
+                k_layer.append(self.k_quantizer.quantize(k_vecs))
+
+                v_vecs = v_cache[layer, head]
+                v_idx, v_n = self.v_quantizer.quantize(v_vecs)
+                v_layer_idx.append(v_idx)
+                v_layer_norms.append(v_n)
+
+            result.k_compressed.append(k_layer)
+            result.v_indices.append(v_layer_idx)
+            result.v_norms.append(v_layer_norms)
+
+        return result
+
+    def decompress(self, compressed: CompressedKVCache) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decompress back to full KV cache tensors."""
+        k_cache = torch.zeros(
+            compressed.num_layers, compressed.num_heads,
+            compressed.seq_len, compressed.head_dim,
+            device=self.k_quantizer.polar_quant.device,
+        )
+        v_cache = torch.zeros_like(k_cache)
+
+        for layer in range(compressed.num_layers):
+            for head in range(compressed.num_heads):
+                k_cache[layer, head] = self.k_quantizer.dequantize(
+                    compressed.k_compressed[layer][head]
+                )
+                v_cache[layer, head] = self.v_quantizer.dequantize(
+                    compressed.v_indices[layer][head],
+                    compressed.v_norms[layer][head],
+                )
+
+        return k_cache, v_cache
+
+    def memory_stats(self, seq_len: int, num_layers: int, num_heads: int) -> dict:
+        """Compute memory usage statistics."""
+        n_vectors = num_layers * num_heads * seq_len
+        original_bytes = n_vectors * self.head_dim * 2  # fp16
+        k_bits_total = n_vectors * (self.head_dim * self.k_bits + 32)
+        v_bits_total = n_vectors * self.head_dim * self.v_bits
+        compressed_bytes = (k_bits_total + v_bits_total) / 8
+        return {
+            "original_mb": original_bytes / 1024 / 1024,
+            "compressed_mb": compressed_bytes / 1024 / 1024,
+            "compression_ratio": original_bytes / compressed_bytes,
+            "k_bits_per_value": self.k_bits,
+            "v_bits_per_value": self.v_bits,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Layer-Adaptive KV Cache Compression
+#
+# The last N layers of a transformer account for most of turbo's quality
+# loss.  Layer-adaptive mode protects those layers with higher precision
+# (or no compression) while compressing earlier layers aggressively.
+#
+# Modes (set via TURBO_LAYER_ADAPTIVE env var or constructor):
+#   0 — uniform (all layers same bits)
+#   2 — last ``n_protected`` layers at ``protected_bits``, rest at base bits
+#   7 — "Boundary V": first 2 + last 2 layers protected (V only)
+# ---------------------------------------------------------------------------
+
+_LAYER_ADAPTIVE_MODES = {0, 2, 7}
+
+
+def _layer_adaptive_mode() -> int:
+    """Read layer-adaptive mode from environment, defaulting to 0 (uniform)."""
+    import os
+    raw = os.environ.get("TURBO_LAYER_ADAPTIVE", "0")
+    try:
+        mode = int(raw)
+    except ValueError:
+        return 0
+    return mode if mode in _LAYER_ADAPTIVE_MODES else 0
+
+
+class LayerAdaptivePolicy:
+    """Per-layer bit-width policy for KV cache compression.
+
+    Determines which layers get full-precision KV and which get compressed,
+    based on validated findings that the last ~20% of layers account for
+    nearly all of turbo's quality loss.
+
+    Usage::
+
+        policy = LayerAdaptivePolicy(
+            num_layers=40, mode=2, base_bits=3,
+            protected_bits=0, n_protected=8,
+        )
+        for layer in range(40):
+            bits = policy.kv_bits(layer)  # 0 = uncompressed, >0 = turbo bits
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        mode: int = 0,
+        base_bits: int = 3,
+        protected_bits: int = 0,
+        n_protected: int = 8,
+    ):
+        if mode not in _LAYER_ADAPTIVE_MODES:
+            raise ValueError(f"Unknown layer-adaptive mode {mode}, expected one of {_LAYER_ADAPTIVE_MODES}")
+        self.num_layers = num_layers
+        self.mode = mode
+        self.base_bits = base_bits
+        self.protected_bits = protected_bits
+        self.n_protected = n_protected
+
+        # Pre-compute the set of protected layer indices
+        if mode == 0:
+            self._protected: frozenset[int] = frozenset()
+        elif mode == 2:
+            # Last n_protected layers
+            start = max(0, num_layers - n_protected)
+            self._protected = frozenset(range(start, num_layers))
+        elif mode == 7:
+            # Boundary V: first 2 + last 2 layers
+            first = set(range(min(2, num_layers)))
+            last = set(range(max(0, num_layers - 2), num_layers))
+            self._protected = frozenset(first | last)
+        else:
+            self._protected = frozenset()
+
+    def kv_bits(self, layer_idx: int) -> int:
+        """Return the KV cache bit-width for a given layer index.
+
+        Returns ``protected_bits`` for protected layers, ``base_bits`` otherwise.
+        A return value of 0 means no compression (full precision).
+        """
+        if layer_idx in self._protected:
+            return self.protected_bits
+        return self.base_bits
+
+    def is_protected(self, layer_idx: int) -> bool:
+        """Whether this layer is protected from aggressive compression."""
+        return layer_idx in self._protected
+
+    @property
+    def protected_layers(self) -> frozenset[int]:
+        return self._protected
+
+    def effective_compression(self, original_bits: int = 16) -> float:
+        """Average effective compression ratio across all layers."""
+        if self.num_layers == 0:
+            return 1.0
+        total_bits = 0.0
+        for i in range(self.num_layers):
+            b = self.kv_bits(i)
+            total_bits += b if b > 0 else original_bits
+        avg_bits = total_bits / self.num_layers
+        return original_bits / avg_bits if avg_bits > 0 else 1.0
+
+
+class LayerAdaptiveKVCacheCompressor:
+    """KV cache compressor with per-layer adaptive bit-width.
+
+    Wraps ``KVCacheCompressor`` and ``LayerAdaptivePolicy`` to apply
+    different compression to different layers.
+
+    Usage::
+
+        compressor = LayerAdaptiveKVCacheCompressor(
+            head_dim=128, num_layers=40, base_bits=3, mode=2,
+        )
+        compressed = compressor.compress(k_cache, v_cache)
+        k_hat, v_hat = compressor.decompress(compressed)
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        num_layers: int,
+        base_bits: int = 3,
+        mode: int | None = None,
+        protected_bits: int = 0,
+        n_protected: int = 8,
+        seed: int = 42,
+        device: torch.device | None = None,
+    ):
+        if mode is None:
+            mode = _layer_adaptive_mode()
+        self.head_dim = head_dim
+        self.policy = LayerAdaptivePolicy(
+            num_layers=num_layers, mode=mode,
+            base_bits=base_bits, protected_bits=protected_bits,
+            n_protected=n_protected,
+        )
+        # Build per-layer quantizers: compressed layers get turbo, protected layers get None
+        self._k_quantizers: list[TurboQuant | None] = []
+        self._v_quantizers: list[TurboQuantMSE | None] = []
+        for layer_idx in range(num_layers):
+            bits = self.policy.kv_bits(layer_idx)
+            if bits > 0:
+                self._k_quantizers.append(
+                    TurboQuant(head_dim, bit_width=bits, seed=seed, device=device)
+                )
+                self._v_quantizers.append(
+                    TurboQuantMSE(head_dim, bit_width=bits, seed=seed + 500, device=device)
+                )
+            else:
+                self._k_quantizers.append(None)
+                self._v_quantizers.append(None)
+
+    def compress(
+        self, k_cache: torch.Tensor, v_cache: torch.Tensor,
+    ) -> dict[str, Any]:
+        """Compress full KV cache with per-layer adaptive bit-widths.
+
+        Args:
+            k_cache: shape ``(num_layers, num_heads, seq_len, head_dim)``.
+            v_cache: same shape.
+
+        Returns:
+            Dict with ``k_compressed``, ``v_compressed``, ``raw_k``, ``raw_v``,
+            and metadata.
+        """
+        num_layers, num_heads, seq_len, head_dim = k_cache.shape
+
+        result: dict[str, Any] = {
+            "k_compressed": [None] * num_layers,
+            "v_indices": [None] * num_layers,
+            "v_norms": [None] * num_layers,
+            "raw_k": [None] * num_layers,
+            "raw_v": [None] * num_layers,
+            "num_layers": num_layers,
+            "num_heads": num_heads,
+            "seq_len": seq_len,
+            "head_dim": head_dim,
+            "policy": self.policy,
+        }
+
+        for layer in range(num_layers):
+            kq = self._k_quantizers[layer]
+            vq = self._v_quantizers[layer]
+            if kq is None:
+                # Protected layer: store raw
+                result["raw_k"][layer] = k_cache[layer]
+                result["raw_v"][layer] = v_cache[layer]
+            else:
+                k_layer_compressed = []
+                v_layer_indices = []
+                v_layer_norms = []
+                for head in range(num_heads):
+                    k_layer_compressed.append(kq.quantize(k_cache[layer, head]))
+                    vi, vn = vq.quantize(v_cache[layer, head])
+                    v_layer_indices.append(vi)
+                    v_layer_norms.append(vn)
+                result["k_compressed"][layer] = k_layer_compressed
+                result["v_indices"][layer] = v_layer_indices
+                result["v_norms"][layer] = v_layer_norms
+
+        return result
+
+    def decompress(self, compressed: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decompress back to full KV cache tensors."""
+        nl = compressed["num_layers"]
+        nh = compressed["num_heads"]
+        sl = compressed["seq_len"]
+        hd = compressed["head_dim"]
+        device = None
+
+        # Find a device from any available tensor
+        for layer in range(nl):
+            if compressed["raw_k"][layer] is not None:
+                device = compressed["raw_k"][layer].device
+                break
+        if device is None:
+            for layer in range(nl):
+                kq = self._k_quantizers[layer]
+                if kq is not None:
+                    device = kq.polar_quant.device
+                    break
+        if device is None:
+            device = torch.device("cpu")
+
+        k_cache = torch.zeros(nl, nh, sl, hd, device=device)
+        v_cache = torch.zeros(nl, nh, sl, hd, device=device)
+
+        for layer in range(nl):
+            if compressed["raw_k"][layer] is not None:
+                k_cache[layer] = compressed["raw_k"][layer]
+                v_cache[layer] = compressed["raw_v"][layer]
+            else:
+                kq = self._k_quantizers[layer]
+                vq = self._v_quantizers[layer]
+                for head in range(nh):
+                    k_cache[layer, head] = kq.dequantize(
+                        compressed["k_compressed"][layer][head]
+                    )
+                    v_cache[layer, head] = vq.dequantize(
+                        compressed["v_indices"][layer][head],
+                        compressed["v_norms"][layer][head],
+                    )
+
+        return k_cache, v_cache
+
+    def memory_stats(self, seq_len: int, num_heads: int) -> dict:
+        """Memory usage stats accounting for per-layer bit-widths."""
+        nl = self.policy.num_layers
+        original_bytes = nl * num_heads * seq_len * self.head_dim * 2  # fp16
+
+        compressed_bits = 0
+        for layer in range(nl):
+            bits = self.policy.kv_bits(layer)
+            if bits > 0:
+                # K: bits per coord + 32-bit norm, V: bits per coord
+                per_head = seq_len * (self.head_dim * bits + 32) + seq_len * self.head_dim * bits
+                compressed_bits += num_heads * per_head
+            else:
+                # Full precision: 16 bits per value for both K and V
+                compressed_bits += num_heads * seq_len * self.head_dim * 16 * 2
+
+        compressed_bytes = compressed_bits / 8
+        return {
+            "original_mb": original_bytes / 1024 / 1024,
+            "compressed_mb": compressed_bytes / 1024 / 1024,
+            "compression_ratio": original_bytes / max(compressed_bytes, 1),
+            "mode": self.policy.mode,
+            "n_protected": len(self.policy.protected_layers),
+            "effective_compression": self.policy.effective_compression(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Temporal Decay — progressive requantization of old KV cache tokens
+#
+# Old tokens get requantized from higher to lower bit-width, saving memory
+# while keeping recent tokens at full precision.  The approach:
+#   1. Track token age (decode steps since insertion)
+#   2. Every ``decay_interval`` steps, batch-requantize the oldest tokens
+#   3. Exempt attention sinks (positions 0..sink_len-1)
+#   4. Respect layer-adaptive policy (protected layers don't decay)
+# ---------------------------------------------------------------------------
+
+
+class TemporalDecayManager:
+    """Manages progressive requantization of old KV cache tokens.
+
+    Requantizes from ``source_bits`` to ``target_bits`` by dequantizing
+    and re-quantizing to the lower bit-width codebook.
+
+    Usage::
+
+        decay = TemporalDecayManager(
+            d=128, source_bits=3, target_bits=2,
+            decay_interval=64, batch_size=64,
+        )
+
+        # During generation, call every decode step:
+        decayed = decay.maybe_decay(indices, norms, step=current_step)
+    """
+
+    def __init__(
+        self,
+        d: int,
+        source_bits: int = 3,
+        target_bits: int = 2,
+        decay_interval: int = 64,
+        batch_size: int = 64,
+        sink_len: int = 4,
+        seed: int = 42,
+        device: torch.device | None = None,
+    ):
+        if target_bits >= source_bits:
+            raise ValueError(
+                f"target_bits ({target_bits}) must be < source_bits ({source_bits})"
+            )
+        self.d = d
+        self.source_bits = source_bits
+        self.target_bits = target_bits
+        self.decay_interval = decay_interval
+        self.batch_size = batch_size
+        self.sink_len = sink_len
+        self.device = device or torch.device("cpu")
+
+        # Source and target quantizers for requantization
+        self._source_pq = PolarQuant(d, bit_width=source_bits, seed=seed, device=self.device)
+        self._target_pq = PolarQuant(d, bit_width=target_bits, seed=seed, device=self.device)
+
+        # Track which positions have been decayed
+        self._decayed_positions: set[int] = set()
+        self._step_count: int = 0
+
+    def reset(self):
+        """Reset decay state for a new sequence."""
+        self._decayed_positions.clear()
+        self._step_count = 0
+
+    def _requantize(
+        self, indices: torch.Tensor, norms: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Requantize from source to target bit-width.
+
+        1. Dequantize from source (get float values)
+        2. Re-quantize with target (lower bit-width)
+
+        Args:
+            indices: ``(batch, d)`` source-bit centroid indices.
+            norms: ``(batch,)`` L2 norms.
+
+        Returns:
+            ``(new_indices, new_norms)`` at target bit-width.
+        """
+        # Step 1: reconstruct approximate vectors from source quantizer
+        x_hat = self._source_pq.dequantize(indices, norms)
+
+        # Step 2: re-quantize with target (lower) quantizer
+        new_indices, new_norms = self._target_pq.quantize(x_hat)
+        return new_indices, new_norms
+
+    def maybe_decay(
+        self,
+        indices: torch.Tensor,
+        norms: torch.Tensor,
+        total_seq_len: int,
+        recent_window: int = 128,
+    ) -> tuple[torch.Tensor, torch.Tensor, bool]:
+        """Conditionally decay old tokens.
+
+        Called every decode step.  Every ``decay_interval`` steps, identifies
+        old tokens (outside the recent window and not attention sinks) and
+        requantizes a batch of them.
+
+        Args:
+            indices: ``(seq_len, d)`` or ``(n_heads*seq_len, d)`` centroid indices.
+            norms: ``(seq_len,)`` or ``(n_heads*seq_len,)`` L2 norms.
+            total_seq_len: total sequence length (for sink/recent calculation).
+            recent_window: number of recent positions to keep at full precision.
+
+        Returns:
+            ``(new_indices, new_norms, did_decay)`` — possibly requantized.
+        """
+        self._step_count += 1
+
+        if self._step_count % self.decay_interval != 0:
+            return indices, norms, False
+
+        seq_len = indices.shape[0]
+        if seq_len <= self.sink_len + recent_window:
+            return indices, norms, False
+
+        # Identify candidates for decay: not sinks, not recent, not already decayed
+        decay_end = max(0, seq_len - recent_window)
+        candidates = []
+        for pos in range(self.sink_len, decay_end):
+            if pos not in self._decayed_positions:
+                candidates.append(pos)
+
+        if not candidates:
+            return indices, norms, False
+
+        # Batch limit
+        batch = candidates[:self.batch_size]
+        batch_idx = torch.tensor(batch, dtype=torch.long, device=indices.device)
+
+        # Requantize the batch
+        batch_indices = indices[batch_idx]
+        batch_norms = norms[batch_idx]
+        new_idx, new_norms = self._requantize(batch_indices, batch_norms)
+
+        # Update in-place
+        indices = indices.clone()
+        norms = norms.clone()
+        indices[batch_idx] = new_idx
+        norms[batch_idx] = new_norms
+
+        self._decayed_positions.update(batch)
+        return indices, norms, True
+
+    @property
+    def n_decayed(self) -> int:
+        """Number of positions that have been decayed so far."""
+        return len(self._decayed_positions)
+
+    def memory_savings_ratio(self, total_positions: int) -> float:
+        """Estimate memory savings from decayed positions.
+
+        Returns the ratio of compressed size to original (< 1.0 means savings).
+        """
+        if total_positions == 0:
+            return 1.0
+        n_full = total_positions - len(self._decayed_positions)
+        n_decayed = len(self._decayed_positions)
+        full_bits = n_full * self.d * self.source_bits
+        decayed_bits = n_decayed * self.d * self.target_bits
+        original_bits = total_positions * self.d * self.source_bits
+        return (full_bits + decayed_bits) / max(original_bits, 1)
+
+
+class OutlierTurboQuant:
+    """TurboQuant with outlier channel strategy for non-integer bit rates.
+
+    Splits channels into outlier (higher bit-width) and normal (lower bit-width)
+    to achieve fractional average bit rates like 2.5 or 3.5 bits per channel.
+
+    Usage::
+
+        oq = OutlierTurboQuant(d=128, target_bits=2.5, seed=42, device=device)
+        compressed = oq.quantize(x)
+        x_hat = oq.dequantize(compressed)
+    """
+
+    def __init__(self, d: int, target_bits: float, seed: int = 42,
+                 device: torch.device | None = None):
+        self.d = d
+        self.target_bits = target_bits
+
+        low_bits = int(math.floor(target_bits))
+        high_bits = low_bits + 1
+        frac = target_bits - low_bits
+
+        self.n_outlier = int(round(d * frac))
+        self.n_normal = d - self.n_outlier
+        self.high_bits = high_bits
+        self.low_bits = low_bits
+        self.effective_bits = (self.n_outlier * high_bits + self.n_normal * low_bits) / d
+
+        self.outlier_idx = torch.arange(self.n_outlier, device=device or torch.device("cpu"))
+        self.normal_idx = torch.arange(self.n_outlier, d, device=device or torch.device("cpu"))
+
+        self.pq_outlier = (
+            PolarQuant(self.n_outlier, bit_width=high_bits - 1, seed=seed, device=device)
+            if self.n_outlier > 0 else None
+        )
+        self.pq_normal = (
+            PolarQuant(self.n_normal, bit_width=low_bits - 1, seed=seed + 500, device=device)
+            if self.n_normal > 0 else None
+        )
+        self.qjl = QJLQuantizer(d, seed=seed + 1000, device=device)
+
+    def quantize(self, x: torch.Tensor) -> CompressedVector:
+        """Quantise with outlier channel split."""
+        single = x.dim() == 1
+        if single:
+            x = x.unsqueeze(0)
+
+        x_outlier = x[:, self.outlier_idx]
+        x_normal = x[:, self.normal_idx]
+
+        if self.pq_outlier is not None:
+            _, _, out_residual = self.pq_outlier.quantize_and_residual(x_outlier)
+        else:
+            out_residual = torch.zeros_like(x_outlier)
+
+        if self.pq_normal is not None:
+            _, _, norm_residual = self.pq_normal.quantize_and_residual(x_normal)
+        else:
+            norm_residual = torch.zeros_like(x_normal)
+
+        full_residual = torch.zeros_like(x)
+        full_residual[:, self.outlier_idx] = out_residual.float()
+        full_residual[:, self.normal_idx] = norm_residual.float()
+
+        qjl_signs, residual_norms = self.qjl.quantize(full_residual)
+
+        out_idx, out_norms = (
+            self.pq_outlier.quantize(x_outlier) if self.pq_outlier is not None
+            else (torch.tensor([]), torch.tensor([]))
+        )
+        norm_idx, norm_norms = (
+            self.pq_normal.quantize(x_normal) if self.pq_normal is not None
+            else (torch.tensor([]), torch.tensor([]))
+        )
+
+        # Store combined indices/norms (outlier first, then normal)
+        mse_indices = torch.cat([out_idx.flatten(), norm_idx.flatten()])
+        vector_norms = torch.cat([out_norms.flatten(), norm_norms.flatten()])
+
+        result = CompressedVector(
+            mse_indices=mse_indices,
+            vector_norms=vector_norms,
+            qjl_signs=qjl_signs.squeeze(0) if single else qjl_signs,
+            residual_norms=residual_norms.squeeze(0) if single else residual_norms,
+            bit_width=int(round(self.effective_bits)),
+        )
+        return result
+
+    def compression_ratio(self, original_bits: int = 16) -> float:
+        """Compression ratio vs original precision."""
+        per_vector_bits = self.d * self.effective_bits + 96  # +32 QJL norm + 64 for outlier/normal norms
+        original = self.d * original_bits
+        return original / per_vector_bits

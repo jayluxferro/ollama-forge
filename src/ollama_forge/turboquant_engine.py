@@ -26,12 +26,14 @@ except ImportError:
     _TRANSFORMERS_CACHE_AVAILABLE = False
 
 from ollama_forge.turboquant import (
+    CompressedVector,
+    LayerAdaptivePolicy,
     QuantizedTensor,
-    _get_codebook,
-    _scalar_dequantize,
-    _scalar_quantize,
+    TemporalDecayManager,
+    TurboQuant as TurboQuantQuantizer,
+    TurboQuantMSE,
+    _layer_adaptive_mode,
     dequantize_tensor,
-    generate_rotation_matrix,
 )
 from ollama_forge.turboquant_pipeline import TurboQuantModel, load_tqf
 
@@ -43,6 +45,8 @@ class TurboQuantHFModel:
     hf_model: Any
     device: torch.device
     kv_bits: int
+    tokenizer: Any | None = None
+    processor: Any | None = None
 
 # ---------------------------------------------------------------------------
 # Config parsing from HF config.json
@@ -197,9 +201,14 @@ class RoPECache:
 class KVCache:
     """Key-value cache with optional TurboQuant compression.
 
-    When kv_bits > 0, K and V vectors are quantized online as they're
-    appended, reducing memory for long contexts.  All operations are
-    batched and stay on-device (no CPU round-trips).
+    When ``kv_bits > 0``, uses the class-based quantisers:
+    - K: ``TurboQuant`` (PolarQuant + QJL) for inner-product preservation
+    - V: ``TurboQuantMSE`` (PolarQuant only) for MSE preservation
+
+    Supports temporal decay: old V-cache tokens can be progressively
+    requantized to fewer bits via ``enable_temporal_decay()``.
+
+    All operations are batched and stay on-device.
     """
 
     def __init__(self, max_len: int, n_heads: int, head_dim: int,
@@ -212,24 +221,36 @@ class KVCache:
         self.dtype = dtype
         self.kv_bits = kv_bits
         self.len = 0
+        self._v_decay: TemporalDecayManager | None = None
 
         if kv_bits > 0:
-            # Quantized storage: batched indices + norms, all on-device
-            self._k_indices: list[torch.Tensor] = []   # each: (nh*sl, hd)
+            self._k_compressed: list[CompressedVector] = []
             self._v_indices: list[torch.Tensor] = []
-            self._k_norms: list[torch.Tensor] = []     # each: (nh*sl,)
             self._v_norms: list[torch.Tensor] = []
-            self._token_counts: list[int] = []          # track shapes
-            self._rotation_seed = 42
-            self._codebook = _get_codebook(kv_bits, head_dim, device)
-            # Pre-generate rotation matrix once
-            self._rotation = generate_rotation_matrix(
-                head_dim, device=device, seed=self._rotation_seed
-            )
+            self._token_counts: list[int] = []
+            self._k_quantizer = TurboQuantQuantizer(head_dim, bit_width=kv_bits, seed=42, device=device)
+            self._v_quantizer = TurboQuantMSE(head_dim, bit_width=kv_bits, seed=542, device=device)
         else:
-            # Full precision cache
             self.k = torch.zeros(1, n_heads, max_len, head_dim, device=device, dtype=dtype)
             self.v = torch.zeros(1, n_heads, max_len, head_dim, device=device, dtype=dtype)
+
+    def enable_temporal_decay(
+        self, target_bits: int = 2, decay_interval: int = 64,
+        batch_size: int = 64, sink_len: int = 4,
+    ):
+        """Enable temporal decay for V-cache in this layer's cache.
+
+        Old V-cache tokens will be progressively requantized from
+        ``kv_bits`` to ``target_bits``.
+        """
+        if self.kv_bits <= 0 or target_bits >= self.kv_bits:
+            return
+        self._v_decay = TemporalDecayManager(
+            d=self.head_dim, source_bits=self.kv_bits,
+            target_bits=target_bits, decay_interval=decay_interval,
+            batch_size=batch_size, sink_len=sink_len,
+            device=self.device,
+        )
 
     def append(self, k_new: torch.Tensor, v_new: torch.Tensor):
         """Append new K, V tensors of shape (1, n_heads, seq_len, head_dim)."""
@@ -251,54 +272,58 @@ class KVCache:
         return self.k[:, :, :self.len, :], self.v[:, :, :self.len, :]
 
     def _append_quantized(self, k_new: torch.Tensor, v_new: torch.Tensor):
-        """Quantize and store K, V using batched TurboQuant (all on-device)."""
-        # k_new: (1, n_heads, seq_len, head_dim)
+        """Quantize K (TurboQuant) and V (TurboQuantMSE) via class API."""
         _, nh, sl, hd = k_new.shape
-
-        # Reshape to (nh*sl, hd) for batched processing
         k_flat = k_new.squeeze(0).transpose(0, 1).reshape(nh * sl, hd).float()
         v_flat = v_new.squeeze(0).transpose(0, 1).reshape(nh * sl, hd).float()
 
-        # Batched norm + normalize + rotate + quantize
-        k_norms = k_flat.norm(dim=1)
-        v_norms = v_flat.norm(dim=1)
-        k_normed = k_flat / (k_norms.unsqueeze(1) + 1e-10)
-        v_normed = v_flat / (v_norms.unsqueeze(1) + 1e-10)
-
-        k_rot = k_normed @ self._rotation.T
-        v_rot = v_normed @ self._rotation.T
-
-        k_idx = _scalar_quantize(k_rot, self._codebook)
-        v_idx = _scalar_quantize(v_rot, self._codebook)
-
-        # Store on-device (no .cpu())
-        self._k_indices.append(k_idx)
+        self._k_compressed.append(self._k_quantizer.quantize(k_flat))
+        v_idx, v_norms = self._v_quantizer.quantize(v_flat)
         self._v_indices.append(v_idx)
-        self._k_norms.append(k_norms)
         self._v_norms.append(v_norms)
         self._token_counts.append(sl)
 
     def _get_quantized_kv(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Batched dequantize all cached K, V."""
-        if not self._k_indices:
+        """Batched dequantize all cached K and V."""
+        if not self._k_compressed:
             hd = self.head_dim
             empty = torch.zeros(1, self.n_heads, 0, hd, device=self.device, dtype=self.dtype)
             return empty, empty
 
-        # Concatenate all cached segments
-        k_idx_all = torch.cat(self._k_indices, dim=0)   # (total_nh_tokens, hd)
+        # Merge compressed K segments
+        k_cv = self._k_compressed[0]
+        if len(self._k_compressed) > 1:
+            k_cv = CompressedVector(
+                mse_indices=torch.cat([c.mse_indices for c in self._k_compressed], dim=0),
+                vector_norms=torch.cat([c.vector_norms for c in self._k_compressed], dim=0),
+                qjl_signs=torch.cat([c.qjl_signs for c in self._k_compressed], dim=0),
+                residual_norms=torch.cat([c.residual_norms for c in self._k_compressed], dim=0),
+                bit_width=self._k_compressed[0].bit_width,
+            )
+        k_deq = self._k_quantizer.dequantize(k_cv).to(self.dtype)
+
+        # Merge V indices/norms
         v_idx_all = torch.cat(self._v_indices, dim=0)
-        k_norms_all = torch.cat(self._k_norms, dim=0)   # (total_nh_tokens,)
         v_norms_all = torch.cat(self._v_norms, dim=0)
 
-        # Batched dequantize: codebook lookup + inverse rotation + scale
-        k_deq = _scalar_dequantize(k_idx_all, self._codebook) @ self._rotation
-        v_deq = _scalar_dequantize(v_idx_all, self._codebook) @ self._rotation
+        # Apply temporal decay on V cache if enabled
+        if self._v_decay is not None:
+            total_tokens = sum(self._token_counts)
+            v_idx_all, v_norms_all, did_decay = self._v_decay.maybe_decay(
+                v_idx_all, v_norms_all, total_seq_len=total_tokens,
+            )
+            if did_decay:
+                # Update stored indices/norms with decayed versions
+                offset = 0
+                for i, count in enumerate(self._token_counts):
+                    chunk_size = count * self.n_heads
+                    self._v_indices[i] = v_idx_all[offset:offset + chunk_size]
+                    self._v_norms[i] = v_norms_all[offset:offset + chunk_size]
+                    offset += chunk_size
 
-        k_deq = (k_deq * k_norms_all.unsqueeze(1)).to(self.dtype)
-        v_deq = (v_deq * v_norms_all.unsqueeze(1)).to(self.dtype)
+        v_deq = self._v_quantizer.dequantize(v_idx_all, v_norms_all).to(self.dtype)
 
-        # Reshape back: (total_tokens * n_heads, hd) → (1, n_heads, total_tokens, hd)
+        # Reshape: (total_nh_tokens, hd) → (1, n_heads, total_tokens, hd)
         total_tokens = sum(self._token_counts)
         nh = self.n_heads
         k = k_deq.view(total_tokens, nh, self.head_dim).transpose(0, 1).unsqueeze(0)
@@ -307,39 +332,54 @@ class KVCache:
 
 
 class TurboQuantLayer(DynamicLayer):
-    """Transformers DynamicCache layer backed by TurboQuant vector quantization."""
+    """Transformers DynamicCache layer backed by TurboQuant vector quantization.
 
-    def __init__(self, bits: int = 4, residual_len: int = 128):
+    Uses the class-based quantisers for asymmetric K/V:
+    - K: ``TurboQuant`` (PolarQuant + QJL) for inner-product preservation
+    - V: ``TurboQuantMSE`` (PolarQuant only) for value reconstruction
+
+    Supports temporal decay: when ``decay_target_bits`` is set, old V-cache
+    tokens are progressively requantized to fewer bits.
+    """
+
+    def __init__(self, bits: int = 4, residual_len: int = 128,
+                 decay_target_bits: int = 0, decay_interval: int = 64):
         if not _TRANSFORMERS_CACHE_AVAILABLE:
             raise ImportError("transformers cache_utils is required for TurboQuant KV cache support")
         super().__init__()
         self.bits = bits
         self.residual_len = residual_len
-        self._key_indices: torch.Tensor | None = None
-        self._key_norms: torch.Tensor | None = None
-        self._value_indices: torch.Tensor | None = None
-        self._value_norms: torch.Tensor | None = None
+        self._decay_target_bits = decay_target_bits
+        self._decay_interval = decay_interval
+        self._k_compressed: list[CompressedVector] = []
+        self._k_shapes: list[tuple[int, ...]] = []  # original shapes before flattening
+        self._v_indices_list: list[torch.Tensor] = []
+        self._v_norms_list: list[torch.Tensor] = []
         self._residual_keys: torch.Tensor | None = None
         self._residual_values: torch.Tensor | None = None
         self._total_len = 0
         self._head_dim: int | None = None
-        self._rotation: torch.Tensor | None = None
-        self._codebook: torch.Tensor | None = None
+        self._k_quantizer: TurboQuantQuantizer | None = None
+        self._v_quantizer: TurboQuantMSE | None = None
+        self._v_decay: TemporalDecayManager | None = None
 
     def lazy_initialization(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
         self.dtype = key_states.dtype
         self.device = key_states.device
         self._head_dim = key_states.shape[-1]
-        self._rotation = generate_rotation_matrix(self._head_dim, device=self.device, seed=42)
-        self._codebook = _get_codebook(self.bits, self._head_dim, self.device)
-        self._key_indices = torch.empty(0, dtype=torch.uint8, device=self.device)
-        self._key_norms = torch.empty(0, dtype=torch.float32, device=self.device)
-        self._value_indices = torch.empty(0, dtype=torch.uint8, device=self.device)
-        self._value_norms = torch.empty(0, dtype=torch.float32, device=self.device)
+        self._k_quantizer = TurboQuantQuantizer(self._head_dim, bit_width=self.bits, seed=42, device=self.device)
+        self._v_quantizer = TurboQuantMSE(self._head_dim, bit_width=self.bits, seed=542, device=self.device)
         self._residual_keys = torch.empty(0, dtype=self.dtype, device=self.device)
         self._residual_values = torch.empty(0, dtype=self.dtype, device=self.device)
         self.keys = torch.empty(0, dtype=self.dtype, device=self.device)
         self.values = torch.empty(0, dtype=self.dtype, device=self.device)
+        if self._decay_target_bits > 0 and self._decay_target_bits < self.bits:
+            self._v_decay = TemporalDecayManager(
+                d=self._head_dim, source_bits=self.bits,
+                target_bits=self._decay_target_bits,
+                decay_interval=self._decay_interval,
+                device=self.device,
+            )
         self.is_initialized = True
 
     def update(
@@ -354,10 +394,6 @@ class TurboQuantLayer(DynamicLayer):
         assert self._residual_keys is not None
         assert self._residual_values is not None
         assert self._head_dim is not None
-        assert self._key_indices is not None
-        assert self._key_norms is not None
-        assert self._value_indices is not None
-        assert self._value_norms is not None
 
         self._residual_keys = torch.cat([self._residual_keys, key_states], dim=-2)
         self._residual_values = torch.cat([self._residual_values, value_states], dim=-2)
@@ -368,27 +404,60 @@ class TurboQuantLayer(DynamicLayer):
             to_quantize_k = self._residual_keys[..., :overflow, :]
             to_quantize_v = self._residual_values[..., :overflow, :]
 
-            k_flat = to_quantize_k.reshape(-1, self._head_dim)
-            v_flat = to_quantize_v.reshape(-1, self._head_dim)
-            k_idx, k_norms = self._quantize_vectors(k_flat)
-            v_idx, v_norms = self._quantize_vectors(v_flat)
+            orig_shape = to_quantize_k.shape  # e.g. (1, heads, overflow, dim)
+            k_flat = to_quantize_k.reshape(-1, self._head_dim).float()
+            v_flat = to_quantize_v.reshape(-1, self._head_dim).float()
 
-            k_idx = k_idx.reshape(to_quantize_k.shape)
-            v_idx = v_idx.reshape(to_quantize_v.shape)
-            k_norms = k_norms.reshape(to_quantize_k.shape[:-1] + (1,))
-            v_norms = v_norms.reshape(to_quantize_v.shape[:-1] + (1,))
-
-            self._key_indices = torch.cat([self._key_indices, k_idx], dim=-2) if self._key_indices.numel() else k_idx
-            self._key_norms = torch.cat([self._key_norms, k_norms], dim=-2) if self._key_norms.numel() else k_norms
-            self._value_indices = torch.cat([self._value_indices, v_idx], dim=-2) if self._value_indices.numel() else v_idx
-            self._value_norms = torch.cat([self._value_norms, v_norms], dim=-2) if self._value_norms.numel() else v_norms
+            self._k_compressed.append(self._k_quantizer.quantize(k_flat))
+            self._k_shapes.append(orig_shape)
+            v_idx, v_norms = self._v_quantizer.quantize(v_flat)
+            self._v_indices_list.append(v_idx)
+            self._v_norms_list.append(v_norms)
 
             self._residual_keys = self._residual_keys[..., overflow:, :]
             self._residual_values = self._residual_values[..., overflow:, :]
 
-        if self._key_indices.numel():
-            k_deq = self._dequantize_vectors(self._key_indices, self._key_norms)
-            v_deq = self._dequantize_vectors(self._value_indices, self._value_norms)
+        if self._k_compressed:
+            # Merge and dequantize K
+            if len(self._k_compressed) == 1:
+                k_cv = self._k_compressed[0]
+            else:
+                k_cv = CompressedVector(
+                    mse_indices=torch.cat([c.mse_indices for c in self._k_compressed], dim=0),
+                    vector_norms=torch.cat([c.vector_norms for c in self._k_compressed], dim=0),
+                    qjl_signs=torch.cat([c.qjl_signs for c in self._k_compressed], dim=0),
+                    residual_norms=torch.cat([c.residual_norms for c in self._k_compressed], dim=0),
+                    bit_width=self._k_compressed[0].bit_width,
+                )
+            k_deq = self._k_quantizer.dequantize(k_cv)
+
+            # Reconstruct the multi-dim shape: sum overflow across all segments
+            # k_deq is (total_flat_vectors, head_dim), reshape to (..., total_seq, head_dim)
+            ref_shape = self._k_shapes[0]  # e.g. (1, heads, overflow_i, dim)
+            total_seq = sum(s[-2] for s in self._k_shapes)
+            target_shape = list(ref_shape)
+            target_shape[-2] = total_seq
+            k_deq = k_deq.reshape(target_shape)
+
+            v_idx_all = torch.cat(self._v_indices_list, dim=0)
+            v_norms_all = torch.cat(self._v_norms_list, dim=0)
+
+            # Apply temporal decay on V if enabled
+            if self._v_decay is not None:
+                v_idx_all, v_norms_all, did_decay = self._v_decay.maybe_decay(
+                    v_idx_all, v_norms_all, total_seq_len=total_seq,
+                )
+                if did_decay:
+                    offset = 0
+                    for i in range(len(self._v_indices_list)):
+                        chunk = self._v_indices_list[i].shape[0]
+                        self._v_indices_list[i] = v_idx_all[offset:offset + chunk]
+                        self._v_norms_list[i] = v_norms_all[offset:offset + chunk]
+                        offset += chunk
+
+            v_deq = self._v_quantizer.dequantize(v_idx_all, v_norms_all)
+            v_deq = v_deq.reshape(target_shape)
+
             self.keys = torch.cat([k_deq.to(self.dtype), self._residual_keys], dim=-2)
             self.values = torch.cat([v_deq.to(self.dtype), self._residual_values], dim=-2)
         else:
@@ -397,31 +466,46 @@ class TurboQuantLayer(DynamicLayer):
 
         return self.keys, self.values
 
-    def _quantize_vectors(self, vectors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        norms = torch.norm(vectors.float(), dim=-1, keepdim=True)
-        vectors_unit = vectors.float() / (norms + 1e-10)
-        rotated = vectors_unit @ self._rotation.T
-        indices = _scalar_quantize(rotated, self._codebook).to(torch.uint8)
-        return indices, norms
-
-    def _dequantize_vectors(self, indices: torch.Tensor, norms: torch.Tensor) -> torch.Tensor:
-        dequant = _scalar_dequantize(indices.long(), self._codebook)
-        return (dequant @ self._rotation) * norms
-
     def get_seq_length(self) -> int:
         return self._total_len
 
 
 class TurboQuantCache(DynamicCache):
-    """Drop-in Hugging Face cache that compresses older KV states."""
+    """Drop-in Hugging Face cache that compresses older KV states.
 
-    def __init__(self, bits: int = 4, residual_len: int = 128, **kwargs):
+    Supports layer-adaptive compression: different layers can use different
+    bit-widths based on a ``LayerAdaptivePolicy``.  Protected layers
+    (typically the last N) use higher precision.
+
+    Supports temporal decay: old V-cache tokens in non-protected layers
+    are progressively requantized to fewer bits.
+    """
+
+    def __init__(self, bits: int = 4, residual_len: int = 128,
+                 layer_policy: LayerAdaptivePolicy | None = None,
+                 decay_target_bits: int = 0, decay_interval: int = 64,
+                 **kwargs):
         if not _TRANSFORMERS_CACHE_AVAILABLE:
             raise ImportError("transformers cache_utils is required for TurboQuant KV cache support")
         super().__init__(**kwargs)
         self.bits = bits
         self.residual_len = residual_len
+        self._layer_policy = layer_policy
+        self._decay_target_bits = decay_target_bits
+        self._decay_interval = decay_interval
         self.layer_class_to_replicate = None
+
+    def _layer_bits(self, layer_idx: int) -> int:
+        """Return the KV bit-width for a given layer."""
+        if self._layer_policy is not None:
+            return self._layer_policy.kv_bits(layer_idx)
+        return self.bits
+
+    def _layer_decay_bits(self, layer_idx: int) -> int:
+        """Return decay target bits (0 = no decay) for a given layer."""
+        if self._layer_policy is not None and self._layer_policy.is_protected(layer_idx):
+            return 0  # protected layers don't decay
+        return self._decay_target_bits
 
     def update(
         self,
@@ -431,7 +515,14 @@ class TurboQuantCache(DynamicCache):
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         while len(self.layers) <= layer_idx:
-            self.layers.append(TurboQuantLayer(bits=self.bits, residual_len=self.residual_len))
+            idx = len(self.layers)
+            layer_bits = self._layer_bits(idx)
+            decay_bits = self._layer_decay_bits(idx)
+            self.layers.append(TurboQuantLayer(
+                bits=layer_bits, residual_len=self.residual_len,
+                decay_target_bits=decay_bits,
+                decay_interval=self._decay_interval,
+            ))
         return self.layers[layer_idx].update(key_states, value_states, cache_kwargs)
 
 
@@ -441,11 +532,16 @@ class Qwen35TurboQuantCache:
     Qwen3.5 mixes full-attention layers with linear-attention layers that keep
     convolution/recurrent state. This cache preserves that interface while
     applying TurboQuant only to the full-attention KV tensors.
+
+    Supports layer-adaptive compression and temporal decay on the
+    full-attention layers.
     """
 
     is_compileable = False
 
-    def __init__(self, config: Any, bits: int = 4, residual_len: int = 128):
+    def __init__(self, config: Any, bits: int = 4, residual_len: int = 128,
+                 layer_policy: LayerAdaptivePolicy | None = None,
+                 decay_target_bits: int = 0, decay_interval: int = 64):
         self.layer_types = list(config.layer_types)
         self.transformer_layers = [
             i for i, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
@@ -455,6 +551,9 @@ class Qwen35TurboQuantCache:
 
         self.bits = bits
         self.residual_len = residual_len
+        self._layer_policy = layer_policy
+        self._decay_target_bits = decay_target_bits
+        self._decay_interval = decay_interval
         self.conv_states = [None for _ in range(config.num_hidden_layers)]
         self.recurrent_states = [None for _ in range(config.num_hidden_layers)]
         self.key_cache = [None for _ in range(config.num_hidden_layers)]
@@ -464,6 +563,16 @@ class Qwen35TurboQuantCache:
     def __len__(self):
         return len(self.layer_types)
 
+    def _layer_bits(self, layer_idx: int) -> int:
+        if self._layer_policy is not None:
+            return self._layer_policy.kv_bits(layer_idx)
+        return self.bits
+
+    def _layer_decay_bits(self, layer_idx: int) -> int:
+        if self._layer_policy is not None and self._layer_policy.is_protected(layer_idx):
+            return 0
+        return self._decay_target_bits
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -472,7 +581,13 @@ class Qwen35TurboQuantCache:
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if layer_idx not in self._kv_layers:
-            self._kv_layers[layer_idx] = TurboQuantLayer(bits=self.bits, residual_len=self.residual_len)
+            layer_bits = self._layer_bits(layer_idx)
+            decay_bits = self._layer_decay_bits(layer_idx)
+            self._kv_layers[layer_idx] = TurboQuantLayer(
+                bits=layer_bits, residual_len=self.residual_len,
+                decay_target_bits=decay_bits,
+                decay_interval=self._decay_interval,
+            )
         keys, values = self._kv_layers[layer_idx].update(key_states, value_states, cache_kwargs)
         self.key_cache[layer_idx] = keys
         self.value_cache[layer_idx] = values
@@ -528,7 +643,9 @@ class TurboQuantTransformer:
     """
 
     def __init__(self, tq_model: TurboQuantModel, device: torch.device,
-                 dtype: torch.dtype = torch.float16, kv_bits: int | None = None):
+                 dtype: torch.dtype = torch.float16, kv_bits: int | None = None,
+                 layer_adaptive_mode: int | None = None,
+                 decay_target_bits: int = 0, decay_interval: int = 64):
         self.device = device
         self.dtype = dtype
         self.cfg = _parse_model_config(tq_model.config)
@@ -555,17 +672,44 @@ class TurboQuantTransformer:
             device=device,
         )
 
-        # KV caches — default to unquantized (kv_bits=0) for best quality
+        # Layer-adaptive policy
         effective_kv_bits = kv_bits if kv_bits is not None else 0
+        if layer_adaptive_mode is None:
+            layer_adaptive_mode = _layer_adaptive_mode()
+        self._layer_policy: LayerAdaptivePolicy | None = None
+        if layer_adaptive_mode > 0 and effective_kv_bits > 0:
+            self._layer_policy = LayerAdaptivePolicy(
+                num_layers=self.cfg.num_hidden_layers,
+                mode=layer_adaptive_mode,
+                base_bits=effective_kv_bits,
+                protected_bits=0,
+            )
+
+        # KV caches — per-layer bit-width from policy
         self.kv_caches: list[KVCache] = []
-        for _ in range(self.cfg.num_hidden_layers):
-            self.kv_caches.append(KVCache(
+        for layer_idx in range(self.cfg.num_hidden_layers):
+            if self._layer_policy is not None:
+                layer_bits = self._layer_policy.kv_bits(layer_idx)
+            else:
+                layer_bits = effective_kv_bits
+
+            cache = KVCache(
                 max_len=self.cfg.max_position_embeddings,
                 n_heads=self.cfg.num_key_value_heads,
                 head_dim=self.cfg.head_dim,
                 device=device, dtype=dtype,
-                kv_bits=effective_kv_bits,
-            ))
+                kv_bits=layer_bits,
+            )
+            # Enable temporal decay for compressed, non-protected layers
+            if (decay_target_bits > 0 and layer_bits > 0
+                    and decay_target_bits < layer_bits
+                    and (self._layer_policy is None
+                         or not self._layer_policy.is_protected(layer_idx))):
+                cache.enable_temporal_decay(
+                    target_bits=decay_target_bits,
+                    decay_interval=decay_interval,
+                )
+            self.kv_caches.append(cache)
 
         # torch.compile acceleration (CUDA only — MPS support is limited)
         self._compiled = False
@@ -781,11 +925,12 @@ class TurboQuantTransformer:
         for cache in self.kv_caches:
             cache.len = 0
             if cache.kv_bits > 0:
-                cache._k_indices.clear()
+                cache._k_compressed.clear()
                 cache._v_indices.clear()
-                cache._k_norms.clear()
                 cache._v_norms.clear()
                 cache._token_counts.clear()
+            if cache._v_decay is not None:
+                cache._v_decay.reset()
 
     def clear_weight_caches(self):
         """Free dequantized weight caches to save memory."""
@@ -805,6 +950,7 @@ class GenerationConfig:
     top_k: int = 50
     repetition_penalty: float = 1.1
     stop_tokens: list[int] | None = None
+    stop_token_sequences: list[list[int]] | None = None
 
 
 def _sample_token(logits: torch.Tensor, config: GenerationConfig,
@@ -845,9 +991,47 @@ def _sample_token(logits: torch.Tensor, config: GenerationConfig,
     return torch.multinomial(probs, 1).item()
 
 
+def _matching_stop_sequence(pending: list[int], stop_sequences: list[list[int]]) -> list[int] | None:
+    """Return the matched stop sequence if the pending suffix hits one."""
+    for seq in stop_sequences:
+        if seq and len(pending) >= len(seq) and pending[-len(seq):] == seq:
+            return seq
+    return None
+
+
+def _stream_generated_tokens(
+    next_token_fn: Any,
+    config: GenerationConfig,
+    stop_tokens: set[int],
+) -> Generator[int, None, None]:
+    """Yield generated tokens while respecting single-token and multi-token stop conditions."""
+    stop_sequences = [seq for seq in (config.stop_token_sequences or []) if seq]
+    max_stop_len = max((len(seq) for seq in stop_sequences), default=1)
+    pending: list[int] = []
+
+    for _ in range(config.max_new_tokens):
+        token = int(next_token_fn())
+        if token in stop_tokens:
+            break
+
+        pending.append(token)
+        matched = _matching_stop_sequence(pending, stop_sequences)
+        if matched is not None:
+            del pending[-len(matched):]
+            break
+
+        safe_count = len(pending) - max(0, max_stop_len - 1)
+        while safe_count > 0:
+            yield pending.pop(0)
+            safe_count -= 1
+
+    while pending:
+        yield pending.pop(0)
+
+
 def generate(
     model: TurboQuantTransformer | TurboQuantHFModel,
-    token_ids: list[int],
+    token_ids: list[int] | dict[str, Any],
     config: GenerationConfig | None = None,
     tokenizer: Any = None,
 ) -> Generator[int, None, None]:
@@ -884,17 +1068,18 @@ def generate(
         if eos is not None:
             stop_tokens.add(eos)
 
-    for _ in range(config.max_new_tokens):
+    def _next_token() -> int:
+        nonlocal next_logits
         token = _sample_token(next_logits, config, generated)
         if token in stop_tokens:
-            break
+            return token
         generated.append(token)
-        yield token
-
-        # Decode step: single token
         input_ids = torch.tensor([[token]], dtype=torch.long, device=device)
         logits = model.forward(input_ids, start_pos=len(generated) - 1)
         next_logits = logits[0, -1, :]
+        return token
+
+    yield from _stream_generated_tokens(_next_token, config, stop_tokens)
 
 
 def _normalize_token_ids(token_ids: Any) -> list[int]:
@@ -918,6 +1103,22 @@ def _model_input_device(model: Any) -> torch.device:
         return torch.device("cpu")
 
 
+def _unwrap_tokenizer(tokenizer_or_processor: Any) -> Any:
+    """Return the text tokenizer from either a tokenizer or a processor."""
+    return getattr(tokenizer_or_processor, "tokenizer", tokenizer_or_processor)
+
+
+def _move_inputs_to_device(model_inputs: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    """Move tensor-valued model inputs onto the target device."""
+    moved: dict[str, Any] = {}
+    for key, value in model_inputs.items():
+        if hasattr(value, "to"):
+            moved[key] = value.to(device)
+        else:
+            moved[key] = value
+    return moved
+
+
 def _is_accelerate_available() -> bool:
     """Whether accelerate is importable for device_map-based loading."""
     try:
@@ -930,7 +1131,7 @@ def _is_accelerate_available() -> bool:
 
 def _generate_hf(
     model: TurboQuantHFModel,
-    token_ids: list[int],
+    token_ids: list[int] | dict[str, Any],
     config: GenerationConfig,
     tokenizer: Any = None,
 ) -> Generator[int, None, None]:
@@ -938,19 +1139,46 @@ def _generate_hf(
     hf_model = model.hf_model
     hf_model.eval()
 
-    prompt_ids = _normalize_token_ids(token_ids)
+    tokenizer = _unwrap_tokenizer(tokenizer or model.tokenizer or model.processor)
     input_device = _model_input_device(hf_model)
+    initial_inputs: dict[str, Any]
+    if isinstance(token_ids, dict):
+        initial_inputs = _move_inputs_to_device(token_ids, input_device)
+        prompt_ids = _normalize_token_ids(initial_inputs["input_ids"])
+    else:
+        prompt_ids = _normalize_token_ids(token_ids)
+        initial_inputs = {"input_ids": torch.tensor([prompt_ids], dtype=torch.long, device=input_device)}
+
     cache = None
     if model.kv_bits > 0:
         hf_config = getattr(hf_model, "config", None)
         layer_types = getattr(hf_config, "layer_types", None)
         if layer_types is None:
             layer_types = getattr(getattr(hf_config, "text_config", None), "layer_types", None)
+
+        # Build layer-adaptive policy from env var
+        la_mode = _layer_adaptive_mode()
+        num_layers = getattr(hf_config, "num_hidden_layers", 32)
+        if hasattr(hf_config, "text_config"):
+            num_layers = getattr(hf_config.text_config, "num_hidden_layers", num_layers)
+        layer_policy = None
+        if la_mode > 0:
+            layer_policy = LayerAdaptivePolicy(
+                num_layers=num_layers, mode=la_mode,
+                base_bits=model.kv_bits, protected_bits=0,
+            )
+
         if layer_types and "linear_attention" in layer_types:
             hybrid_config = getattr(hf_config, "text_config", None) or hf_config
-            cache = Qwen35TurboQuantCache(hybrid_config, bits=model.kv_bits)
+            cache = Qwen35TurboQuantCache(
+                hybrid_config, bits=model.kv_bits,
+                layer_policy=layer_policy,
+            )
         else:
-            cache = TurboQuantCache(bits=model.kv_bits)
+            cache = TurboQuantCache(
+                bits=model.kv_bits,
+                layer_policy=layer_policy,
+            )
 
     stop_tokens = set(config.stop_tokens or [])
     if tokenizer is not None:
@@ -960,25 +1188,26 @@ def _generate_hf(
 
     generated: list[int] = list(prompt_ids)
     with torch.no_grad():
-        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=input_device)
         if cache is None:
-            outputs = hf_model(input_ids=input_ids, use_cache=True)
+            outputs = hf_model(**initial_inputs, use_cache=True)
         else:
-            outputs = hf_model(input_ids=input_ids, use_cache=True, past_key_values=cache)
+            outputs = hf_model(**initial_inputs, use_cache=True, past_key_values=cache)
         past = outputs.past_key_values
         next_logits = outputs.logits[0, -1, :]
 
-        for _ in range(config.max_new_tokens):
+        def _next_token() -> int:
+            nonlocal next_logits, past
             token = _sample_token(next_logits, config, generated)
             if token in stop_tokens:
-                break
+                return token
             generated.append(token)
-            yield token
-
             input_ids = torch.tensor([[token]], dtype=torch.long, device=input_device)
             outputs = hf_model(input_ids=input_ids, past_key_values=past, use_cache=True)
             past = outputs.past_key_values
             next_logits = outputs.logits[0, -1, :]
+            return token
+
+        yield from _stream_generated_tokens(_next_token, config, stop_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -1016,10 +1245,25 @@ def load_model(
 
         model_source = source_path or tq_model.source_model
         tokenizer = None
+        processor = None
+        try:
+            from transformers import AutoProcessor
+
+            try:
+                processor = AutoProcessor.from_pretrained(str(tqf_dir), trust_remote_code=True)
+            except Exception:
+                processor = AutoProcessor.from_pretrained(model_source, trust_remote_code=True)
+        except Exception:
+            processor = None
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(str(tqf_dir), trust_remote_code=True)
         except Exception:
-            tokenizer = AutoTokenizer.from_pretrained(model_source, trust_remote_code=True)
+            with torch.no_grad():
+                tokenizer = AutoTokenizer.from_pretrained(model_source, trust_remote_code=True)
+
+        if tokenizer is None and processor is not None:
+            tokenizer = _unwrap_tokenizer(processor)
 
         load_kwargs: dict[str, Any] = {
             "trust_remote_code": True,
@@ -1039,7 +1283,9 @@ def load_model(
             hf_model=hf_model,
             device=_model_input_device(hf_model),
             kv_bits=max(int(tq_model.quant_config.kv_bits or 0), 0),
-        ), tokenizer
+            tokenizer=tokenizer,
+            processor=processor,
+        ), (processor or tokenizer)
 
     transformer = TurboQuantTransformer(tq_model, device=dev, dtype=dt)
 

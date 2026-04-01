@@ -35,6 +35,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | [Downsizing](wiki/Downsizing.md) | Teacher → student distillation |
 | [Hugging Face without GGUF](wiki/Hugging-Face-Without-GGUF.md) | When the repo has no GGUF |
 | [Quantization](wiki/Quantization.md) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |
+| [TurboQuant](wiki/TurboQuant.md) | Extreme 2-4 bit quantization, KV cache compression, layer-adaptive, temporal decay |
 | [CI / Automation](wiki/CI-Automation.md) | Example GitHub Actions |
 | [Command Reference](wiki/Command-Reference.md) | All commands |
 
@@ -54,7 +55,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 - **Ollama** — [Install](https://ollama.com) and ensure `ollama` is on your PATH.
 - **Verify:** `ollama-forge check` — see what’s installed. `ollama-forge doctor` for diagnosis; `doctor --fix` to apply safe fixes. See [Installation](wiki/Installation.md) for optional llama.cpp (finetune/quantize).
 - **Dependencies:** install with `uv sync` to get the full local toolchain.
-- **Optional:** Run Ruff and tests before commit/push: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md). To fix lint before pushing without hooks: `./scripts/lint-fix.sh`.
+- **Optional:** Run Ruff and tests before commit/push: `git config core.hooksPath .githooks`. See [.githooks/README.md](.githooks/README.md). To fix lint before pushing without hooks: `uv run ruff check src tests --fix && uv run ruff format src tests`.
 
 ---
 
@@ -72,6 +73,9 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | One-file config build | `build recipe.yaml` |
 | Serve GGUF directly (llama.cpp) | `serve <model.gguf> [--port 11434] [-ngl -1]` |
 | Chat with a running server | `chat [--base-url <url>]` |
+| Quantize HF model (TurboQuant) | `turboquant quantize <model> --bits 3` |
+| Serve TurboQuant model | `turboquant serve <model.tqf> --port 8811` |
+| Chat with TurboQuant model | `turboquant chat <model.tqf>` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp | `setup-llama-cpp` |
@@ -129,4 +133,5 @@ uv run ollama-forge chat
 - **Refusal removal (abliterate)** — Quickstart: `abliterate easy --model <id> --name <name>` or `abliterate wizard` for prompts. Install deps with `uv sync`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Install deps with `uv sync`, then run `security-eval ui` for the UI. [Wiki: Security Eval](wiki/Security-Eval.md).
+- **TurboQuant** — Extreme 2-4 bit quantization with near-optimal quality. No llama.cpp needed. `turboquant quantize <model> --bits 3` then `turboquant serve` or `turboquant chat`. Includes asymmetric K/V cache compression, layer-adaptive precision (protects quality-critical layers), and temporal decay (progressively compresses old KV tokens). [Wiki](wiki/TurboQuant.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).
