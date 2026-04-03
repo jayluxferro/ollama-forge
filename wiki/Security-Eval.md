@@ -1,6 +1,6 @@
 # Security Evaluation
 
-Run prompt sets against Ollama or abliterate serve to evaluate LLM security: jailbreak/refusal, prompt injection, extraction. Get KPIs (ASR, refusal rate) and optional run history with plots.
+Run prompt sets against Ollama or abliterate serve to evaluate LLM security: jailbreak/refusal, prompt injection, extraction. Get KPIs (ASR, refusal rate) and optional run history with plots. Supports local [VLM](VLM) evaluation for multimodal models on Apple Silicon.
 
 For the **full pipeline** (fetch → abliterate → serve → security-eval → compare), see [Security and abliteration pipeline](Security-and-Abliteration-Pipeline).
 
@@ -70,6 +70,28 @@ Use `--save-history` to append the run to SQLite at `~/.ollama_forge/security_ev
 uv sync
 uv run ollama-forge security-eval ui
 ```
+
+### UI features
+
+- **Quick test tab** — Single-prompt testing with optional image upload; instant refusal/extraction scoring.
+- **Color-coded results** — Green (refusal), red (compliance), gray (error) in the results table.
+- **KPI deltas** — Compare current run against previous run with delta indicators.
+- **Confusion matrix** — Expected vs actual refusal heatmap.
+- **Radar chart** — ASR% by category with multi-model overlay.
+- **Response diff** — Side-by-side comparison with refusal/compliance badges in the Compare tab.
+- **Abort button** — Stop a running evaluation mid-flight.
+- **Drag-and-drop upload** — Load prompt set files directly in the UI.
+- **VLM toggle** — Enable "Use local VLM" in Quick test or Run tabs to evaluate vision-language models locally (Apple Silicon only; see [VLM](VLM)).
+
+---
+
+## VLM evaluation
+
+The security eval supports local VLM inference without an external server. Enable the **"Use local VLM"** toggle in the UI and provide a model path (e.g. `mlx-community/Qwen2-VL-2B-Instruct-4bit`).
+
+- The model is loaded once and reused across all prompts in a batch run.
+- Image prompts with base64-encoded images are automatically converted to temp files for mlx-vlm.
+- Requires Apple Silicon with mlx-vlm installed. See [VLM](VLM) for setup.
 
 ---
 

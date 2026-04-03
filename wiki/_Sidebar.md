@@ -19,5 +19,6 @@
 - [Hugging Face without GGUF](Hugging-Face-Without-GGUF)
 - [Quantization](Quantization)
 - [TurboQuant](TurboQuant)
+- [VLM (Vision Language Models)](VLM)
 - [CI / Automation](CI-Automation)
 - [Command Reference](Command-Reference)

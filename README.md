@@ -36,6 +36,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | [Hugging Face without GGUF](wiki/Hugging-Face-Without-GGUF.md) | When the repo has no GGUF |
 | [Quantization](wiki/Quantization.md) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |
 | [TurboQuant](wiki/TurboQuant.md) | Extreme 2-4 bit quantization, KV cache compression, layer-adaptive, temporal decay |
+| [VLM (Vision Language Models)](wiki/VLM.md) | Multimodal inference, conversion, fine-tuning on Apple Silicon via mlx-vlm |
 | [CI / Automation](wiki/CI-Automation.md) | Example GitHub Actions |
 | [Command Reference](wiki/Command-Reference.md) | All commands |
 
@@ -76,6 +77,12 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | Quantize HF model (TurboQuant) | `turboquant quantize <model> --bits 3` |
 | Serve TurboQuant model | `turboquant serve <model.tqf> --port 8811` |
 | Chat with TurboQuant model | `turboquant chat <model.tqf>` |
+| VLM generate (image+text) | `vlm generate --model <model> --prompt "..." --image photo.jpg` |
+| VLM interactive chat | `vlm chat --model <model>` |
+| VLM OpenAI-compatible server | `vlm serve --model <model> --port 8080` |
+| VLM convert HF → MLX | `vlm convert --hf-path <repo_id>` |
+| VLM quantize | `vlm quantize --model <repo_id> --bits 4` |
+| VLM fine-tune (LoRA) | `vlm finetune --model <model> --dataset <path>` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp | `setup-llama-cpp` |
@@ -134,4 +141,5 @@ uv run ollama-forge chat
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Install deps with `uv sync`, then run `security-eval ui` for the UI. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **TurboQuant** — Extreme 2-4 bit quantization with near-optimal quality. No llama.cpp needed. `turboquant quantize <model> --bits 3` then `turboquant serve` or `turboquant chat`. Includes asymmetric K/V cache compression, layer-adaptive precision (protects quality-critical layers), and temporal decay (progressively compresses old KV tokens). [Wiki](wiki/TurboQuant.md).
+- **VLM (Vision Language Models)** — Multimodal (image + audio + text) inference on Apple Silicon via [mlx-vlm](https://github.com/Blaizzy/mlx-vlm). Generate, chat, serve (OpenAI-compatible), convert HF models to MLX, quantize, and fine-tune with LoRA. Also integrated into the Security Eval UI for local VLM evaluation. `vlm generate --model <model> --prompt "Describe this" --image photo.jpg`. [Wiki](wiki/VLM.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).

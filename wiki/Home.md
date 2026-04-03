@@ -51,6 +51,7 @@ ollama run my-model
 | [Hugging Face without GGUF](Hugging-Face-Without-GGUF) | When the repo has no GGUF |
 | [Quantization](Quantization) | Smaller/faster GGUF (Q4_K_M, Q8_0, etc.) |
 | [TurboQuant](TurboQuant) | Extreme 2-4 bit quantization, KV cache compression, layer-adaptive, temporal decay |
+| [VLM (Vision Language Models)](VLM) | Multimodal inference, conversion, fine-tuning on Apple Silicon via mlx-vlm |
 | [CI / Automation](CI-Automation) | Example GitHub Actions |
 | [Command Reference](Command-Reference) | All commands at a glance |
 
@@ -73,6 +74,9 @@ ollama run my-model
 | Quantize HF model (TurboQuant) | `turboquant quantize <model> --bits 3` |
 | Serve TurboQuant model | `turboquant serve <model.tqf> --port 8811` |
 | Chat with TurboQuant model | `turboquant chat <model.tqf>` |
+| VLM generate (image+text) | `vlm generate --model <model> --prompt "..." --image photo.jpg` |
+| VLM interactive chat | `vlm chat --model <model>` |
+| VLM OpenAI-compatible server | `vlm serve --model <model>` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp (finetune, quantize) | `setup-llama-cpp` |
