@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Callable
 
 from ollama_forge.security_eval.client import (
+    load_vlm_for_eval,
     query_model,
     query_model_multi_turn,
     query_model_multi_turn_iterative,
+    query_model_vlm,
     query_model_with_image,
     query_model_with_tools,
 )
@@ -47,6 +49,7 @@ def run_eval(
     *,
     base_url: str = "http://127.0.0.1:11434",
     model: str = "llama3.2",
+    vlm_model_path: str | None = None,
     output_csv: str | Path | None = None,
     output_json: str | Path | None = None,
     save_to_history: bool = False,
@@ -77,6 +80,14 @@ def run_eval(
             print(f"Running first {len(prompts)} prompts (max_prompts={max_prompts}).", file=sys.stderr)
 
     refusal_keywords = _load_refusal_keywords(refusal_keywords_path)
+
+    # Pre-load VLM model once if vlm_model_path is set
+    vlm_loaded: tuple | None = None
+    if vlm_model_path:
+        if verbose:
+            print(f"Loading VLM model: {vlm_model_path} ...", file=sys.stderr)
+        vlm_loaded = load_vlm_for_eval(vlm_model_path)
+
     if prompt_set_version is None:
         try:
             prompt_set_version = hashlib.sha256(Path(prompt_set_path).read_bytes()).hexdigest()[:12]
@@ -109,7 +120,35 @@ def run_eval(
             turns_count: int | None = None
             turns_to_success: int | None = None
 
-            if tools and isinstance(tools, list):
+            if vlm_model_path:
+                # --- Local VLM backend ---
+                vlm_image_paths: list[str] | None = None
+                if image_b64:
+                    import base64
+                    import tempfile
+
+                    raw = base64.b64decode(image_b64)
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        tmp.write(raw)
+                    vlm_image_paths = [tmp.name]
+                for attempt in range(num_attempts):
+                    try:
+                        response, duration = query_model_vlm(
+                            prompt,
+                            model_path=vlm_model_path,
+                            image_paths=vlm_image_paths,
+                            system=row_system,
+                            timeout=timeout,
+                            _loaded_model=vlm_loaded,
+                        )
+                        break
+                    except Exception as e:
+                        if attempt == num_attempts - 1:
+                            raise
+                        if verbose:
+                            print(f"    Retry {attempt + 1}/{retries} after: {e}", file=sys.stderr)
+                        time.sleep(1.0 * (attempt + 1))
+            elif tools and isinstance(tools, list):
                 for attempt in range(num_attempts):
                     try:
                         response, tool_calls, duration = query_model_with_tools(

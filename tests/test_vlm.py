@@ -40,9 +40,13 @@ def _make_fake_mlx_vlm():
         for tok in ["Hello", " ", "world"]:
             yield tok
 
+    def fake_convert(hf_path, **kwargs):
+        pass  # no-op for testing
+
     pkg.load = fake_load
     pkg.generate = fake_generate
     pkg.stream_generate = fake_stream_generate
+    pkg.convert = fake_convert
 
     # Fake prompt_utils submodule
     prompt_utils = types.ModuleType("mlx_vlm.prompt_utils")
@@ -259,16 +263,15 @@ class TestVlmCliParsing:
             captured_parser["parser"] = self
             return original_parse_args(self, args=args, namespace=namespace)
 
-        with patch.object(argparse.ArgumentParser, "parse_args", intercept_parse_args):
-            try:
-                main.__wrapped__ if hasattr(main, "__wrapped__") else main
-                # Call main with a known command to capture the parser
-                import contextlib
-                with patch("sys.argv", ["ollama-forge", "vlm"]), contextlib.suppress(SystemExit):
-                    main()
-
-            except Exception:
-                pass
+        import contextlib
+        with (
+            patch.object(argparse.ArgumentParser, "parse_args", intercept_parse_args),
+            contextlib.suppress(Exception),
+        ):
+            main.__wrapped__ if hasattr(main, "__wrapped__") else main
+            # Call main with a known command to capture the parser
+            with patch("sys.argv", ["ollama-forge", "vlm"]), contextlib.suppress(SystemExit):
+                main()
 
         parser = captured_parser.get("parser")
         if parser is None:
@@ -487,3 +490,425 @@ class TestVlmCliHandlers:
         captured = capsys.readouterr()
         combined = (captured.out + captured.err).lower()
         assert "mlx-vlm" in combined or "not installed" in combined
+
+    def test_vlm_convert_handler(self, capsys):
+        """vlm convert handler should call vlm_convert and return 0."""
+        import argparse
+
+        from ollama_forge.cli import _cmd_vlm_convert
+
+        args = argparse.Namespace(
+            hf_path="fake/model",
+            mlx_path="mlx_model",
+            quantize=False,
+            q_bits=4,
+            q_group_size=64,
+            dtype=None,
+            upload_repo=None,
+        )
+        ret = _cmd_vlm_convert(None, args)
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "mlx_model" in captured.out
+
+    def test_vlm_convert_handler_with_quantize(self, capsys):
+        """vlm convert handler should work with --quantize."""
+        import argparse
+
+        from ollama_forge.cli import _cmd_vlm_convert
+
+        args = argparse.Namespace(
+            hf_path="fake/model",
+            mlx_path="output_dir",
+            quantize=True,
+            q_bits=8,
+            q_group_size=128,
+            dtype="float16",
+            upload_repo=None,
+        )
+        ret = _cmd_vlm_convert(None, args)
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "output_dir" in captured.out
+
+    def test_vlm_quantize_handler(self, capsys):
+        """vlm quantize handler should call vlm_convert with quantize=True and return 0."""
+        import argparse
+
+        from ollama_forge.cli import _cmd_vlm_quantize
+
+        args = argparse.Namespace(
+            model="fake/model",
+            output="mlx_model_quantized",
+            bits=4,
+            group_size=64,
+            dtype=None,
+            upload_repo=None,
+        )
+        ret = _cmd_vlm_quantize(None, args)
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "mlx_model_quantized" in captured.out
+
+    def test_vlm_convert_handler_missing_vlm(self, capsys):
+        """vlm convert should show helpful error when mlx-vlm is missing."""
+        sys.modules.pop("ollama_forge.vlm", None)
+        sys.modules["mlx_vlm"] = None
+        sys.modules.pop("ollama_forge.vlm", None)
+
+        import argparse
+
+        from ollama_forge.cli import _cmd_vlm_convert
+
+        args = argparse.Namespace(
+            hf_path="fake/model",
+            mlx_path="mlx_model",
+            quantize=False,
+            q_bits=4,
+            q_group_size=64,
+            dtype=None,
+            upload_repo=None,
+        )
+        ret = _cmd_vlm_convert(None, args)
+        assert ret == 1
+        captured = capsys.readouterr()
+        combined = (captured.out + captured.err).lower()
+        assert "mlx-vlm" in combined or "not installed" in combined
+
+    def test_vlm_quantize_handler_missing_vlm(self, capsys):
+        """vlm quantize should show helpful error when mlx-vlm is missing."""
+        sys.modules.pop("ollama_forge.vlm", None)
+        sys.modules["mlx_vlm"] = None
+        sys.modules.pop("ollama_forge.vlm", None)
+
+        import argparse
+
+        from ollama_forge.cli import _cmd_vlm_quantize
+
+        args = argparse.Namespace(
+            model="fake/model",
+            output="mlx_model_quantized",
+            bits=4,
+            group_size=64,
+            dtype=None,
+            upload_repo=None,
+        )
+        ret = _cmd_vlm_quantize(None, args)
+        assert ret == 1
+        captured = capsys.readouterr()
+        combined = (captured.out + captured.err).lower()
+        assert "mlx-vlm" in combined or "not installed" in combined
+
+
+# ---------------------------------------------------------------------------
+# vlm_convert function tests
+# ---------------------------------------------------------------------------
+
+
+class TestVlmConvertFunction:
+    """Test vlm_convert in vlm.py with mocked mlx-vlm."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_fake_mlx_vlm(self):
+        """Install fake mlx_vlm for each test, clean up after."""
+        fake_modules = _make_fake_mlx_vlm()
+        saved = {}
+        for name in fake_modules:
+            saved[name] = sys.modules.get(name, "MISSING")
+        sys.modules.update(fake_modules)
+        sys.modules.pop("ollama_forge.vlm", None)
+        yield
+        sys.modules.pop("ollama_forge.vlm", None)
+        for name, val in saved.items():
+            if val == "MISSING":
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = val
+
+    def test_vlm_convert_returns_path(self):
+        from pathlib import Path
+
+        from ollama_forge.vlm import vlm_convert
+        result = vlm_convert("fake/model", mlx_path="out_dir")
+        assert isinstance(result, Path)
+        assert str(result) == "out_dir"
+
+    def test_vlm_convert_defaults(self):
+        from pathlib import Path
+
+        from ollama_forge.vlm import vlm_convert
+        result = vlm_convert("fake/model")
+        assert isinstance(result, Path)
+        assert str(result) == "mlx_model"
+
+    def test_vlm_convert_with_quantize(self):
+        from pathlib import Path
+
+        from ollama_forge.vlm import vlm_convert
+        result = vlm_convert(
+            "fake/model",
+            mlx_path="quant_out",
+            quantize=True,
+            q_bits=8,
+            q_group_size=128,
+        )
+        assert isinstance(result, Path)
+        assert str(result) == "quant_out"
+
+    def test_vlm_convert_raises_without_mlx_vlm(self):
+        """vlm_convert should raise RuntimeError when mlx-vlm is missing."""
+        sys.modules.pop("ollama_forge.vlm", None)
+        sys.modules["mlx_vlm"] = None
+        sys.modules.pop("ollama_forge.vlm", None)
+
+        import importlib
+        spec = importlib.util.find_spec("ollama_forge.vlm")
+        if spec and spec.loader:
+            vlm_mod = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(vlm_mod)
+            except ImportError:
+                pass
+            else:
+                with pytest.raises(RuntimeError, match="mlx-vlm is required"):
+                    vlm_mod.vlm_convert("fake/model")
+
+
+# ---------------------------------------------------------------------------
+# CLI parsing tests for convert / quantize
+# ---------------------------------------------------------------------------
+
+
+class TestVlmConvertQuantizeCliParsing:
+    """Test that vlm convert/quantize subcommands are correctly registered."""
+
+    @pytest.fixture()
+    def parse(self):
+        """Return a helper that parses CLI args and returns the namespace."""
+        import argparse
+        import contextlib
+        from unittest.mock import patch
+
+        captured_parser = {}
+
+        original_parse_args = argparse.ArgumentParser.parse_args
+
+        def intercept_parse_args(self, args=None, namespace=None):
+            captured_parser["parser"] = self
+            return original_parse_args(self, args=args, namespace=namespace)
+
+        with patch.object(argparse.ArgumentParser, "parse_args", intercept_parse_args):
+            try:
+                from ollama_forge.cli import main
+                with patch("sys.argv", ["ollama-forge", "vlm"]), contextlib.suppress(SystemExit):
+                    main()
+            except Exception:
+                pass
+
+        parser = captured_parser.get("parser")
+        if parser is None:
+            pytest.skip("Could not capture parser")
+
+        def _parse(args: list[str]):
+            return parser.parse_args(args)
+
+        return _parse
+
+    def test_vlm_convert_args(self, parse):
+        ns = parse(["vlm", "convert", "--hf-path", "org/model"])
+        assert ns.hf_path == "org/model"
+        assert ns.mlx_path == "mlx_model"
+        assert ns.quantize is False
+        assert ns.q_bits == 4
+        assert ns.q_group_size == 64
+        assert ns.dtype is None
+        assert ns.upload_repo is None
+        assert getattr(ns, "handler", None) is not None
+
+    def test_vlm_convert_all_args(self, parse):
+        ns = parse(["vlm", "convert", "--hf-path", "org/model",
+                     "--mlx-path", "my_output", "--quantize",
+                     "--q-bits", "8", "--q-group-size", "128",
+                     "--dtype", "float16", "--upload-repo", "user/repo"])
+        assert ns.hf_path == "org/model"
+        assert ns.mlx_path == "my_output"
+        assert ns.quantize is True
+        assert ns.q_bits == 8
+        assert ns.q_group_size == 128
+        assert ns.dtype == "float16"
+        assert ns.upload_repo == "user/repo"
+
+    def test_vlm_quantize_args(self, parse):
+        ns = parse(["vlm", "quantize", "--model", "org/model"])
+        assert ns.model == "org/model"
+        assert ns.output == "mlx_model_quantized"
+        assert ns.bits == 4
+        assert ns.group_size == 64
+        assert ns.dtype is None
+        assert ns.upload_repo is None
+        assert getattr(ns, "handler", None) is not None
+
+    def test_vlm_quantize_all_args(self, parse):
+        ns = parse(["vlm", "quantize", "--model", "org/model",
+                     "--output", "q_out", "--bits", "8",
+                     "--group-size", "128", "--dtype", "float16",
+                     "--upload-repo", "user/repo"])
+        assert ns.model == "org/model"
+        assert ns.output == "q_out"
+        assert ns.bits == 8
+        assert ns.group_size == 128
+        assert ns.dtype == "float16"
+        assert ns.upload_repo == "user/repo"
+
+
+# ---------------------------------------------------------------------------
+# Security eval VLM integration tests (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryModelVlm:
+    """Test query_model_vlm from security_eval.client."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_fake_mlx_vlm(self):
+        """Install fake mlx_vlm for each test, clean up after."""
+        import importlib
+
+        fake_modules = _make_fake_mlx_vlm()
+        saved = {}
+        for name in fake_modules:
+            saved[name] = sys.modules.get(name, "MISSING")
+        sys.modules.update(fake_modules)
+        sys.modules.pop("ollama_forge.vlm", None)
+        import ollama_forge.vlm as vlm_mod
+
+        importlib.reload(vlm_mod)
+        yield
+        sys.modules.pop("ollama_forge.vlm", None)
+        for name, val in saved.items():
+            if val == "MISSING":
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = val
+
+    def test_query_model_vlm_basic(self):
+        from ollama_forge.security_eval.client import query_model_vlm
+
+        text, duration = query_model_vlm("Describe this", model_path="fake/model")
+        assert isinstance(text, str)
+        assert len(text) > 0
+        assert isinstance(duration, float)
+        assert duration >= 0
+
+    def test_query_model_vlm_with_system(self):
+        from ollama_forge.security_eval.client import query_model_vlm
+
+        text, duration = query_model_vlm(
+            "Hello", model_path="fake/model", system="You are helpful.",
+        )
+        assert isinstance(text, str)
+        assert isinstance(duration, float)
+
+    def test_query_model_vlm_with_images(self, tmp_path):
+        from ollama_forge.security_eval.client import query_model_vlm
+
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+        text, duration = query_model_vlm(
+            "What is this?", model_path="fake/model", image_paths=[str(img)],
+        )
+        assert isinstance(text, str)
+        assert isinstance(duration, float)
+
+    def test_query_model_vlm_with_preloaded(self):
+        from ollama_forge.security_eval.client import load_vlm_for_eval, query_model_vlm
+
+        loaded = load_vlm_for_eval("fake/model")
+        text, duration = query_model_vlm(
+            "Describe this", model_path="fake/model", _loaded_model=loaded,
+        )
+        assert isinstance(text, str)
+        assert isinstance(duration, float)
+
+
+class TestLoadVlmForEval:
+    """Test load_vlm_for_eval from security_eval.client."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_fake_mlx_vlm(self):
+        import importlib
+
+        fake_modules = _make_fake_mlx_vlm()
+        saved = {}
+        for name in fake_modules:
+            saved[name] = sys.modules.get(name, "MISSING")
+        sys.modules.update(fake_modules)
+        sys.modules.pop("ollama_forge.vlm", None)
+        import ollama_forge.vlm as vlm_mod
+
+        importlib.reload(vlm_mod)
+        yield
+        sys.modules.pop("ollama_forge.vlm", None)
+        for name, val in saved.items():
+            if val == "MISSING":
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = val
+
+    def test_load_returns_tuple(self):
+        from ollama_forge.security_eval.client import load_vlm_for_eval
+
+        result = load_vlm_for_eval("fake/model")
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+
+class TestRunEvalVlmSignature:
+    def test_run_eval_accepts_vlm_model_path(self):
+        import inspect
+
+        from ollama_forge.security_eval.run import run_eval
+
+        sig = inspect.signature(run_eval)
+        assert "vlm_model_path" in sig.parameters
+        assert sig.parameters["vlm_model_path"].default is None
+
+
+class TestVlmMissingGraceful:
+    def test_query_model_vlm_raises_without_mlx_vlm(self):
+        saved_vlm = sys.modules.pop("ollama_forge.vlm", None)
+        saved_mlx = sys.modules.get("mlx_vlm", "MISSING")
+        sys.modules["mlx_vlm"] = None
+        sys.modules.pop("ollama_forge.vlm", None)
+        try:
+            from ollama_forge.security_eval.client import query_model_vlm
+
+            with pytest.raises(RuntimeError, match="mlx-vlm"):
+                query_model_vlm("hello", model_path="fake/model")
+        finally:
+            sys.modules.pop("ollama_forge.vlm", None)
+            if saved_vlm is not None:
+                sys.modules["ollama_forge.vlm"] = saved_vlm
+            if saved_mlx == "MISSING":
+                sys.modules.pop("mlx_vlm", None)
+            else:
+                sys.modules["mlx_vlm"] = saved_mlx
+
+    def test_load_vlm_for_eval_raises_without_mlx_vlm(self):
+        saved_vlm = sys.modules.pop("ollama_forge.vlm", None)
+        saved_mlx = sys.modules.get("mlx_vlm", "MISSING")
+        sys.modules["mlx_vlm"] = None
+        sys.modules.pop("ollama_forge.vlm", None)
+        try:
+            from ollama_forge.security_eval.client import load_vlm_for_eval
+
+            with pytest.raises(RuntimeError, match="mlx-vlm"):
+                load_vlm_for_eval("fake/model")
+        finally:
+            sys.modules.pop("ollama_forge.vlm", None)
+            if saved_vlm is not None:
+                sys.modules["ollama_forge.vlm"] = saved_vlm
+            if saved_mlx == "MISSING":
+                sys.modules.pop("mlx_vlm", None)
+            else:
+                sys.modules["mlx_vlm"] = saved_mlx

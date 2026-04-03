@@ -6,6 +6,8 @@ Apple Silicon Macs.  Falls back gracefully if mlx-vlm is not installed.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any, Generator
 
 _VLM_INSTALL_HINT = "mlx-vlm is required for VLM commands. Install with: pip install 'mlx-vlm>=0.4.3'"
@@ -28,6 +30,46 @@ def _require_vlm() -> None:
     """Raise RuntimeError if mlx-vlm is not installed."""
     if not _MLX_VLM_AVAILABLE:
         raise RuntimeError(_VLM_INSTALL_HINT)
+
+
+def vlm_convert(
+    hf_path: str,
+    mlx_path: str = "mlx_model",
+    quantize: bool = False,
+    q_bits: int = 4,
+    q_group_size: int = 64,
+    dtype: str | None = None,
+    upload_repo: str | None = None,
+) -> Path:
+    """Convert a HuggingFace VLM to MLX format.
+
+    Wraps ``mlx_vlm.convert()``.  Returns the output path.
+
+    Args:
+        hf_path: HuggingFace repo id or local path.
+        mlx_path: Output directory for the converted model.
+        quantize: Whether to quantize the model during conversion.
+        q_bits: Quantization bits (default: 4).
+        q_group_size: Quantization group size (default: 64).
+        dtype: Output dtype (e.g. ``float16``).
+        upload_repo: Optional HuggingFace repo to upload the converted model.
+
+    Returns:
+        :class:`~pathlib.Path` pointing to the output directory.
+    """
+    _require_vlm()
+    from mlx_vlm import convert
+
+    convert(
+        hf_path,
+        mlx_path=mlx_path,
+        quantize=quantize,
+        q_bits=q_bits,
+        q_group_size=q_group_size,
+        dtype=dtype,
+        upload_repo=upload_repo,
+    )
+    return Path(mlx_path)
 
 
 def vlm_load(model_path: str, adapter_path: str | None = None) -> tuple[Any, Any]:
@@ -174,3 +216,55 @@ def vlm_stream_generate(
 
     for token in stream_generate(model, processor, prompt, **gen_kwargs):
         yield token
+
+
+def vlm_finetune(
+    model_path: str,
+    dataset: str,
+    output_path: str = "vlm_adapter",
+    learning_rate: float = 2e-5,
+    batch_size: int = 4,
+    epochs: int = 1,
+    lora_rank: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.0,
+    train_vision: bool = False,
+    full_finetune: bool = False,
+    gradient_accumulation_steps: int = 1,
+    grad_checkpoint: bool = False,
+    adapter_path: str | None = None,
+) -> int:
+    """Fine-tune a VLM using LoRA/QLoRA/full via mlx-vlm.
+
+    Invokes ``python -m mlx_vlm.lora`` as a subprocess since the trainer
+    module manages its own training loop.
+
+    Returns the subprocess exit code.
+    """
+    _require_vlm()
+    import subprocess
+
+    cmd = [
+        sys.executable, "-m", "mlx_vlm.lora",
+        "--model-path", model_path,
+        "--dataset", dataset,
+        "--output-path", output_path,
+        "--learning-rate", str(learning_rate),
+        "--batch-size", str(batch_size),
+        "--epochs", str(epochs),
+        "--lora-rank", str(lora_rank),
+        "--lora-alpha", str(lora_alpha),
+        "--lora-dropout", str(lora_dropout),
+        "--gradient-accumulation-steps", str(gradient_accumulation_steps),
+    ]
+    if train_vision:
+        cmd.append("--train-vision")
+    if full_finetune:
+        cmd.append("--full-finetune")
+    if grad_checkpoint:
+        cmd.append("--grad-checkpoint")
+    if adapter_path:
+        cmd += ["--adapter-path", adapter_path]
+
+    result = subprocess.run(cmd)
+    return result.returncode

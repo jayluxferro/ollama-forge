@@ -4123,6 +4123,180 @@ def _cmd_vlm_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     return proc.returncode or 0
 
 
+def _cmd_vlm_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Convert a HuggingFace VLM to MLX format."""
+    try:
+        from ollama_forge.vlm import is_vlm_available, vlm_convert
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    hf_path = args.hf_path
+    mlx_path = getattr(args, "mlx_path", "mlx_model")
+    quantize = getattr(args, "quantize", False)
+    q_bits = getattr(args, "q_bits", 4)
+    q_group_size = getattr(args, "q_group_size", 64)
+    dtype = getattr(args, "dtype", None)
+    upload_repo = getattr(args, "upload_repo", None)
+
+    print(f"Converting {hf_path} -> {mlx_path} ...", file=sys.stderr)
+    try:
+        out = vlm_convert(
+            hf_path,
+            mlx_path=mlx_path,
+            quantize=quantize,
+            q_bits=q_bits,
+            q_group_size=q_group_size,
+            dtype=dtype,
+            upload_repo=upload_repo,
+        )
+    except Exception as exc:
+        print_actionable_error(
+            f"Conversion failed: {exc}",
+            next_steps=[
+                "Check the model path or HuggingFace repo ID",
+                "Ensure you have enough disk space",
+            ],
+        )
+        return 1
+
+    print(f"Converted model saved to: {out}")
+    return 0
+
+
+def _cmd_vlm_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Quantize a VLM model (convenience wrapper around convert with --quantize)."""
+    try:
+        from ollama_forge.vlm import is_vlm_available, vlm_convert
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    model = args.model
+    output = getattr(args, "output", "mlx_model_quantized")
+    bits = getattr(args, "bits", 4)
+    group_size = getattr(args, "group_size", 64)
+    dtype = getattr(args, "dtype", None)
+    upload_repo = getattr(args, "upload_repo", None)
+
+    print(f"Quantizing {model} -> {output} ({bits}-bit, group_size={group_size}) ...", file=sys.stderr)
+    try:
+        out = vlm_convert(
+            model,
+            mlx_path=output,
+            quantize=True,
+            q_bits=bits,
+            q_group_size=group_size,
+            dtype=dtype,
+            upload_repo=upload_repo,
+        )
+    except Exception as exc:
+        print_actionable_error(
+            f"Quantization failed: {exc}",
+            next_steps=[
+                "Check the model path or HuggingFace repo ID",
+                "Ensure you have enough disk space",
+            ],
+        )
+        return 1
+
+    print(f"Quantized model saved to: {out}")
+    return 0
+
+
+def _cmd_vlm_finetune(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Fine-tune a VLM using LoRA/QLoRA/full via mlx-vlm."""
+    try:
+        from ollama_forge.vlm import is_vlm_available, vlm_finetune
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    dataset = args.dataset
+    if not os.path.exists(dataset):
+        print_actionable_error(
+            f"Dataset file not found: {dataset}",
+            next_steps=[
+                "Check the path and ensure the file exists",
+                "Dataset should be a JSONL file with 'images' and 'messages' columns",
+            ],
+        )
+        return 1
+
+    print(f"Fine-tuning model: {args.model}", file=sys.stderr)
+    print(f"Dataset: {dataset}", file=sys.stderr)
+    print(f"Output: {args.output_path}", file=sys.stderr)
+
+    rc = vlm_finetune(
+        model_path=args.model,
+        dataset=dataset,
+        output_path=args.output_path,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        train_vision=args.train_vision,
+        full_finetune=args.full_finetune,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        grad_checkpoint=args.grad_checkpoint,
+        adapter_path=getattr(args, "adapter_path", None),
+    )
+
+    if rc == 0:
+        print(f"Fine-tuning complete. Adapter saved to: {args.output_path}", file=sys.stderr)
+    else:
+        print_actionable_error(
+            f"Fine-tuning failed (exit code {rc})",
+            next_steps=[
+                "Check the training output above for errors",
+                "Ensure the dataset format is correct (JSONL with images + messages)",
+                "Try reducing batch size if running out of memory",
+            ],
+        )
+    return rc
+
+
 def _cmd_turboquant_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Quantize a HF model using TurboQuant and save as .tqf."""
     try:
@@ -11282,6 +11456,81 @@ def main() -> int:
                              help="KV cache quantization bits")
     p_vlm_serve.add_argument("--adapter-path", default=None, help="LoRA adapter path")
     p_vlm_serve.set_defaults(handler=_cmd_vlm_serve)
+
+    # vlm convert
+    p_vlm_convert = vlm_sub.add_parser(
+        "convert",
+        help="Convert a HuggingFace VLM to MLX format",
+    )
+    p_vlm_convert.add_argument("--hf-path", required=True,
+                               help="HF repo id or local path")
+    p_vlm_convert.add_argument("--mlx-path", default="mlx_model",
+                               help="Output directory (default: mlx_model)")
+    p_vlm_convert.add_argument("--quantize", action="store_true", default=False,
+                               help="Enable quantization during conversion")
+    p_vlm_convert.add_argument("--q-bits", type=int, default=4,
+                               help="Quantization bits (default: 4)")
+    p_vlm_convert.add_argument("--q-group-size", type=int, default=64,
+                               help="Quantization group size (default: 64)")
+    p_vlm_convert.add_argument("--dtype", default=None,
+                               help="Output dtype (e.g. float16)")
+    p_vlm_convert.add_argument("--upload-repo", default=None,
+                               help="Upload converted model to HF repo")
+    p_vlm_convert.set_defaults(handler=_cmd_vlm_convert)
+
+    # vlm quantize
+    p_vlm_quant = vlm_sub.add_parser(
+        "quantize",
+        help="Quantize a VLM model (convert with quantization enabled)",
+    )
+    p_vlm_quant.add_argument("--model", required=True,
+                             help="HF repo id or local model path")
+    p_vlm_quant.add_argument("--output", default="mlx_model_quantized",
+                             help="Output directory (default: mlx_model_quantized)")
+    p_vlm_quant.add_argument("--bits", type=int, default=4,
+                             help="Quantization bits (default: 4)")
+    p_vlm_quant.add_argument("--group-size", type=int, default=64,
+                             help="Group size (default: 64)")
+    p_vlm_quant.add_argument("--dtype", default=None,
+                             help="Output dtype (e.g. float16)")
+    p_vlm_quant.add_argument("--upload-repo", default=None,
+                             help="Upload to HF repo")
+    p_vlm_quant.set_defaults(handler=_cmd_vlm_quantize)
+
+    # vlm finetune
+    p_vlm_ft = vlm_sub.add_parser(
+        "finetune",
+        help="Fine-tune a VLM using LoRA/QLoRA/full (mlx-vlm)",
+    )
+    p_vlm_ft.add_argument("--model", required=True,
+                           help="HF repo id or local path to base model")
+    p_vlm_ft.add_argument("--dataset", required=True,
+                           help="Path to training data JSONL")
+    p_vlm_ft.add_argument("--output-path", default="vlm_adapter",
+                           help="Output directory for adapter (default: vlm_adapter)")
+    p_vlm_ft.add_argument("--learning-rate", type=float, default=2e-5,
+                           help="Learning rate (default: 2e-5)")
+    p_vlm_ft.add_argument("--batch-size", type=int, default=4,
+                           help="Batch size (default: 4)")
+    p_vlm_ft.add_argument("--epochs", type=int, default=1,
+                           help="Training epochs (default: 1)")
+    p_vlm_ft.add_argument("--lora-rank", type=int, default=8,
+                           help="LoRA rank (default: 8)")
+    p_vlm_ft.add_argument("--lora-alpha", type=int, default=16,
+                           help="LoRA alpha (default: 16)")
+    p_vlm_ft.add_argument("--lora-dropout", type=float, default=0.0,
+                           help="LoRA dropout (default: 0.0)")
+    p_vlm_ft.add_argument("--train-vision", action="store_true", default=False,
+                           help="Fine-tune vision encoder too")
+    p_vlm_ft.add_argument("--full-finetune", action="store_true", default=False,
+                           help="Full weight update instead of LoRA")
+    p_vlm_ft.add_argument("--gradient-accumulation-steps", type=int, default=1,
+                           help="Gradient accumulation steps (default: 1)")
+    p_vlm_ft.add_argument("--grad-checkpoint", action="store_true", default=False,
+                           help="Enable gradient checkpointing")
+    p_vlm_ft.add_argument("--adapter-path", default=None,
+                           help="Resume from existing adapter")
+    p_vlm_ft.set_defaults(handler=_cmd_vlm_finetune)
 
     # turboquant (TurboQuant quantization, serving, and inference)
     p_tq = subparsers.add_parser(

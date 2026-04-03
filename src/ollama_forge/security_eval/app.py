@@ -19,6 +19,7 @@ try:
     from ollama_forge.security_eval.client import (
         list_models,
         query_model,
+        query_model_vlm,
         query_model_with_image,
     )
     from ollama_forge.security_eval.history import load_runs
@@ -30,6 +31,7 @@ except ImportError:
     from ollama_forge.security_eval.client import (
         list_models,
         query_model,
+        query_model_vlm,
         query_model_with_image,
     )
     from ollama_forge.security_eval.history import load_runs
@@ -68,6 +70,8 @@ def _render_quick_test_tab(st) -> None:
     st.subheader("Quick test")
     st.caption("Send one prompt, see the raw response and refusal/extraction scoring. Attach an image for VLM testing.")
 
+    qt_use_vlm = st.checkbox("Use local VLM (mlx-vlm)", key="qt_use_vlm")
+
     col_conn, col_model = st.columns(2)
     with col_conn:
         qt_url = st.text_input(
@@ -75,9 +79,15 @@ def _render_quick_test_tab(st) -> None:
             value="http://127.0.0.1:11434",
             key="qt_url",
             help="Ollama, abliterate serve, or any OpenAI-compatible endpoint",
+            disabled=qt_use_vlm,
         )
     with col_model:
-        qt_model = st.text_input("Model", value="llama3.2", key="qt_model")
+        qt_model = st.text_input(
+            "Model",
+            value="llama3.2",
+            key="qt_model",
+            help="HF repo id or local path" if qt_use_vlm else "Model name",
+        )
 
     qt_system = st.text_input("System prompt (optional)", value="", key="qt_system")
     qt_prompt = st.text_area(
@@ -94,8 +104,10 @@ def _render_quick_test_tab(st) -> None:
         key="qt_image",
     )
     qt_image_b64: str | None = None
+    qt_image_bytes: bytes | None = None
     if qt_image_file is not None:
         raw_bytes = qt_image_file.read()
+        qt_image_bytes = raw_bytes
         qt_image_b64 = base64.b64encode(raw_bytes).decode("ascii")
         st.image(raw_bytes, caption=qt_image_file.name, width=300)
 
@@ -111,13 +123,26 @@ def _render_quick_test_tab(st) -> None:
         if not qt_prompt.strip():
             st.warning("Enter a prompt first.")
             return
-        base = (qt_url.strip() or "http://127.0.0.1:11434").rstrip("/")
-        if not base.startswith("http"):
-            base = "http://" + base
 
         with st.spinner("Querying model..."):
             try:
-                if qt_image_b64:
+                if qt_use_vlm:
+                    # Local VLM mode via mlx-vlm
+                    vlm_image_paths: list[str] | None = None
+                    if qt_image_bytes is not None:
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                            tmp.write(qt_image_bytes)
+                        vlm_image_paths = [tmp.name]
+                    response_text, duration = query_model_vlm(
+                        qt_prompt.strip(),
+                        model_path=qt_model.strip(),
+                        image_paths=vlm_image_paths,
+                        system=qt_system.strip() or None,
+                    )
+                elif qt_image_b64:
+                    base = (qt_url.strip() or "http://127.0.0.1:11434").rstrip("/")
+                    if not base.startswith("http"):
+                        base = "http://" + base
                     response_text, duration = query_model_with_image(
                         qt_prompt.strip(),
                         qt_image_b64,
@@ -127,6 +152,9 @@ def _render_quick_test_tab(st) -> None:
                         timeout=120.0,
                     )
                 else:
+                    base = (qt_url.strip() or "http://127.0.0.1:11434").rstrip("/")
+                    if not base.startswith("http"):
+                        base = "http://" + base
                     response_text, duration = query_model(
                         qt_prompt.strip(),
                         base_url=base,
@@ -280,6 +308,16 @@ def _render_run_tab(st) -> None:
         effective_prompt_set_path = prompt_set_path.strip()
     system_prompt = st.text_area("System prompt (optional)", value="", height=80)
 
+    run_use_vlm = st.checkbox("Use local VLM (mlx-vlm)", key="run_use_vlm")
+    run_vlm_model_path = ""
+    if run_use_vlm:
+        run_vlm_model_path = st.text_input(
+            "VLM model path (HF repo id or local path)",
+            value="",
+            key="run_vlm_model_path",
+            help="e.g. mlx-community/Qwen2-VL-2B-Instruct-4bit",
+        )
+
     col_timeout, col_retries, _ = st.columns(3)
     with col_timeout:
         timeout_sec = st.number_input("Request timeout (s)", min_value=5, max_value=600, value=120, step=5)
@@ -347,10 +385,12 @@ def _render_run_tab(st) -> None:
                     progress_bar.progress(
                         (mi + 0.5) / len(models_to_run), text=f"Model {mi + 1}/{len(models_to_run)}: {m}..."
                     )  # noqa: E501
+                vlm_path = run_vlm_model_path.strip() or None if run_use_vlm else None
                 run_meta = run_eval(
                     effective_prompt_set_path,
                     base_url=base,
                     model=m,
+                    vlm_model_path=vlm_path,
                     output_csv=output_csv.strip() or None if not run_multi else None,
                     output_json=output_json.strip() or None if not run_multi else None,
                     save_to_history=save_history,

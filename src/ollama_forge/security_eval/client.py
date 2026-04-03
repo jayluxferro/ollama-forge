@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time as _time
 import urllib.error
 import urllib.request
 
@@ -273,3 +274,65 @@ def query_model_with_image(
     duration = data.get("eval_duration")
     duration_sec = duration / 1e9 if duration is not None else None
     return (text.strip(), duration_sec)
+
+
+def load_vlm_for_eval(model_path: str) -> tuple:
+    """Pre-load a VLM model for batch evaluation. Returns (model, processor)."""
+    from ollama_forge.vlm import vlm_load
+
+    return vlm_load(model_path)
+
+
+def query_model_vlm(
+    prompt: str,
+    *,
+    model_path: str,
+    image_paths: list[str] | None = None,
+    system: str | None = None,
+    timeout: float = 120.0,
+    _loaded_model: tuple | None = None,
+) -> tuple[str, float | None]:
+    """Query a VLM locally using mlx-vlm (no server needed).
+
+    Args:
+        prompt: The text prompt.
+        model_path: HF repo id or local path to the VLM.
+        image_paths: Optional list of image file paths.
+        system: Optional system prompt.
+        timeout: Not used for local inference but kept for API compatibility.
+        _loaded_model: Optional pre-loaded (model, processor) tuple to avoid
+            reloading on every call.
+
+    Returns:
+        Tuple of (response_text, duration_seconds).
+    """
+    from ollama_forge.vlm import vlm_apply_chat_template, vlm_generate, vlm_load
+
+    if _loaded_model is not None:
+        model, processor = _loaded_model
+    else:
+        model, processor = vlm_load(model_path)
+
+    full_prompt = prompt
+    if system:
+        full_prompt = f"{system}\n\n{prompt}"
+
+    num_images = len(image_paths) if image_paths else 0
+    formatted = vlm_apply_chat_template(
+        processor,
+        model.config,
+        full_prompt,
+        num_images=num_images,
+    )
+
+    t0 = _time.monotonic()
+    result = vlm_generate(
+        model,
+        processor,
+        formatted,
+        images=image_paths,
+    )
+    duration = _time.monotonic() - t0
+
+    text = result.get("text", "") if isinstance(result, dict) else str(result)
+    return (text.strip(), duration)
