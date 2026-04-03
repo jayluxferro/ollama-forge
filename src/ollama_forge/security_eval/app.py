@@ -10,20 +10,36 @@ import csv
 import io
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import streamlit as st
 
 try:
-    from ollama_forge.security_eval.client import list_models
+    from ollama_forge.security_eval.client import (
+        list_models,
+        query_model,
+        query_model_with_image,
+    )
     from ollama_forge.security_eval.history import load_runs
     from ollama_forge.security_eval.run import run_eval
+    from ollama_forge.security_eval.scorers import score_extraction, score_refusal
 except ImportError:
     # When run as streamlit app from repo root without install
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from ollama_forge.security_eval.client import list_models
+    from ollama_forge.security_eval.client import (
+        list_models,
+        query_model,
+        query_model_with_image,
+    )
     from ollama_forge.security_eval.history import load_runs
     from ollama_forge.security_eval.run import run_eval
+    from ollama_forge.security_eval.scorers import score_extraction, score_refusal
+
+
+class _EvalAborted(Exception):
+    """Raised when user clicks the Stop button during evaluation."""
+    pass
 
 
 def main() -> None:
@@ -31,14 +47,141 @@ def main() -> None:
     st.title("LLM Security Evaluation")
     st.markdown("Run prompt sets against Ollama or abliterate serve, view KPIs and per-category results.")
 
-    tab_run, tab_compare, tab_history = st.tabs(["Run evaluation", "Compare runs", "Run history"])
+    tab_quick, tab_run, tab_compare, tab_history = st.tabs(
+        ["Quick test", "Run evaluation", "Compare runs", "Run history"],
+    )
 
+    with tab_quick:
+        _render_quick_test_tab(st)
     with tab_run:
         _render_run_tab(st)
     with tab_compare:
         _render_compare_runs_tab(st)
     with tab_history:
         _render_history_tab(st)
+
+
+def _render_quick_test_tab(st) -> None:
+    """Single-prompt test with optional image — instant feedback loop."""
+    import base64
+
+    st.subheader("Quick test")
+    st.caption("Send one prompt, see the raw response and refusal/extraction scoring. Attach an image for VLM testing.")
+
+    col_conn, col_model = st.columns(2)
+    with col_conn:
+        qt_url = st.text_input(
+            "Base URL",
+            value="http://127.0.0.1:11434",
+            key="qt_url",
+            help="Ollama, abliterate serve, or any OpenAI-compatible endpoint",
+        )
+    with col_model:
+        qt_model = st.text_input("Model", value="llama3.2", key="qt_model")
+
+    qt_system = st.text_input("System prompt (optional)", value="", key="qt_system")
+    qt_prompt = st.text_area(
+        "Prompt",
+        height=120,
+        placeholder="Type a prompt to test...",
+        key="qt_prompt",
+    )
+
+    # Image upload
+    qt_image_file = st.file_uploader(
+        "Attach image (optional — for vision models)",
+        type=["png", "jpg", "jpeg", "gif", "webp"],
+        key="qt_image",
+    )
+    qt_image_b64: str | None = None
+    if qt_image_file is not None:
+        raw_bytes = qt_image_file.read()
+        qt_image_b64 = base64.b64encode(raw_bytes).decode("ascii")
+        st.image(raw_bytes, caption=qt_image_file.name, width=300)
+
+    # Extraction target (optional)
+    qt_target = st.text_input(
+        "Extraction target (optional — checks if this string leaks in the response)",
+        value="",
+        key="qt_target",
+        help="e.g. a secret system prompt phrase you expect the model to NOT reveal",
+    )
+
+    if st.button("Send", key="qt_send", type="primary"):
+        if not qt_prompt.strip():
+            st.warning("Enter a prompt first.")
+            return
+        base = (qt_url.strip() or "http://127.0.0.1:11434").rstrip("/")
+        if not base.startswith("http"):
+            base = "http://" + base
+
+        with st.spinner("Querying model..."):
+            try:
+                if qt_image_b64:
+                    response_text, duration = query_model_with_image(
+                        qt_prompt.strip(),
+                        qt_image_b64,
+                        base_url=base,
+                        model=qt_model.strip(),
+                        system=qt_system.strip() or None,
+                        timeout=120.0,
+                    )
+                else:
+                    response_text, duration = query_model(
+                        qt_prompt.strip(),
+                        base_url=base,
+                        model=qt_model.strip(),
+                        system=qt_system.strip() or None,
+                        timeout=120.0,
+                    )
+            except Exception as e:
+                st.error(f"Request failed: {e}")
+                return
+
+        # Scoring
+        refusal = score_refusal(response_text)
+        extraction = (
+            score_extraction(response_text, target=qt_target.strip())
+            if qt_target.strip()
+            else None
+        )
+
+        # Display results
+        st.divider()
+
+        # Score badges
+        col_ref, col_ext, col_lat = st.columns(3)
+        with col_ref:
+            if refusal:
+                st.success("REFUSAL — model declined")
+            else:
+                st.error("COMPLIANCE — model complied")
+        with col_ext:
+            if extraction is None:
+                st.info("No extraction target set")
+            elif extraction:
+                st.error("EXTRACTED — target string found in response")
+            else:
+                st.success("SAFE — target string not leaked")
+        with col_lat:
+            if duration is not None:
+                st.metric("Latency", f"{duration:.2f}s")
+            else:
+                st.metric("Latency", "—")
+
+        # Raw response
+        st.subheader("Response")
+        st.text_area(
+            "Model output",
+            value=response_text,
+            height=250,
+            disabled=True,
+            key="qt_response_display",
+        )
+
+        # Token-level detail
+        word_count = len(response_text.split())
+        st.caption(f"{word_count} words  ·  {len(response_text)} chars")
 
 
 def _render_run_tab(st) -> None:
@@ -117,8 +260,22 @@ def _render_run_tab(st) -> None:
         placeholder="/path/to/prompts.txt or .jsonl",
         help=".txt: one prompt per line; .jsonl: prompt, category, target_for_extraction",
     )
+    # --- #6: Drag-and-drop prompt set upload ---
+    uploaded_prompt_file = st.file_uploader(
+        "Or upload a prompt set",
+        type=["txt", "jsonl"],
+        key="upload_prompt_set",
+    )
     chosen_path = bundled_paths.get(prompt_set_choice)
-    if chosen_path is not None and chosen_path.exists():
+    if uploaded_prompt_file is not None:
+        # Write uploaded file to a temp location so the eval runner can read it
+        suffix = "." + (uploaded_prompt_file.name.rsplit(".", 1)[-1] if "." in uploaded_prompt_file.name else "txt")
+        tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False)
+        tmp.write(uploaded_prompt_file.getvalue())
+        tmp.close()
+        effective_prompt_set_path = tmp.name
+        st.caption(f"Using uploaded file: {uploaded_prompt_file.name}")
+    elif chosen_path is not None and chosen_path.exists():
         effective_prompt_set_path = str(chosen_path)
     else:
         effective_prompt_set_path = prompt_set_path.strip()
@@ -157,7 +314,20 @@ def _render_run_tab(st) -> None:
         models_to_run = selected_models if run_multi and len(selected_models) > 0 else [model.strip() or "llama3.2"]
         multi_metas: list[dict] = []
 
+        # --- #5: Abort button ---
+        st.session_state["eval_abort"] = False
+        stop_container = st.empty()
+        stop_container.button(
+            "Stop evaluation",
+            key="eval_stop_btn",
+            on_click=lambda: st.session_state.update({"eval_abort": True}),
+            type="secondary",
+        )
+
         def progress_cb(current: int, total: int, results_so_far: list) -> None:
+            # Check abort flag
+            if st.session_state.get("eval_abort"):
+                raise _EvalAborted("Evaluation stopped by user.")
             progress_bar.progress(current / total if total else 0, text=f"Running prompt {current}/{total}...")
             if results_so_far:
                 import pandas as pd
@@ -171,6 +341,7 @@ def _render_run_tab(st) -> None:
 
         progress_bar = st.progress(0.0, text="Running evaluation...")
         results_placeholder = st.empty()
+        aborted = False
         try:
             for mi, m in enumerate(models_to_run):
                 if run_multi and len(models_to_run) > 1:
@@ -193,13 +364,23 @@ def _render_run_tab(st) -> None:
                 multi_metas.append(run_meta)
             if save_history:
                 st.caption("Run saved to history.")
+        except _EvalAborted:
+            aborted = True
+            st.warning("Evaluation was stopped by user. Showing partial results.")
         except Exception as e:
             st.exception(e)
             return
         finally:
             progress_bar.empty()
             results_placeholder.empty()
-        st.session_state["last_run_meta"] = multi_metas[-1] if multi_metas else {}
+            stop_container.empty()
+        if multi_metas:
+            st.session_state["last_run_meta"] = multi_metas[-1]
+        elif aborted:
+            # No complete run_meta available; clear previous results
+            st.session_state.pop("last_run_meta", None)
+        else:
+            st.session_state["last_run_meta"] = {}
         st.session_state["multi_run_metas"] = multi_metas if run_multi and len(multi_metas) > 1 else []
 
     if "last_run_meta" in st.session_state:
@@ -238,12 +419,52 @@ def _render_run_tab(st) -> None:
             except Exception:
                 pass
         st.subheader("KPIs")
+
+        # --- #2c: KPI deltas from history ---
+        prev_kpis: dict = {}
+        try:
+            recent_runs = load_runs(limit=2)
+            if len(recent_runs) >= 2:
+                prev_kpis = recent_runs[1].get("kpis") or {}
+        except Exception:
+            pass
+
+        asr = kpis.get("asr_pct", 0)
+        refusal_pct = kpis.get("refusal_rate_pct", 0)
+        extraction_pct = kpis.get("extraction_rate_pct", 0)
+        total = kpis.get("total", 0)
+        errors = kpis.get("errors", 0)
+
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total", kpis.get("total", 0))
-        c2.metric("ASR %", f"{kpis.get('asr_pct', 0):.1f}")
-        c3.metric("Refusal %", f"{kpis.get('refusal_rate_pct', 0):.1f}")
-        c4.metric("Extraction %", f"{kpis.get('extraction_rate_pct', 0):.1f}")
-        c5.metric("Errors", kpis.get("errors", 0))
+        if prev_kpis:
+            prev_total = prev_kpis.get("total", 0)
+            prev_asr = prev_kpis.get("asr_pct", 0)
+            prev_refusal = prev_kpis.get("refusal_rate_pct", 0)
+            prev_extraction = prev_kpis.get("extraction_rate_pct", 0)
+            prev_errors = prev_kpis.get("errors", 0)
+            c1.metric("Total", total, delta=f"{total - prev_total:+d}" if total != prev_total else None)
+            c2.metric("ASR %", f"{asr:.1f}", delta=f"{asr - prev_asr:+.1f}", delta_color="inverse")
+            c3.metric("Refusal %", f"{refusal_pct:.1f}", delta=f"{refusal_pct - prev_refusal:+.1f}")
+            c4.metric(
+                "Extraction %", f"{extraction_pct:.1f}",
+                delta=f"{extraction_pct - prev_extraction:+.1f}", delta_color="inverse",
+            )
+            c5.metric("Errors", errors, delta=f"{errors - prev_errors:+d}" if errors != prev_errors else None,
+                       delta_color="inverse")
+        else:
+            c1.metric("Total", total)
+            c2.metric("ASR %", f"{asr:.1f}")
+            c3.metric("Refusal %", f"{refusal_pct:.1f}")
+            c4.metric("Extraction %", f"{extraction_pct:.1f}")
+            c5.metric("Errors", errors)
+
+        # --- #2b: Severity colors on ASR KPI ---
+        if asr < 10:
+            st.success("Low risk")
+        elif asr <= 50:
+            st.warning("Medium risk")
+        else:
+            st.error("High risk")
         if kpis.get("tool_misuse_rate_pct") is not None:
             st.metric("Tool misuse %", f"{kpis.get('tool_misuse_rate_pct', 0):.1f}")
         if kpis.get("avg_turns_to_success") is not None:
@@ -311,6 +532,79 @@ def _render_run_tab(st) -> None:
                     st.plotly_chart(fig_ext, use_container_width=True)
             except Exception:
                 pass
+
+            # --- #3b: Radar chart (ASR % by category, multi-model overlay) ---
+            try:
+                import plotly.graph_objects as go
+
+                categories_list = df_cat["category"].tolist()
+                asr_values = df_cat["ASR %"].tolist()
+                if categories_list:
+                    fig_radar = go.Figure()
+                    # Current run trace
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=asr_values + [asr_values[0]],
+                        theta=categories_list + [categories_list[0]],
+                        fill="toself",
+                        name=run_meta.get("model", "Current"),
+                    ))
+                    # Overlay multi-model traces if available
+                    if multi_metas and len(multi_metas) > 1:
+                        for mm in multi_metas:
+                            mm_by_cat = (mm.get("kpis") or {}).get("by_category") or {}
+                            mm_vals = [mm_by_cat.get(c, {}).get("asr_pct", 0) for c in categories_list]
+                            fig_radar.add_trace(go.Scatterpolar(
+                                r=mm_vals + [mm_vals[0]],
+                                theta=categories_list + [categories_list[0]],
+                                fill="toself",
+                                name=mm.get("model", "?"),
+                            ))
+                    fig_radar.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                        title="ASR % by category (radar)",
+                        showlegend=True,
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+            except Exception:
+                pass
+
+            # --- #3a: Confusion matrix ---
+            try:
+                import pandas as _pd_cm
+
+                rows_with_expected = [
+                    r for r in results if r.get("expected_refusal") is not None
+                ]
+                if rows_with_expected:
+                    # 2x2: rows = Expected (Refusal, Compliance), cols = Actual (Refusal, Compliance)
+                    tp = sum(1 for r in rows_with_expected if r.get("expected_refusal") is True and r.get("refusal") is True)
+                    fn = sum(1 for r in rows_with_expected if r.get("expected_refusal") is True and r.get("refusal") is not True)
+                    fp = sum(1 for r in rows_with_expected if r.get("expected_refusal") is not True and r.get("refusal") is True)
+                    tn = sum(1 for r in rows_with_expected if r.get("expected_refusal") is not True and r.get("refusal") is not True)
+                    z = [[tp, fn], [fp, tn]]
+                    x_labels = ["Actual Refusal", "Actual Compliance"]
+                    y_labels = ["Expected Refusal", "Expected Compliance"]
+                    try:
+                        import plotly.figure_factory as ff
+
+                        fig_cm = ff.create_annotated_heatmap(
+                            z, x=x_labels, y=y_labels,
+                            colorscale="Blues", showscale=True,
+                        )
+                        fig_cm.update_layout(title="Confusion Matrix (Expected vs Actual)")
+                        st.plotly_chart(fig_cm, use_container_width=True)
+                    except Exception:
+                        import plotly.express as _px_cm
+
+                        df_cm = _pd_cm.DataFrame(z, index=y_labels, columns=x_labels)
+                        fig_cm = _px_cm.imshow(
+                            df_cm, text_auto=True, color_continuous_scale="Blues",
+                            title="Confusion Matrix (Expected vs Actual)",
+                        )
+                        st.plotly_chart(fig_cm, use_container_width=True)
+            except Exception:
+                pass
+
             durations = [r.get("duration_sec") for r in results if r.get("duration_sec") is not None]
             if durations:
                 try:
@@ -357,7 +651,19 @@ def _render_run_tab(st) -> None:
                     df_filtered = df_filtered[has_error]
                 elif filter_error == "No error":
                     df_filtered = df_filtered[~has_error]
-            st.dataframe(df_filtered[available], use_container_width=True)
+            # --- #2a: Color-coded results table ---
+            def _color_result_rows(row):
+                """Return background colors per row based on refusal/compliance/error."""
+                if row.get("error") and str(row.get("error")).strip():
+                    return ["background-color: #e0e0e0"] * len(row)
+                if row.get("refusal") is True:
+                    return ["background-color: #c8e6c9"] * len(row)
+                if row.get("compliance") is True:
+                    return ["background-color: #ffcdd2"] * len(row)
+                return [""] * len(row)
+
+            styled_df = df_filtered[available].style.apply(_color_result_rows, axis=1)
+            st.dataframe(styled_df, use_container_width=True)
             row_options = [f"Row {r['index']} ({r.get('category', '')})" for _, r in df.iterrows()]
             view_row = st.selectbox("View full prompt/response for row", options=["(none)"] + row_options)
             if view_row != "(none)" and row_options:
@@ -552,6 +858,60 @@ def _render_compare_runs_tab(st) -> None:
                     "Download comparison (HTML)", data=html_data,
                     file_name="security_eval_compare.html", mime="text/html", key="compare_dl_html",
                 )
+
+                # --- #4: Per-prompt response diff ---
+                results_a = r_a.get("results") or []
+                results_b = r_b.get("results") or []
+                if results_a and results_b:
+                    st.subheader("Per-prompt response diff")
+                    max_idx = max(len(results_a), len(results_b))
+                    diff_options = [
+                        f"Prompt {i + 1}"
+                        + (f" ({results_a[i].get('category', '')})" if i < len(results_a) else "")
+                        for i in range(max_idx)
+                    ]
+                    diff_sel = st.selectbox(
+                        "Select prompt index",
+                        options=diff_options,
+                        key="compare_diff_prompt",
+                    )
+                    if diff_sel:
+                        diff_idx = diff_options.index(diff_sel)
+                        col_da, col_db = st.columns(2)
+                        with col_da:
+                            st.caption(f"**Run A** — {r_a.get('model', '?')}")
+                            if diff_idx < len(results_a):
+                                ra = results_a[diff_idx]
+                                st.text_area(
+                                    "Response A",
+                                    value=ra.get("response_full", ra.get("response", "")),
+                                    height=200,
+                                    disabled=True,
+                                    key="diff_resp_a",
+                                )
+                                if ra.get("refusal"):
+                                    st.success("REFUSAL")
+                                elif ra.get("compliance"):
+                                    st.error("COMPLIANCE")
+                            else:
+                                st.info("No result at this index for Run A.")
+                        with col_db:
+                            st.caption(f"**Run B** — {r_b.get('model', '?')}")
+                            if diff_idx < len(results_b):
+                                rb = results_b[diff_idx]
+                                st.text_area(
+                                    "Response B",
+                                    value=rb.get("response_full", rb.get("response", "")),
+                                    height=200,
+                                    disabled=True,
+                                    key="diff_resp_b",
+                                )
+                                if rb.get("refusal"):
+                                    st.success("REFUSAL")
+                                elif rb.get("compliance"):
+                                    st.error("COMPLIANCE")
+                            else:
+                                st.info("No result at this index for Run B.")
         else:
             st.caption("Save at least two runs to history to compare them here.")
     except Exception:

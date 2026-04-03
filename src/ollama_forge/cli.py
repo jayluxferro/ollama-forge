@@ -3851,6 +3851,278 @@ def _find_in_hf_cache(repo_id: str) -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# VLM commands (mlx-vlm vision-language models)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_vlm_generate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Generate text from a vision-language model with optional image/audio."""
+    try:
+        from ollama_forge.vlm import (
+            is_vlm_available,
+            vlm_apply_chat_template,
+            vlm_generate,
+            vlm_load,
+        )
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    model_path = args.model
+    prompt = args.prompt
+    images = getattr(args, "image", None) or []
+    audio = getattr(args, "audio", None)
+    max_tokens = getattr(args, "max_tokens", 256)
+    temperature = getattr(args, "temperature", 0.0)
+    verbose = getattr(args, "verbose", False)
+    adapter_path = getattr(args, "adapter_path", None)
+
+    extra_kwargs = {}
+    top_p = getattr(args, "top_p", None)
+    if top_p is not None:
+        extra_kwargs["top_p"] = top_p
+    kv_bits = getattr(args, "kv_bits", None)
+    if kv_bits is not None:
+        extra_kwargs["kv_bits"] = kv_bits
+    if getattr(args, "enable_thinking", False):
+        extra_kwargs["enable_thinking"] = True
+    thinking_budget = getattr(args, "thinking_budget", None)
+    if thinking_budget is not None:
+        extra_kwargs["thinking_budget"] = thinking_budget
+
+    print(f"Loading model: {model_path} ...", file=sys.stderr)
+    try:
+        model, processor = vlm_load(model_path, adapter_path=adapter_path)
+    except Exception as exc:
+        print_actionable_error(
+            f"Failed to load model: {exc}",
+            next_steps=[
+                "Check the model path or HuggingFace repo ID",
+                "Ensure you have enough memory for the model",
+            ],
+        )
+        return 1
+
+    num_images = len(images) if images else 0
+    num_audios = 1 if audio else 0
+    formatted_prompt = vlm_apply_chat_template(
+        processor, model.config, prompt,
+        num_images=num_images, num_audios=num_audios,
+    )
+
+    result = vlm_generate(
+        model, processor, formatted_prompt,
+        images=images or None, audio=audio,
+        max_tokens=max_tokens, temperature=temperature,
+        **extra_kwargs,
+    )
+
+    print(result["text"])
+
+    if verbose:
+        stats_parts = []
+        if result.get("prompt_tps") is not None:
+            stats_parts.append(f"Prompt: {result['prompt_tps']:.1f} tok/s")
+        if result.get("generation_tps") is not None:
+            stats_parts.append(f"Generation: {result['generation_tps']:.1f} tok/s")
+        if result.get("peak_memory") is not None:
+            stats_parts.append(f"Peak memory: {result['peak_memory']:.2f} GB")
+        if stats_parts:
+            print(f"\n[{' | '.join(stats_parts)}]", file=sys.stderr)
+    return 0
+
+
+def _cmd_vlm_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Interactive chat with a vision-language model."""
+    try:
+        from ollama_forge.vlm import (
+            is_vlm_available,
+            vlm_apply_chat_template,
+            vlm_load,
+            vlm_stream_generate,
+        )
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    model_path = args.model
+    max_tokens = getattr(args, "max_tokens", 512)
+    temperature = getattr(args, "temperature", 0.7)
+    system_prompt = getattr(args, "system", None)
+    adapter_path = getattr(args, "adapter_path", None)
+
+    extra_kwargs = {}
+    kv_bits = getattr(args, "kv_bits", None)
+    if kv_bits is not None:
+        extra_kwargs["kv_bits"] = kv_bits
+
+    print(f"Loading model: {model_path} ...", file=sys.stderr)
+    try:
+        model, processor = vlm_load(model_path, adapter_path=adapter_path)
+    except Exception as exc:
+        print_actionable_error(
+            f"Failed to load model: {exc}",
+            next_steps=[
+                "Check the model path or HuggingFace repo ID",
+                "Ensure you have enough memory for the model",
+            ],
+        )
+        return 1
+
+    print("Ready. Commands: /image <path>, /audio <path>, /quit", file=sys.stderr)
+    if system_prompt:
+        print(f"System: {system_prompt}", file=sys.stderr)
+    print()
+
+    current_images: list[str] = []
+    current_audio: str | None = None
+
+    try:
+        while True:
+            try:
+                user_input = input("You: ")
+            except EOFError:
+                break
+
+            stripped = user_input.strip()
+            if not stripped:
+                continue
+
+            if stripped.lower() in ("/quit", "/exit"):
+                break
+
+            if stripped.lower().startswith("/image "):
+                img_path = stripped[7:].strip()
+                current_images.append(img_path)
+                print(f"  [Attached image: {img_path}]", file=sys.stderr)
+                continue
+
+            if stripped.lower().startswith("/audio "):
+                audio_path = stripped[7:].strip()
+                current_audio = audio_path
+                print(f"  [Attached audio: {audio_path}]", file=sys.stderr)
+                continue
+
+            # Build prompt
+            prompt_text = stripped
+            if system_prompt:
+                prompt_text = f"{system_prompt}\n\n{prompt_text}"
+
+            num_images = len(current_images)
+            num_audios = 1 if current_audio else 0
+            formatted_prompt = vlm_apply_chat_template(
+                processor, model.config, prompt_text,
+                num_images=num_images, num_audios=num_audios,
+            )
+
+            print("Assistant: ", end="", flush=True)
+            for token in vlm_stream_generate(
+                model, processor, formatted_prompt,
+                images=current_images or None,
+                audio=current_audio,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **extra_kwargs,
+            ):
+                print(token, end="", flush=True)
+            print()
+
+            # Clear attachments after each turn
+            current_images = []
+            current_audio = None
+
+    except KeyboardInterrupt:
+        print("\nBye.")
+    return 0
+
+
+def _cmd_vlm_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Serve a VLM via mlx-vlm's built-in OpenAI-compatible server."""
+    try:
+        from ollama_forge.vlm import is_vlm_available
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    model_path = args.model
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 8080)
+    adapter_path = getattr(args, "adapter_path", None)
+
+    cmd = [
+        sys.executable, "-m", "mlx_vlm.server",
+        "--model", model_path,
+        "--host", host,
+        "--port", str(port),
+    ]
+    kv_bits = getattr(args, "kv_bits", None)
+    if kv_bits is not None:
+        cmd += ["--kv-bits", str(kv_bits)]
+    if adapter_path:
+        cmd += ["--adapter-path", adapter_path]
+
+    base_url = f"http://{host}:{port}"
+    print(f"Starting mlx-vlm server: {shlex.join(cmd)}", file=sys.stderr)
+    print(f"Endpoint: {base_url}/v1/chat/completions", file=sys.stderr)
+
+    try:
+        proc = subprocess.Popen(cmd)
+    except FileNotFoundError:
+        print_actionable_error(
+            "Could not execute mlx_vlm.server",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print("\nShutting down ...", file=sys.stderr)
+        proc.terminate()
+        proc.wait(timeout=10)
+    return proc.returncode or 0
+
+
 def _cmd_turboquant_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Quantize a HF model using TurboQuant and save as .tqf."""
     try:
@@ -10943,6 +11215,74 @@ def main() -> int:
     )
     p_ds_pipeline.set_defaults(handler=_cmd_downsize_pipeline)
 
+    # vlm (vision-language model inference via mlx-vlm)
+    p_vlm = subparsers.add_parser(
+        "vlm",
+        help="Vision Language Model inference on Apple Silicon (mlx-vlm)",
+    )
+    vlm_sub = p_vlm.add_subparsers(dest="vlm_command")
+
+    # vlm generate
+    p_vlm_gen = vlm_sub.add_parser(
+        "generate",
+        help="Generate text from a vision-language model",
+    )
+    p_vlm_gen.add_argument("--model", required=True,
+                           help="HF repo id or local path (e.g. mlx-community/Qwen2-VL-2B-Instruct-4bit)")
+    p_vlm_gen.add_argument("--prompt", required=True, help="Text prompt")
+    p_vlm_gen.add_argument("--image", action="append", default=None,
+                           help="Image path or URL (can be repeated)")
+    p_vlm_gen.add_argument("--audio", default=None, help="Audio file path")
+    p_vlm_gen.add_argument("--max-tokens", type=int, default=256,
+                           help="Max tokens to generate (default: 256)")
+    p_vlm_gen.add_argument("--temperature", type=float, default=0.0,
+                           help="Sampling temperature (default: 0.0)")
+    p_vlm_gen.add_argument("--top-p", type=float, default=None,
+                           help="Nucleus sampling threshold (default: 1.0)")
+    p_vlm_gen.add_argument("--kv-bits", type=int, default=None,
+                           help="KV cache quantization bits")
+    p_vlm_gen.add_argument("--enable-thinking", action="store_true", default=False,
+                           help="Enable chain-of-thought mode")
+    p_vlm_gen.add_argument("--thinking-budget", type=int, default=None,
+                           help="Max thinking tokens")
+    p_vlm_gen.add_argument("--adapter-path", default=None, help="LoRA adapter path")
+    p_vlm_gen.add_argument("--verbose", action="store_true", default=False,
+                           help="Show timing stats")
+    p_vlm_gen.set_defaults(handler=_cmd_vlm_generate)
+
+    # vlm chat
+    p_vlm_chat = vlm_sub.add_parser(
+        "chat",
+        help="Interactive chat with a vision-language model",
+    )
+    p_vlm_chat.add_argument("--model", required=True,
+                            help="HF repo id or local path")
+    p_vlm_chat.add_argument("--max-tokens", type=int, default=512,
+                            help="Max tokens per response (default: 512)")
+    p_vlm_chat.add_argument("--temperature", type=float, default=0.7,
+                            help="Sampling temperature (default: 0.7)")
+    p_vlm_chat.add_argument("--system", default=None, help="System prompt")
+    p_vlm_chat.add_argument("--kv-bits", type=int, default=None,
+                            help="KV cache quantization bits")
+    p_vlm_chat.add_argument("--adapter-path", default=None, help="LoRA adapter path")
+    p_vlm_chat.set_defaults(handler=_cmd_vlm_chat)
+
+    # vlm serve
+    p_vlm_serve = vlm_sub.add_parser(
+        "serve",
+        help="Serve a VLM via OpenAI-compatible API (mlx-vlm server)",
+    )
+    p_vlm_serve.add_argument("--model", required=True,
+                             help="HF repo id or local path")
+    p_vlm_serve.add_argument("--host", default="127.0.0.1",
+                             help="Bind host (default: 127.0.0.1)")
+    p_vlm_serve.add_argument("--port", type=int, default=8080,
+                             help="Port (default: 8080)")
+    p_vlm_serve.add_argument("--kv-bits", type=int, default=None,
+                             help="KV cache quantization bits")
+    p_vlm_serve.add_argument("--adapter-path", default=None, help="LoRA adapter path")
+    p_vlm_serve.set_defaults(handler=_cmd_vlm_serve)
+
     # turboquant (TurboQuant quantization, serving, and inference)
     p_tq = subparsers.add_parser(
         "turboquant",
@@ -11042,6 +11382,9 @@ def main() -> int:
         return 0
     if parsed.command == "security-eval" and not getattr(parsed, "security_eval_command", None):
         p_security_eval.print_help()
+        return 0
+    if parsed.command == "vlm" and not getattr(parsed, "vlm_command", None):
+        p_vlm.print_help()
         return 0
     if parsed.command == "turboquant" and not getattr(parsed, "turboquant_command", None):
         p_tq.print_help()

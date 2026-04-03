@@ -50,6 +50,15 @@ def is_mlx_available() -> bool:
         return False
 
 
+def is_vlm_available() -> bool:
+    """Check if mlx-vlm is installed for vision model support."""
+    try:
+        import mlx_vlm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def is_triton_available() -> bool:
     """Check if Triton (GPU kernel compiler) is installed."""
     try:
