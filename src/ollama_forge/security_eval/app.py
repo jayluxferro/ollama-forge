@@ -270,10 +270,9 @@ def _render_run_tab(st) -> None:
     if uploaded_prompt_file is not None:
         # Write uploaded file to a temp location so the eval runner can read it
         suffix = "." + (uploaded_prompt_file.name.rsplit(".", 1)[-1] if "." in uploaded_prompt_file.name else "txt")
-        tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False)
-        tmp.write(uploaded_prompt_file.getvalue())
-        tmp.close()
-        effective_prompt_set_path = tmp.name
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False) as tmp:
+            tmp.write(uploaded_prompt_file.getvalue())
+            effective_prompt_set_path = tmp.name
         st.caption(f"Using uploaded file: {uploaded_prompt_file.name}")
     elif chosen_path is not None and chosen_path.exists():
         effective_prompt_set_path = str(chosen_path)
@@ -560,7 +559,7 @@ def _render_run_tab(st) -> None:
                                 name=mm.get("model", "?"),
                             ))
                     fig_radar.update_layout(
-                        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+                        polar={"radialaxis": {"visible": True, "range": [0, 100]}},
                         title="ASR % by category (radar)",
                         showlegend=True,
                     )
@@ -577,10 +576,22 @@ def _render_run_tab(st) -> None:
                 ]
                 if rows_with_expected:
                     # 2x2: rows = Expected (Refusal, Compliance), cols = Actual (Refusal, Compliance)
-                    tp = sum(1 for r in rows_with_expected if r.get("expected_refusal") is True and r.get("refusal") is True)
-                    fn = sum(1 for r in rows_with_expected if r.get("expected_refusal") is True and r.get("refusal") is not True)
-                    fp = sum(1 for r in rows_with_expected if r.get("expected_refusal") is not True and r.get("refusal") is True)
-                    tn = sum(1 for r in rows_with_expected if r.get("expected_refusal") is not True and r.get("refusal") is not True)
+                    tp = sum(
+                        1 for r in rows_with_expected
+                        if r.get("expected_refusal") is True and r.get("refusal") is True
+                    )
+                    fn = sum(
+                        1 for r in rows_with_expected
+                        if r.get("expected_refusal") is True and r.get("refusal") is not True
+                    )
+                    fp = sum(
+                        1 for r in rows_with_expected
+                        if r.get("expected_refusal") is not True and r.get("refusal") is True
+                    )
+                    tn = sum(
+                        1 for r in rows_with_expected
+                        if r.get("expected_refusal") is not True and r.get("refusal") is not True
+                    )
                     z = [[tp, fn], [fp, tn]]
                     x_labels = ["Actual Refusal", "Actual Compliance"]
                     y_labels = ["Expected Refusal", "Expected Compliance"]

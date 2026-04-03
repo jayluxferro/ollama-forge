@@ -11,7 +11,6 @@ from unittest import mock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers to create a fake mlx_vlm module for mocking
 # ---------------------------------------------------------------------------
@@ -242,7 +241,6 @@ class TestVlmCliParsing:
     @pytest.fixture()
     def parse(self):
         """Return a helper that parses CLI args and returns the namespace."""
-        from ollama_forge.cli import main
         import argparse
 
         # We just need the parser, not to run main().
@@ -250,6 +248,8 @@ class TestVlmCliParsing:
         # with --help captured, but let's just test parse_args directly.
         # We'll import the parser by partially running main.
         from unittest.mock import patch
+
+        from ollama_forge.cli import main
 
         captured_parser = {}
 
@@ -263,11 +263,9 @@ class TestVlmCliParsing:
             try:
                 main.__wrapped__ if hasattr(main, "__wrapped__") else main
                 # Call main with a known command to capture the parser
-                with patch("sys.argv", ["ollama-forge", "vlm"]):
-                    try:
-                        main()
-                    except SystemExit:
-                        pass
+                import contextlib
+                with patch("sys.argv", ["ollama-forge", "vlm"]), contextlib.suppress(SystemExit):
+                    main()
 
             except Exception:
                 pass
@@ -367,8 +365,9 @@ class TestVlmCliHandlers:
                 sys.modules[name] = val
 
     def test_vlm_generate_handler(self, capsys):
-        from ollama_forge.cli import _cmd_vlm_generate
         import argparse
+
+        from ollama_forge.cli import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -390,8 +389,9 @@ class TestVlmCliHandlers:
         assert "Generated text" in captured.out
 
     def test_vlm_generate_handler_verbose(self, capsys):
-        from ollama_forge.cli import _cmd_vlm_generate
         import argparse
+
+        from ollama_forge.cli import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -417,8 +417,9 @@ class TestVlmCliHandlers:
         sys.modules["mlx_vlm"] = None
         sys.modules.pop("ollama_forge.vlm", None)
 
-        from ollama_forge.cli import _cmd_vlm_generate
         import argparse
+
+        from ollama_forge.cli import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -446,8 +447,9 @@ class TestVlmCliHandlers:
         sys.modules["mlx_vlm"] = None
         sys.modules.pop("ollama_forge.vlm", None)
 
-        from ollama_forge.cli import _cmd_vlm_serve
         import argparse
+
+        from ollama_forge.cli import _cmd_vlm_serve
 
         args = argparse.Namespace(
             model="fake/model",
@@ -468,8 +470,9 @@ class TestVlmCliHandlers:
         sys.modules["mlx_vlm"] = None
         sys.modules.pop("ollama_forge.vlm", None)
 
-        from ollama_forge.cli import _cmd_vlm_chat
         import argparse
+
+        from ollama_forge.cli import _cmd_vlm_chat
 
         args = argparse.Namespace(
             model="fake/model",
