@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from ollama_forge.abliterate_proxy import _normalize_message, _parse_tool_calls
 from ollama_forge.chat_util import ollama_tools_to_hf
-from ollama_forge.turboquant_text import ReasoningScrubber, clean_generated_text, _boundary_markers
+from ollama_forge.turboquant_text import ReasoningScrubber, _boundary_markers, clean_generated_text
 
 # ---------------------------------------------------------------------------
 # Generation config — framework-independent dataclass so we don't need

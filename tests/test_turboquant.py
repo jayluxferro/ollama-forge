@@ -524,8 +524,8 @@ class TestOutlierTurboQuant:
 # ---------------------------------------------------------------------------
 
 from ollama_forge.turboquant import (  # noqa: E402
-    LayerAdaptivePolicy,
     LayerAdaptiveKVCacheCompressor,
+    LayerAdaptivePolicy,
     TemporalDecayManager,
 )
 
@@ -665,7 +665,7 @@ class TestTemporalDecayManager:
         indices, norms = pq.quantize(x)
 
         # Steps 1-3 should not trigger decay
-        for step in range(3):
+        for _step in range(3):
             new_idx, new_norms, did_decay = decay.maybe_decay(indices, norms, total_seq_len=32)
             assert not did_decay
 
@@ -681,7 +681,7 @@ class TestTemporalDecayManager:
         indices, norms = pq.quantize(x)
 
         # Run 4 steps to trigger first decay
-        for step in range(4):
+        for _step in range(4):
             new_idx, new_norms, did_decay = decay.maybe_decay(
                 indices, norms, total_seq_len=32, recent_window=4,
             )
@@ -700,7 +700,7 @@ class TestTemporalDecayManager:
         indices, norms = pq.quantize(x)
 
         # Run enough steps to decay everything eligible
-        for step in range(10):
+        for _step in range(10):
             indices, norms, _ = decay.maybe_decay(
                 indices, norms, total_seq_len=20, recent_window=2,
             )
@@ -721,7 +721,7 @@ class TestTemporalDecayManager:
         indices, norms = pq.quantize(x)
 
         # recent_window=8 protects last 8 positions
-        for step in range(10):
+        for _step in range(10):
             indices, norms, _ = decay.maybe_decay(
                 indices, norms, total_seq_len=16, recent_window=8,
             )

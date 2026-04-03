@@ -30,10 +30,12 @@ from ollama_forge.turboquant import (
     LayerAdaptivePolicy,
     QuantizedTensor,
     TemporalDecayManager,
-    TurboQuant as TurboQuantQuantizer,
     TurboQuantMSE,
     _layer_adaptive_mode,
     dequantize_tensor,
+)
+from ollama_forge.turboquant import (
+    TurboQuant as TurboQuantQuantizer,
 )
 from ollama_forge.turboquant_pipeline import TurboQuantModel, load_tqf
 
@@ -688,10 +690,7 @@ class TurboQuantTransformer:
         # KV caches — per-layer bit-width from policy
         self.kv_caches: list[KVCache] = []
         for layer_idx in range(self.cfg.num_hidden_layers):
-            if self._layer_policy is not None:
-                layer_bits = self._layer_policy.kv_bits(layer_idx)
-            else:
-                layer_bits = effective_kv_bits
+            layer_bits = self._layer_policy.kv_bits(layer_idx) if self._layer_policy is not None else effective_kv_bits
 
             cache = KVCache(
                 max_len=self.cfg.max_position_embeddings,
