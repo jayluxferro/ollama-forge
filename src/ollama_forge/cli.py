@@ -4170,6 +4170,56 @@ def _cmd_vlm_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     return proc.returncode or 0
 
 
+def _cmd_vlm_chat_ui(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Launch the mlx-vlm Gradio chat UI for visual interaction with a VLM."""
+    try:
+        from ollama_forge.vlm import is_vlm_available
+    except ImportError as exc:
+        print_actionable_error(
+            f"Missing dependency: {exc}",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    if not is_vlm_available():
+        print_actionable_error(
+            "mlx-vlm is not installed",
+            next_steps=[
+                "Install with: pip install 'mlx-vlm>=0.4.3'",
+                "Requires Apple Silicon (M1/M2/M3/M4)",
+            ],
+        )
+        return 1
+
+    model_path = args.model
+
+    cmd = [sys.executable, "-m", "mlx_vlm.chat_ui", "--model", model_path]
+
+    print(f"Launching Gradio chat UI for {model_path} ...", file=sys.stderr)
+    print("The browser should open automatically. Press Ctrl+C to stop.", file=sys.stderr)
+
+    try:
+        proc = subprocess.Popen(cmd)
+    except FileNotFoundError:
+        print_actionable_error(
+            "Could not execute mlx_vlm.chat_ui",
+            next_steps=["Install mlx-vlm: pip install 'mlx-vlm>=0.4.3'"],
+        )
+        return 1
+
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print("\nShutting down ...", file=sys.stderr)
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return proc.returncode or 0
+
+
 def _cmd_vlm_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Convert a HuggingFace VLM to MLX format."""
     try:
@@ -11513,6 +11563,15 @@ def main() -> int:
                              help="KV cache quantization bits")
     p_vlm_serve.add_argument("--adapter-path", default=None, help="LoRA adapter path")
     p_vlm_serve.set_defaults(handler=_cmd_vlm_serve)
+
+    # vlm chat-ui
+    p_vlm_chat_ui = vlm_sub.add_parser(
+        "chat-ui",
+        help="Launch Gradio web UI for visual VLM chat (image drag-and-drop)",
+    )
+    p_vlm_chat_ui.add_argument("--model", required=True,
+                               help="HF repo id or local path")
+    p_vlm_chat_ui.set_defaults(handler=_cmd_vlm_chat_ui)
 
     # vlm convert
     p_vlm_convert = vlm_sub.add_parser(

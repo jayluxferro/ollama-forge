@@ -80,6 +80,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | Chat with a running server | `chat [--base-url http://127.0.0.1:11434] [--system "..."] [--temperature 0.7]` |
 | VLM generate (image+text) | `vlm generate --model <model> --prompt "..." --image photo.jpg` |
 | VLM interactive chat | `vlm chat --model <model> [--system "..."]` |
+| VLM Gradio web UI | `vlm chat-ui --model <model>` |
 | VLM OpenAI-compatible server | `vlm serve --model <model> [--port 8080]` |
 | VLM convert HF → MLX | `vlm convert --hf-path <repo_id> [--quantize --q-bits 4]` |
 | VLM quantize | `vlm quantize --model <repo_id> --bits 4 [--group-size 64]` |
@@ -94,7 +95,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
 - **turboquant** has subcommands: `quantize`, `serve`, `chat`, `info`. Supports asymmetric K/V cache compression, layer-adaptive precision (`TURBO_LAYER_ADAPTIVE` env var), and temporal decay for long contexts. See [TurboQuant](TurboQuant) for details.
-- **vlm** has subcommands: `generate`, `chat`, `serve`, `convert`, `quantize`, `finetune`. Requires Apple Silicon (mlx-vlm). See [VLM](VLM) for details.
+- **vlm** has subcommands: `generate`, `chat`, `chat-ui`, `serve`, `convert`, `quantize`, `finetune`. Requires Apple Silicon (mlx-vlm). See [VLM](VLM) for details.
 - **serve** starts llama-server from llama.cpp; auto-discovers the binary from PATH or `./llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Pass extra llama-server flags after `--`.
 - **chat** connects to any OpenAI-compatible `/v1/chat/completions` endpoint. In-session commands: `/clear` (reset history), `quit` (exit).
 - **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436, turboquant serve 8811, vlm serve 8080 (defaults; override with `--port`).

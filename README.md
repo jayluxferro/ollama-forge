@@ -79,6 +79,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | Chat with TurboQuant model | `turboquant chat <model.tqf>` |
 | VLM generate (image+text) | `vlm generate --model <model> --prompt "..." --image photo.jpg` |
 | VLM interactive chat | `vlm chat --model <model>` |
+| VLM Gradio web UI | `vlm chat-ui --model <model>` |
 | VLM OpenAI-compatible server | `vlm serve --model <model> --port 8080` |
 | VLM convert HF → MLX | `vlm convert --hf-path <repo_id>` |
 | VLM quantize | `vlm quantize --model <repo_id> --bits 4` |

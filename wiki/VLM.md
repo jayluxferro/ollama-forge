@@ -30,6 +30,7 @@ ollama-forge vlm serve --model mlx-community/Qwen2-VL-2B-Instruct-4bit --port 80
 |---------|-------------|
 | `vlm generate` | One-shot generation from text + images/audio |
 | `vlm chat` | Interactive multimodal chat (attach images per turn) |
+| `vlm chat-ui` | Gradio web UI with image drag-and-drop |
 | `vlm serve` | OpenAI-compatible HTTP server (`/v1/chat/completions`) |
 | `vlm convert` | Convert a HuggingFace VLM to MLX format |
 | `vlm quantize` | Quantize a HuggingFace VLM to MLX (convenience wrapper) |
@@ -95,6 +96,24 @@ ollama-forge vlm chat \
 | `--system` | | System prompt |
 | `--kv-bits` | | KV cache quantization bits |
 | `--adapter-path` | | LoRA adapter path |
+
+---
+
+## Chat UI
+
+Launch a Gradio web interface for visual VLM chat. Supports image drag-and-drop, adjustable generation settings (temperature, top-p, max tokens), system prompts, and dark/light theme toggle.
+
+```bash
+ollama-forge vlm chat-ui --model mlx-community/Qwen2-VL-2B-Instruct-4bit
+```
+
+The browser opens automatically. Press Ctrl+C to stop the server.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | *(required)* | HuggingFace repo ID or local path |
 
 ---
 
