@@ -6,9 +6,12 @@ Or: uv run ollama-forge security-eval ui  (after `uv sync`)
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import html as html_mod
 import io
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -129,16 +132,23 @@ def _render_quick_test_tab(st) -> None:
                 if qt_use_vlm:
                     # Local VLM mode via mlx-vlm
                     vlm_image_paths: list[str] | None = None
+                    vlm_tmp_path: str | None = None
                     if qt_image_bytes is not None:
                         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                             tmp.write(qt_image_bytes)
-                        vlm_image_paths = [tmp.name]
-                    response_text, duration = query_model_vlm(
-                        qt_prompt.strip(),
-                        model_path=qt_model.strip(),
-                        image_paths=vlm_image_paths,
-                        system=qt_system.strip() or None,
-                    )
+                            vlm_tmp_path = tmp.name
+                        vlm_image_paths = [vlm_tmp_path]
+                    try:
+                        response_text, duration = query_model_vlm(
+                            qt_prompt.strip(),
+                            model_path=qt_model.strip(),
+                            image_paths=vlm_image_paths,
+                            system=qt_system.strip() or None,
+                        )
+                    finally:
+                        if vlm_tmp_path:
+                            with contextlib.suppress(OSError):
+                                os.unlink(vlm_tmp_path)
                 elif qt_image_b64:
                     base = (qt_url.strip() or "http://127.0.0.1:11434").rstrip("/")
                     if not base.startswith("http"):
@@ -295,12 +305,14 @@ def _render_run_tab(st) -> None:
         key="upload_prompt_set",
     )
     chosen_path = bundled_paths.get(prompt_set_choice)
+    uploaded_tmp_path: str | None = None
     if uploaded_prompt_file is not None:
         # Write uploaded file to a temp location so the eval runner can read it
         suffix = "." + (uploaded_prompt_file.name.rsplit(".", 1)[-1] if "." in uploaded_prompt_file.name else "txt")
         with tempfile.NamedTemporaryFile(mode="wb", suffix=suffix, delete=False) as tmp:
             tmp.write(uploaded_prompt_file.getvalue())
             effective_prompt_set_path = tmp.name
+            uploaded_tmp_path = tmp.name
         st.caption(f"Using uploaded file: {uploaded_prompt_file.name}")
     elif chosen_path is not None and chosen_path.exists():
         effective_prompt_set_path = str(chosen_path)
@@ -347,7 +359,7 @@ def _render_run_tab(st) -> None:
         except Exception as e:
             st.error(f"Prompt set validation failed: {e}")
             return
-        base = base_url.strip() or "http://127.0.0.1:11434"
+        base = base_url_normalized
         models_to_run = selected_models if run_multi and len(selected_models) > 0 else [model.strip() or "llama3.2"]
         multi_metas: list[dict] = []
 
@@ -413,6 +425,9 @@ def _render_run_tab(st) -> None:
             progress_bar.empty()
             results_placeholder.empty()
             stop_container.empty()
+            if uploaded_tmp_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(uploaded_tmp_path)
         if multi_metas:
             st.session_state["last_run_meta"] = multi_metas[-1]
         elif aborted:
@@ -426,6 +441,9 @@ def _render_run_tab(st) -> None:
         run_meta = st.session_state["last_run_meta"]
         kpis = run_meta.get("kpis") or {}
         results = run_meta.get("results") or []
+
+        if not results:
+            return
 
         st.divider()
         st.subheader("Results")
@@ -607,70 +625,72 @@ def _render_run_tab(st) -> None:
             except Exception:
                 pass
 
-            # --- #3a: Confusion matrix ---
+        # --- #3a: Confusion matrix (independent of categories) ---
+        try:
+            import pandas as _pd_cm
+
+            rows_with_expected = [
+                r for r in results if r.get("expected_refusal") is not None
+            ]
+            if rows_with_expected:
+                # 2x2: rows = Expected (Refusal, Compliance), cols = Actual (Refusal, Compliance)
+                tp = sum(
+                    1 for r in rows_with_expected
+                    if r.get("expected_refusal") is True and r.get("refusal") is True
+                )
+                fn = sum(
+                    1 for r in rows_with_expected
+                    if r.get("expected_refusal") is True and r.get("refusal") is not True
+                )
+                fp = sum(
+                    1 for r in rows_with_expected
+                    if r.get("expected_refusal") is not True and r.get("refusal") is True
+                )
+                tn = sum(
+                    1 for r in rows_with_expected
+                    if r.get("expected_refusal") is not True and r.get("refusal") is not True
+                )
+                z = [[tp, fn], [fp, tn]]
+                x_labels = ["Actual Refusal", "Actual Compliance"]
+                y_labels = ["Expected Refusal", "Expected Compliance"]
+                try:
+                    import plotly.figure_factory as ff
+
+                    fig_cm = ff.create_annotated_heatmap(
+                        z, x=x_labels, y=y_labels,
+                        colorscale="Blues", showscale=True,
+                    )
+                    fig_cm.update_layout(title="Confusion Matrix (Expected vs Actual)")
+                    st.plotly_chart(fig_cm, use_container_width=True)
+                except Exception:
+                    import plotly.express as _px_cm
+
+                    df_cm = _pd_cm.DataFrame(z, index=y_labels, columns=x_labels)
+                    fig_cm = _px_cm.imshow(
+                        df_cm, text_auto=True, color_continuous_scale="Blues",
+                        title="Confusion Matrix (Expected vs Actual)",
+                    )
+                    st.plotly_chart(fig_cm, use_container_width=True)
+        except Exception:
+            pass
+
+        # Latency histogram (independent of categories)
+        durations = [r.get("duration_sec") for r in results if r.get("duration_sec") is not None]
+        if durations:
             try:
-                import pandas as _pd_cm
+                import pandas as pd
+                import plotly.express as px
 
-                rows_with_expected = [
-                    r for r in results if r.get("expected_refusal") is not None
-                ]
-                if rows_with_expected:
-                    # 2x2: rows = Expected (Refusal, Compliance), cols = Actual (Refusal, Compliance)
-                    tp = sum(
-                        1 for r in rows_with_expected
-                        if r.get("expected_refusal") is True and r.get("refusal") is True
-                    )
-                    fn = sum(
-                        1 for r in rows_with_expected
-                        if r.get("expected_refusal") is True and r.get("refusal") is not True
-                    )
-                    fp = sum(
-                        1 for r in rows_with_expected
-                        if r.get("expected_refusal") is not True and r.get("refusal") is True
-                    )
-                    tn = sum(
-                        1 for r in rows_with_expected
-                        if r.get("expected_refusal") is not True and r.get("refusal") is not True
-                    )
-                    z = [[tp, fn], [fp, tn]]
-                    x_labels = ["Actual Refusal", "Actual Compliance"]
-                    y_labels = ["Expected Refusal", "Expected Compliance"]
-                    try:
-                        import plotly.figure_factory as ff
-
-                        fig_cm = ff.create_annotated_heatmap(
-                            z, x=x_labels, y=y_labels,
-                            colorscale="Blues", showscale=True,
-                        )
-                        fig_cm.update_layout(title="Confusion Matrix (Expected vs Actual)")
-                        st.plotly_chart(fig_cm, use_container_width=True)
-                    except Exception:
-                        import plotly.express as _px_cm
-
-                        df_cm = _pd_cm.DataFrame(z, index=y_labels, columns=x_labels)
-                        fig_cm = _px_cm.imshow(
-                            df_cm, text_auto=True, color_continuous_scale="Blues",
-                            title="Confusion Matrix (Expected vs Actual)",
-                        )
-                        st.plotly_chart(fig_cm, use_container_width=True)
+                df_dur = pd.DataFrame({"duration_sec": durations})
+                fig_hist = px.histogram(
+                    df_dur,
+                    x="duration_sec",
+                    title="Latency (s) distribution",
+                    nbins=min(30, max(5, len(durations) // 3)),
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
             except Exception:
                 pass
-
-            durations = [r.get("duration_sec") for r in results if r.get("duration_sec") is not None]
-            if durations:
-                try:
-                    import plotly.express as px
-
-                    df_dur = pd.DataFrame({"duration_sec": durations})
-                    fig_hist = px.histogram(
-                        df_dur,
-                        x="duration_sec",
-                        title="Latency (s) distribution",
-                        nbins=min(30, max(5, len(durations) // 3)),
-                    )
-                    st.plotly_chart(fig_hist, use_container_width=True)
-                except Exception:
-                    pass
 
         st.subheader("Per-prompt results")
         import pandas as pd
@@ -693,9 +713,9 @@ def _render_run_tab(st) -> None:
             if "category" in df.columns and filter_category != "(all)":
                 df_filtered = df_filtered[df_filtered["category"] == filter_category]
             if filter_refusal == "Refusal":
-                df_filtered = df_filtered[df_filtered["refusal"] is True]
+                df_filtered = df_filtered[df_filtered["refusal"] == True]  # noqa: E712
             elif filter_refusal == "Compliance":
-                df_filtered = df_filtered[df_filtered["refusal"] is False]
+                df_filtered = df_filtered[df_filtered["refusal"] == False]  # noqa: E712
             if "error" in df_filtered.columns:
                 has_error = df_filtered["error"].notna() & (df_filtered["error"].astype(str).str.len() > 0)
                 if filter_error == "Has error":
@@ -794,12 +814,12 @@ def _render_history_tab(st) -> None:
             df_runs = pd.DataFrame(
                 [
                     {
-                        "id": r["id"],
-                        "model": r["model"],
-                        "prompt_set": r["prompt_set"],
-                        "timestamp": r["timestamp_iso"],
-                        "ASR %": r["kpis"].get("asr_pct"),
-                        "Refusal %": r["kpis"].get("refusal_rate_pct"),
+                        "id": r.get("id", "?"),
+                        "model": r.get("model", "?"),
+                        "prompt_set": r.get("prompt_set", "?"),
+                        "timestamp": r.get("timestamp_iso", ""),
+                        "ASR %": (r.get("kpis") or {}).get("asr_pct"),
+                        "Refusal %": (r.get("kpis") or {}).get("refusal_rate_pct"),
                     }
                     for r in runs
                 ]
@@ -890,7 +910,9 @@ def _render_compare_runs_tab(st) -> None:
                     w.writerow([name, kpis_a.get(key, ""), kpis_b.get(key, "")])
                 csv_data = buf_csv.getvalue()
                 rows_html = "".join(
-                    f"<tr><td>{name}</td><td>{kpis_a.get(key, '')}</td><td>{kpis_b.get(key, '')}</td></tr>"
+                    f"<tr><td>{html_mod.escape(str(name))}</td>"
+                    f"<td>{html_mod.escape(str(kpis_a.get(key, '')))}</td>"
+                    f"<td>{html_mod.escape(str(kpis_b.get(key, '')))}</td></tr>"
                     for key, name in export_rows
                 )
                 html_data = (
@@ -898,7 +920,8 @@ def _render_compare_runs_tab(st) -> None:
                     '<meta charset="utf-8">'
                     '<title>Security Eval Compare</title></head><body>'
                     '<h1>Compare</h1><table border="1">'
-                    f"<tr><th>KPI</th><th>{label_a}</th><th>{label_b}</th></tr>"
+                    f"<tr><th>KPI</th><th>{html_mod.escape(label_a)}</th>"
+                    f"<th>{html_mod.escape(label_b)}</th></tr>"
                     f"{rows_html}</table></body></html>"
                 )
                 st.download_button(

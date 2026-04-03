@@ -196,7 +196,9 @@ def supports_bfloat16() -> bool:
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             # MPS bfloat16 support added in PyTorch 2.3
             parts = torch.__version__.split(".")
-            return int(parts[0]) >= 2 and int(parts[1]) >= 3
+            major = int(parts[0])
+            minor = int("".join(c for c in parts[1] if c.isdigit()) or "0")
+            return (major > 2) or (major == 2 and minor >= 3)
     except Exception:
         pass
     return True  # CPU always supports bf16

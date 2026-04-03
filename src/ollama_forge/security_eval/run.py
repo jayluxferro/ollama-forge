@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -123,6 +125,7 @@ def run_eval(
             if vlm_model_path:
                 # --- Local VLM backend ---
                 vlm_image_paths: list[str] | None = None
+                vlm_tmp_path: str | None = None
                 if image_b64:
                     import base64
                     import tempfile
@@ -130,24 +133,30 @@ def run_eval(
                     raw = base64.b64decode(image_b64)
                     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                         tmp.write(raw)
-                    vlm_image_paths = [tmp.name]
-                for attempt in range(num_attempts):
-                    try:
-                        response, duration = query_model_vlm(
-                            prompt,
-                            model_path=vlm_model_path,
-                            image_paths=vlm_image_paths,
-                            system=row_system,
-                            timeout=timeout,
-                            _loaded_model=vlm_loaded,
-                        )
-                        break
-                    except Exception as e:
-                        if attempt == num_attempts - 1:
-                            raise
-                        if verbose:
-                            print(f"    Retry {attempt + 1}/{retries} after: {e}", file=sys.stderr)
-                        time.sleep(1.0 * (attempt + 1))
+                        vlm_tmp_path = tmp.name
+                    vlm_image_paths = [vlm_tmp_path]
+                try:
+                    for attempt in range(num_attempts):
+                        try:
+                            response, duration = query_model_vlm(
+                                prompt,
+                                model_path=vlm_model_path,
+                                image_paths=vlm_image_paths,
+                                system=row_system,
+                                timeout=timeout,
+                                _loaded_model=vlm_loaded,
+                            )
+                            break
+                        except Exception as e:
+                            if attempt == num_attempts - 1:
+                                raise
+                            if verbose:
+                                print(f"    Retry {attempt + 1}/{retries} after: {e}", file=sys.stderr)
+                            time.sleep(1.0 * (attempt + 1))
+                finally:
+                    if vlm_tmp_path:
+                        with contextlib.suppress(OSError):
+                            os.unlink(vlm_tmp_path)
             elif tools and isinstance(tools, list):
                 for attempt in range(num_attempts):
                     try:
@@ -285,7 +294,7 @@ def run_eval(
             "error": None,
             "expected_refusal": expected_refusal,
         }
-        if tool_calls is not None:
+        if tools and isinstance(tools, list):
             res["tool_misuse"] = tool_misuse
         if image_b64 is not None:
             res["image_reveal"] = image_reveal

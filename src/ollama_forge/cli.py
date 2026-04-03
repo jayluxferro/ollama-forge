@@ -3919,17 +3919,27 @@ def _cmd_vlm_generate(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
     num_images = len(images) if images else 0
     num_audios = 1 if audio else 0
-    formatted_prompt = vlm_apply_chat_template(
-        processor, model.config, prompt,
-        num_images=num_images, num_audios=num_audios,
-    )
+    try:
+        formatted_prompt = vlm_apply_chat_template(
+            processor, model.config, prompt,
+            num_images=num_images, num_audios=num_audios,
+        )
 
-    result = vlm_generate(
-        model, processor, formatted_prompt,
-        images=images or None, audio=audio,
-        max_tokens=max_tokens, temperature=temperature,
-        **extra_kwargs,
-    )
+        result = vlm_generate(
+            model, processor, formatted_prompt,
+            images=images or None, audio=audio,
+            max_tokens=max_tokens, temperature=temperature,
+            **extra_kwargs,
+        )
+    except Exception as exc:
+        print_actionable_error(
+            f"Generation failed: {exc}",
+            next_steps=[
+                "Check that image/audio paths exist and are valid",
+                "Try reducing --max-tokens if running out of memory",
+            ],
+        )
+        return 1
 
     print(result["text"])
 
@@ -3996,13 +4006,16 @@ def _cmd_vlm_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         )
         return 1
 
-    print("Ready. Commands: /image <path>, /audio <path>, /quit", file=sys.stderr)
+    print("Ready. Commands: /image <path>, /audio <path>, /clear, /quit", file=sys.stderr)
     if system_prompt:
         print(f"System: {system_prompt}", file=sys.stderr)
     print()
 
     current_images: list[str] = []
     current_audio: str | None = None
+    history: list[dict[str, str]] = []
+    if system_prompt:
+        history.append({"role": "system", "content": system_prompt})
 
     try:
         while True:
@@ -4018,41 +4031,65 @@ def _cmd_vlm_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             if stripped.lower() in ("/quit", "/exit"):
                 break
 
+            if stripped.lower() == "/clear":
+                history.clear()
+                if system_prompt:
+                    history.append({"role": "system", "content": system_prompt})
+                current_images = []
+                current_audio = None
+                print("  [History and attachments cleared]", file=sys.stderr)
+                continue
+
             if stripped.lower().startswith("/image "):
                 img_path = stripped[7:].strip()
+                if not os.path.isfile(img_path):
+                    print(f"  [File not found: {img_path}]", file=sys.stderr)
+                    continue
                 current_images.append(img_path)
                 print(f"  [Attached image: {img_path}]", file=sys.stderr)
                 continue
 
             if stripped.lower().startswith("/audio "):
                 audio_path = stripped[7:].strip()
+                if not os.path.isfile(audio_path):
+                    print(f"  [File not found: {audio_path}]", file=sys.stderr)
+                    continue
                 current_audio = audio_path
                 print(f"  [Attached audio: {audio_path}]", file=sys.stderr)
                 continue
 
-            # Build prompt
-            prompt_text = stripped
-            if system_prompt:
-                prompt_text = f"{system_prompt}\n\n{prompt_text}"
+            # Build prompt with conversation history
+            history.append({"role": "user", "content": stripped})
+            conversation_text = "\n".join(
+                f"{m['role'].capitalize()}: {m['content']}" for m in history
+            )
 
             num_images = len(current_images)
             num_audios = 1 if current_audio else 0
             formatted_prompt = vlm_apply_chat_template(
-                processor, model.config, prompt_text,
+                processor, model.config, conversation_text,
                 num_images=num_images, num_audios=num_audios,
             )
 
             print("Assistant: ", end="", flush=True)
-            for token in vlm_stream_generate(
-                model, processor, formatted_prompt,
-                images=current_images or None,
-                audio=current_audio,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                **extra_kwargs,
-            ):
-                print(token, end="", flush=True)
+            response_tokens: list[str] = []
+            try:
+                for token in vlm_stream_generate(
+                    model, processor, formatted_prompt,
+                    images=current_images or None,
+                    audio=current_audio,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    **extra_kwargs,
+                ):
+                    print(token, end="", flush=True)
+                    response_tokens.append(token)
+            except Exception as exc:
+                print(f"\n  [Generation error: {exc}]", file=sys.stderr)
             print()
+
+            # Record assistant response in history
+            history.append({"role": "assistant", "content": "".join(response_tokens)})
 
             # Clear attachments after each turn
             current_images = []
@@ -4101,6 +4138,12 @@ def _cmd_vlm_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     if adapter_path:
         cmd += ["--adapter-path", adapter_path]
 
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(
+            f"WARNING: Binding to {host} — the VLM server has no authentication. "
+            "Only bind to non-localhost in trusted networks.",
+            file=sys.stderr,
+        )
     base_url = f"http://{host}:{port}"
     print(f"Starting mlx-vlm server: {shlex.join(cmd)}", file=sys.stderr)
     print(f"Endpoint: {base_url}/v1/chat/completions", file=sys.stderr)
@@ -4119,7 +4162,11 @@ def _cmd_vlm_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     except KeyboardInterrupt:
         print("\nShutting down ...", file=sys.stderr)
         proc.terminate()
-        proc.wait(timeout=10)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
     return proc.returncode or 0
 
 
@@ -4266,22 +4313,32 @@ def _cmd_vlm_finetune(parser: argparse.ArgumentParser, args: argparse.Namespace)
     print(f"Dataset: {dataset}", file=sys.stderr)
     print(f"Output: {args.output_path}", file=sys.stderr)
 
-    rc = vlm_finetune(
-        model_path=args.model,
-        dataset=dataset,
-        output_path=args.output_path,
-        learning_rate=args.learning_rate,
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        lora_rank=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        train_vision=args.train_vision,
-        full_finetune=args.full_finetune,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        grad_checkpoint=args.grad_checkpoint,
-        adapter_path=getattr(args, "adapter_path", None),
-    )
+    try:
+        rc = vlm_finetune(
+            model_path=args.model,
+            dataset=dataset,
+            output_path=args.output_path,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            lora_rank=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            train_vision=args.train_vision,
+            full_finetune=args.full_finetune,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            grad_checkpoint=args.grad_checkpoint,
+            adapter_path=getattr(args, "adapter_path", None),
+        )
+    except Exception as exc:
+        print_actionable_error(
+            f"Fine-tuning failed: {exc}",
+            next_steps=[
+                "Check model path and dataset format",
+                "Try reducing batch size if running out of memory",
+            ],
+        )
+        return 1
 
     if rc == 0:
         print(f"Fine-tuning complete. Adapter saved to: {args.output_path}", file=sys.stderr)
@@ -11412,7 +11469,7 @@ def main() -> int:
     p_vlm_gen.add_argument("--temperature", type=float, default=0.0,
                            help="Sampling temperature (default: 0.0)")
     p_vlm_gen.add_argument("--top-p", type=float, default=None,
-                           help="Nucleus sampling threshold (default: 1.0)")
+                           help="Nucleus sampling threshold (omitted by default; mlx-vlm default: 1.0)")
     p_vlm_gen.add_argument("--kv-bits", type=int, default=None,
                            help="KV cache quantization bits")
     p_vlm_gen.add_argument("--enable-thinking", action="store_true", default=False,

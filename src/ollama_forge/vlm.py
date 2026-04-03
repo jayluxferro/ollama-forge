@@ -215,7 +215,7 @@ def vlm_stream_generate(
     gen_kwargs.update(kwargs)
 
     for token in stream_generate(model, processor, prompt, **gen_kwargs):
-        yield token
+        yield getattr(token, "text", str(token)) if not isinstance(token, str) else token
 
 
 def vlm_finetune(
@@ -243,6 +243,11 @@ def vlm_finetune(
     """
     _require_vlm()
     import subprocess
+
+    # Validate that path-like arguments don't start with "--" to prevent argument injection
+    for name, val in [("model_path", model_path), ("dataset", dataset), ("output_path", output_path)]:
+        if val.startswith("-"):
+            raise ValueError(f"{name} must not start with '-': {val!r}")
 
     cmd = [
         sys.executable, "-m", "mlx_vlm.lora",
