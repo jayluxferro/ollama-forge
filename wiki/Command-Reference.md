@@ -36,7 +36,7 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | **turboquant** | TurboQuant: extreme quantization + inference (quantize, serve, chat, info) — no llama.cpp needed |
 | **downsize** | Downsize via distillation (teacher, student, name → steps) |
 | **security-eval** | Run prompt sets against Ollama (run), or optional UI (ui) for refusal/compliance KPIs |
-| **vlm** | Vision Language Model commands: generate, chat, serve, convert, quantize, finetune (Apple Silicon via mlx-vlm) |
+| **vlm** | Vision Language Model commands: generate, chat, serve, video-generate, convert, quantize, finetune (Apple Silicon via mlx-vlm >=0.4.4; TurboQuant KV, VisionFeatureCache, ORPO) |
 | **serve** | Start llama-server to serve a GGUF model via an OpenAI-compatible API (auto GPU: Metal/CUDA/CPU) |
 | **chat** | Interactive chat with a running llama-server or any OpenAI-compatible endpoint |
 | **hf-cache** | List or remove Hugging Face Hub local cache (ls, rm) |
@@ -79,12 +79,14 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 | Serve GGUF directly (no Ollama) | `serve <model.gguf> [--host 127.0.0.1] [--port 11434] [-ngl -1]` |
 | Chat with a running server | `chat [--base-url http://127.0.0.1:11434] [--system "..."] [--temperature 0.7]` |
 | VLM generate (image+text) | `vlm generate --model <model> --prompt "..." --image photo.jpg` |
-| VLM interactive chat | `vlm chat --model <model> [--system "..."]` |
+| VLM generate with TurboQuant KV | `vlm generate --model <model> --prompt "..." --image photo.jpg --kv-bits 3.5` |
+| VLM interactive chat (cached) | `vlm chat --model <model> --vision-cache-size 20` |
 | VLM Gradio web UI | `vlm chat-ui --model <model>` |
-| VLM OpenAI-compatible server | `vlm serve --model <model> [--port 8080]` |
-| VLM convert HF → MLX | `vlm convert --hf-path <repo_id> [--quantize --q-bits 4]` |
-| VLM quantize | `vlm quantize --model <repo_id> --bits 4 [--group-size 64]` |
-| VLM fine-tune (LoRA) | `vlm finetune --model <model> --dataset <path> [--lora-rank 8]` |
+| VLM OpenAI-compatible server | `vlm serve --model <model> [--port 11434] [--kv-bits 3.5]` |
+| VLM video understanding | `vlm video-generate --model <model> --video clip.mp4` |
+| VLM convert HF → MLX | `vlm convert --hf-path <repo_id> [--quantize --q-bits 4 --q-mode mxfp4]` |
+| VLM quantize | `vlm quantize --model <repo_id> --bits 4 [--q-mode affine]` |
+| VLM fine-tune (LoRA/ORPO) | `vlm finetune --model <model> --dataset <path> [--train-mode orpo]` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` (auto-converts safetensors if no GGUF) |
 | Remove HF cache repo(s) | `hf-cache rm <repo_id> [repo_id ...] [--yes]` |
 
@@ -95,10 +97,10 @@ Full list of commands and what they do. Run `ollama-forge --help` for the latest
 - **adapters** has subcommands: `search`, `recommend`.
 - **abliterate** has subcommands: `compute-dir`, `run`, `chat`, `serve`, `proxy`, `evaluate`, `optimize`, `fix-ollama-template`, `download-lists`. Run `abliterate --help` for full list.
 - **turboquant** has subcommands: `quantize`, `serve`, `chat`, `info`. Supports asymmetric K/V cache compression, layer-adaptive precision (`TURBO_LAYER_ADAPTIVE` env var), and temporal decay for long contexts. See [TurboQuant](TurboQuant) for details.
-- **vlm** has subcommands: `generate`, `chat`, `chat-ui`, `serve`, `convert`, `quantize`, `finetune`. Requires Apple Silicon (mlx-vlm). See [VLM](VLM) for details.
+- **vlm** has subcommands: `generate`, `chat`, `chat-ui`, `serve`, `video-generate`, `convert`, `quantize`, `finetune`. Requires Apple Silicon (mlx-vlm >=0.4.4). Supports TurboQuant KV cache (`--kv-bits 3.5`), VisionFeatureCache (`--vision-cache-size`), video input, ORPO training, and mxfp4/nvfp4/mxfp8 quantization. See [VLM](VLM) for details.
 - **serve** starts llama-server from llama.cpp; auto-discovers the binary from PATH or `./llama.cpp/build/bin/`. GPU offloading is automatic (Metal on Apple Silicon, CUDA on NVIDIA, CPU fallback). Pass extra llama-server flags after `--`.
 - **chat** connects to any OpenAI-compatible `/v1/chat/completions` endpoint. In-session commands: `/clear` (reset history), `quit` (exit).
-- **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436, turboquant serve 8811, vlm serve 8080 (defaults; override with `--port`).
+- **Ports:** Ollama 11434, serve 11434, abliterate serve 11435, abliterate proxy 11436, turboquant serve 8811, vlm serve 11434 (defaults; override with `--port`).
 
 Use `ollama-forge <command> --help` for options and examples.
 
