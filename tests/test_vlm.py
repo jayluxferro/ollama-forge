@@ -329,7 +329,7 @@ class TestVlmCliParsing:
         ns = parse(["vlm", "serve", "--model", "m/m"])
         assert ns.model == "m/m"
         assert ns.host == "127.0.0.1"
-        assert ns.port == 8080
+        assert ns.port == 11434
         assert getattr(ns, "handler", None) is not None
 
     def test_vlm_serve_optional_args(self, parse):
