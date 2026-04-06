@@ -2464,14 +2464,23 @@ def _build_llama_cpp(target_dir: Path) -> int:
     if cache_file.is_file():
         try:
             cache_text = cache_file.read_text(encoding="utf-8", errors="replace")
+            stale = False
             for line in cache_text.splitlines():
                 if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
                     cached_src = line.split("=", 1)[1].strip()
                     if cached_src != str(target_dir.resolve()):
-                        log.info("Stale CMakeCache.txt (was %s), removing build dir...", cached_src)
-                        shutil.rmtree(build_dir)
-                        build_dir.mkdir()
-                    break
+                        log.info("Stale CMakeCache.txt (source was %s), removing build dir...", cached_src)
+                        stale = True
+                        break
+                if line.startswith("CMAKE_OSX_SYSROOT:"):
+                    cached_sdk = line.split("=", 1)[1].strip()
+                    if cached_sdk and not Path(cached_sdk).is_dir():
+                        log.info("Stale CMAKE_OSX_SYSROOT (%s no longer exists), removing build dir...", cached_sdk)
+                        stale = True
+                        break
+            if stale:
+                shutil.rmtree(build_dir)
+                build_dir.mkdir()
         except OSError:
             pass
     # Clean cmake artifacts that may have leaked into the source directory

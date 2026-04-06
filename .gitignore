@@ -77,3 +77,4 @@ blog/
 /models/
 *.tqf
 /tmp/
+/vlm_models/
