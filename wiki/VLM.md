@@ -336,6 +336,39 @@ ollama-forge vlm convert \
 | `--trust-remote-code` | false | Trust remote code from HF Hub |
 | `--quant-predicate` | | Mixed-bit quantization recipe string |
 
+### Metal GPU timeouts during conversion
+
+Conversion of multimodal HF checkpoints (notably Gemma-3n / 4 E2B and
+abliterated variants) can abort with:
+
+```
+libc++abi: terminating due to uncaught exception of type std::runtime_error:
+[METAL] Command buffer execution failed: Caused GPU Timeout Error
+(00000002:kIOGPUCommandBufferCallbackErrorTimeout)
+```
+
+This is PyTorch's MPS allocator contending with MLX on the same Metal
+device. PyTorch is only used as a weight loader during conversion, but its
+default high-watermark ratio lets the allocator issue `waitUntilCompleted`
+syncs that block on MLX's in-flight command buffers long enough to trip
+Apple's GPU watchdog. Models whose processors touch torch (Gemma-3n's audio
+tower mel filterbank is the usual trigger) hit this; text-only conversions
+don't.
+
+`ollama-forge` already sets the fix at CLI import time in `cli.py`:
+
+```python
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "0")
+```
+
+If you invoke `ollama_forge.vlm.vlm_convert()` directly from a long-running
+Python process that has already touched MPS, set those env vars **before**
+importing torch — they're read lazily on first MPS use and cannot be
+changed afterward. The nuclear alternative is `PYTORCH_MPS_DISABLE=1` or
+`torch.set_default_device("cpu")`, which forces torch fully onto CPU for
+the conversion.
+
 ---
 
 ## Quantize
@@ -514,3 +547,4 @@ Browse the full list at [mlx-community on HuggingFace](https://huggingface.co/ml
 | Adapter not loading | Ensure `--adapter-path` points to a directory with `adapter_config.json` and weight files. |
 | TurboQuant not activating | Use fractional `--kv-bits` (e.g. `3.5`) or explicitly add `--kv-quant-scheme turboquant`. |
 | Video generation fails | Ensure the model supports video input (e.g. Qwen2.5-VL). Check `--max-frames` and `--fps` settings. |
+| `kIOGPUCommandBufferCallbackErrorTimeout` during `vlm convert` | PyTorch's MPS allocator is contending with MLX. The CLI sets `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0` and `PYTORCH_ENABLE_MPS_FALLBACK=0` at import time to prevent this — see [Metal GPU timeouts during conversion](#metal-gpu-timeouts-during-conversion). |

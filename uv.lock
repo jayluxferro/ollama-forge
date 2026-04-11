@@ -1496,7 +1496,7 @@ wheels = [
 
 [[package]]
 name = "mlx-vlm"
-version = "0.4.3"
+version = "0.4.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets", marker = "(python_full_version < '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.12' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
@@ -1513,9 +1513,9 @@ dependencies = [
     { name = "transformers", marker = "(python_full_version < '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.12' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
     { name = "uvicorn", marker = "(python_full_version < '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.12' and sys_platform == 'win32') or (sys_platform != 'emscripten' and sys_platform != 'win32')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/d2/cc80916001d73d7f877360054c2fcb5ca54a07fcfee8a325e6d121b3d98b/mlx_vlm-0.4.3.tar.gz", hash = "sha256:70c020edbc629ec6091f530a93d913b328b2c74f83da661322ba6e1bcbdf5035", size = 816749 }
+sdist = { url = "https://files.pythonhosted.org/packages/94/ec/108aec30efb159940ea29d133d5d8ec14840edbec914869b46eaafac5552/mlx_vlm-0.4.4.tar.gz", hash = "sha256:3197e277c1be9ed1712ea04624df029e486f7747ad93e40e7bd1c9c771f8b179", size = 836370 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/49/1815a7a74070e923140a065c81de5737e007f525fcd9f8d922a3584e301e/mlx_vlm-0.4.3-py3-none-any.whl", hash = "sha256:225d1b6b5467c15cce92e681f54c3f3c58bbcc180fc0aeefa35386f2db56bb08", size = 995733 },
+    { url = "https://files.pythonhosted.org/packages/d9/81/235518176c3c8230e5274e91346ecf940591f653e73b0daeb505fb37eea9/mlx_vlm-0.4.4-py3-none-any.whl", hash = "sha256:3ff86ea738ab1914dc1b07e4fa5d4cc34bec5909e540692cfad0af808af13c11", size = 1014936 },
 ]
 
 [[package]]
@@ -2151,7 +2151,7 @@ requires-dist = [
     { name = "hf-transfer", specifier = ">=0.1.0" },
     { name = "huggingface-hub", specifier = ">=0.20.0" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.10.0" },
-    { name = "mlx-vlm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.4.3" },
+    { name = "mlx-vlm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.4.4" },
     { name = "optuna", specifier = ">=3.0" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "plotly", specifier = ">=5.18" },

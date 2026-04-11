@@ -17,6 +17,17 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
 
+# Prevent PyTorch's MPS allocator from contending with MLX on the Metal
+# device. PyTorch's default high-watermark ratio lets its allocator issue
+# `waitUntilCompleted` syncs that block on MLX's in-flight command buffers,
+# tripping the Metal GPU watchdog (kIOGPUCommandBufferCallbackErrorTimeout)
+# during mlx-vlm conversion of multimodal models whose processors touch torch
+# (e.g. Gemma-3n's audio tower mel filterbank). These env vars are read
+# lazily on first MPS use, so they MUST be set before anything imports torch.
+# setdefault so user overrides win.
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "0")
+
 # Import unsloth early (before transformers) so its optimizations apply.
 # Optional dependency — ignore if not installed or no GPU available.
 with contextlib.suppress(ImportError, NotImplementedError):
