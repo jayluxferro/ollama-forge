@@ -23,6 +23,46 @@ def _enable_fast_downloads() -> None:
             pass
 
 
+def _disable_fast_downloads() -> None:
+    """Force-disable hf_transfer so the standard downloader (with resume) is used."""
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
+
+def _hf_transfer_active() -> bool:
+    return os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1"
+
+
+def _find_incomplete_download(
+    repo_id: str,
+    filename: str | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+    local_dir: str | Path | None = None,
+) -> bool:
+    """Return True if an incomplete download exists for this repo/file.
+
+    Checks for ``.incomplete`` marker files that ``huggingface_hub`` leaves
+    behind when a download is interrupted.
+    """
+    # When a local_dir is specified, incomplete files sit next to the target.
+    if local_dir:
+        d = Path(local_dir)
+        if filename:
+            return (d / f"{filename}.incomplete").exists()
+        return any(d.rglob("*.incomplete"))
+
+    # Otherwise check the HF blob cache.
+    cache = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "huggingface" / "hub"
+    org_repo = repo_id.replace("/", "--")
+    repo_cache = cache / f"models--{org_repo}"
+    if not repo_cache.exists():
+        return False
+    blobs = repo_cache / "blobs"
+    if not blobs.exists():
+        return False
+    return any(p.name.endswith(".incomplete") for p in blobs.iterdir())
+
+
 def list_gguf_files(repo_id: str, revision: str | None = None) -> list[str]:
     """List .gguf files in a Hugging Face repo. Returns filenames (no path)."""
     from huggingface_hub import list_repo_files
@@ -64,9 +104,31 @@ def download_gguf(
     revision: str | None = None,
     cache_dir: str | Path | None = None,
     local_dir: str | Path | None = None,
+    no_hf_transfer: bool = False,
 ) -> str:
-    """Download a GGUF file from HF. Returns path to the local file."""
-    _enable_fast_downloads()
+    """Download a GGUF file from HF. Returns path to the local file.
+
+    If an incomplete download is detected from a previous interrupted attempt,
+    ``hf_transfer`` is automatically disabled for this call so the standard
+    ``huggingface_hub`` downloader can resume where it left off.  You can also
+    force this with *no_hf_transfer=True*.
+    """
+    if no_hf_transfer:
+        _disable_fast_downloads()
+    else:
+        _enable_fast_downloads()
+        # hf_transfer does not support resumable downloads – fall back to the
+        # standard downloader when we detect a partial file from a prior run.
+        if _hf_transfer_active() and _find_incomplete_download(
+            repo_id, filename, cache_dir=cache_dir, local_dir=local_dir
+        ):
+            log.info(
+                "Incomplete download detected for %s/%s — disabling hf_transfer to resume.",
+                repo_id,
+                filename,
+            )
+            _disable_fast_downloads()
+
     from huggingface_hub import hf_hub_download
 
     path = hf_hub_download(
@@ -135,9 +197,26 @@ def download_adapter(
     *,
     revision: str | None = None,
     local_dir: str | Path,
+    no_hf_transfer: bool = False,
 ) -> Path:
-    """Download a full adapter repo (e.g. PEFT) to local_dir. Returns local_dir as Path."""
-    _enable_fast_downloads()
+    """Download a full adapter repo (e.g. PEFT) to local_dir. Returns local_dir as Path.
+
+    Same resume behaviour as :func:`download_gguf` — when an incomplete
+    download is found, ``hf_transfer`` is automatically bypassed.
+    """
+    if no_hf_transfer:
+        _disable_fast_downloads()
+    else:
+        _enable_fast_downloads()
+        if _hf_transfer_active() and _find_incomplete_download(
+            repo_id, local_dir=local_dir
+        ):
+            log.info(
+                "Incomplete download detected for %s — disabling hf_transfer to resume.",
+                repo_id,
+            )
+            _disable_fast_downloads()
+
     from huggingface_hub import snapshot_download
 
     snapshot_download(

@@ -949,6 +949,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         exit_code = require_ollama()
         if exit_code is not None:
             return exit_code
+    no_hf_transfer = getattr(args, "no_hf_transfer", False)
     try:
         if args.gguf_file:
             downloaded_gguf_filename = args.gguf_file
@@ -956,6 +957,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 args.repo_id,
                 args.gguf_file,
                 revision=args.revision,
+                no_hf_transfer=no_hf_transfer,
             )
         else:
             gguf_files = list_gguf_files(args.repo_id, revision=args.revision)
@@ -978,7 +980,10 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                     f"We auto-picked {chosen!r}; use --gguf-file <filename> to override.",
                     file=sys.stderr,
                 )
-            gguf_path = download_gguf(args.repo_id, chosen, revision=args.revision)
+            gguf_path = download_gguf(
+                args.repo_id, chosen, revision=args.revision,
+                no_hf_transfer=no_hf_transfer,
+            )
         log.info("Downloaded to %s", gguf_path)
         if getattr(args, "verify_checksum", False):
             try:
@@ -1001,6 +1006,9 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
             "download failed",
             cause=str(e),
             next_steps=[
+                "To resume an interrupted download, re-run the same command "
+                "(partial downloads are detected automatically)",
+                "Or force standard downloader: add --no-hf-transfer",
                 "If the repo is gated/private, run: huggingface-cli login",
                 "Or set: HF_TOKEN=<your_token>",
                 "Try: ollama-forge check",
@@ -1511,12 +1519,14 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
     exit_code = require_ollama()
     if exit_code is not None:
         return exit_code
+    no_hf_transfer = getattr(args, "no_hf_transfer", False)
     adapter_dir = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix="ollama-adapter-"))
     try:
         download_adapter(
             args.repo_id,
             revision=args.revision,
             local_dir=adapter_dir,
+            no_hf_transfer=no_hf_transfer,
         )
         log.info("Downloaded adapter to %s", adapter_dir)
     except Exception as e:
@@ -1524,9 +1534,10 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
             "adapter download failed",
             cause=str(e),
             next_steps=[
+                "To resume, re-run the same command (partial downloads are auto-detected)",
+                "Or add --no-hf-transfer to force the standard downloader",
                 "Confirm adapter repo id is correct on Hugging Face",
                 "If gated/private, run: huggingface-cli login",
-                "Then retry fetch-adapter",
             ],
         )
         return 1
@@ -3815,14 +3826,12 @@ def _resolve_turboquant_model_path(model_path: str) -> str:
             print(f"Found in HF cache: {cached}")
             return str(cached)
 
-        # 4. Download from HF Hub
+        # 4. Download from HF Hub (uses resume-aware path via download_adapter)
         print(f"Downloading {model_path} from Hugging Face ...")
-        from ollama_forge.hf_fetch import _enable_fast_downloads
+        import tempfile
 
-        _enable_fast_downloads()
-        from huggingface_hub import snapshot_download
-
-        local_path = snapshot_download(model_path)
+        dl_dir = Path(tempfile.mkdtemp(prefix="ollama-forge-resolve-"))
+        local_path = download_adapter(model_path, local_dir=dl_dir)
         print(f"Downloaded to {local_path}")
         return str(local_path)
 
@@ -10835,6 +10844,13 @@ def main() -> int:
         default=None,
         help="Path to llama.cpp clone (used when --download-only converts safetensors to GGUF)",
     )
+    p_fetch.add_argument(
+        "--no-hf-transfer",
+        action="store_true",
+        help="Disable hf_transfer (Rust accelerator) and use the standard downloader, "
+             "which supports resuming interrupted downloads. "
+             "Partial downloads are auto-detected and resumed even without this flag.",
+    )
     p_fetch.set_defaults(handler=_cmd_fetch)
 
     # fetch-adapter (HF adapter repo → download → create-from-base)
@@ -10873,6 +10889,11 @@ def main() -> int:
         help="Repeat penalty (e.g. 1.1)",
     )
     p_fetch_adapter.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
+    p_fetch_adapter.add_argument(
+        "--no-hf-transfer",
+        action="store_true",
+        help="Disable hf_transfer and use the standard downloader (supports resume)",
+    )
     p_fetch_adapter.set_defaults(handler=_cmd_fetch_adapter)
 
     # build (from recipe YAML/JSON)
