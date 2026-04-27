@@ -1873,16 +1873,29 @@ def _cmd_train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     run_trainer = getattr(args, "run_trainer", False)
     base_gguf_var = f'BASE_GGUF="{base_gguf}"' if base_gguf else 'BASE_GGUF=""  # set to your base .gguf path'
     run_finetune_block = ""
+    trainer_ctx = int(getattr(args, "num_ctx", 0) or 4096)
+    trainer_batch = 128
+    trainer_ubatch = 64
     if base_gguf and run_trainer:
         run_finetune_block = """
-if command -v finetune >/dev/null 2>&1; then
+FINETUNE_BIN="$(command -v finetune || command -v llama-finetune || true)"
+if [ -n "$FINETUNE_BIN" ]; then
   echo "Step 3: Running llama.cpp finetune..."
-  finetune --train-data "$PREPARED" --sample-start '### Instruction' \\
-    --model-base "$BASE_GGUF" --lora-out "$ADAPTER_DIR" || true
+  if "$FINETUNE_BIN" --help 2>&1 | grep -q -- "--train-data"; then
+    "$FINETUNE_BIN" --train-data "$PREPARED" --sample-start '### Instruction' \\
+      --model-base "$BASE_GGUF" --lora-out "$ADAPTER_DIR" || true
+  else
+    "$FINETUNE_BIN" --model "$BASE_GGUF" --file "$PREPARED" \\
+      --output "$ADAPTER_DIR/adapter.gguf" --epochs 1 \\
+      --ctx-size {trainer_ctx} --batch-size {trainer_batch} --ubatch-size {trainer_ubatch} || true
+  fi
 else
-  echo "Step 3: finetune not on PATH. Run: ollama-forge setup-llama-cpp and add to PATH."
-  echo "  Then: finetune --train-data \$PREPARED --sample-start '### Instruction' \\"
-  echo "    --model-base \$BASE_GGUF --lora-out \$ADAPTER_DIR"
+  echo "Step 3: finetune/llama-finetune not on PATH. Run: ollama-forge setup-llama-cpp and add to PATH."
+  echo "  Then run either:"
+  echo "    finetune --train-data \$PREPARED --sample-start '### Instruction' \\"
+  echo "      --model-base \$BASE_GGUF --lora-out \$ADAPTER_DIR"
+  echo "  Or:"
+  echo "    llama-finetune --model \$BASE_GGUF --file \$PREPARED --output \$ADAPTER_DIR/adapter.gguf --epochs 1"
 fi
 """
     else:
@@ -1931,16 +1944,40 @@ echo "Then: ollama run $NAME"
         if code.returncode != 0:
             return code.returncode
         if base_gguf and run_trainer:
-            code = subprocess.run(
-                [
-                    "finetune",
-                    "--train-data", "train_prepared.txt",
-                    "--sample-start", "### Instruction",
-                    "--model-base", base_gguf,
-                    "--lora-out", "./adapter_out",
-                ],
-                shell=False,
-            )
+            finetune_bin = shutil.which("finetune") or shutil.which("llama-finetune")
+            if finetune_bin:
+                try:
+                    help_result = subprocess.run(
+                        [finetune_bin, "--help"],
+                        capture_output=True,
+                        text=True,
+                        shell=False,
+                    )
+                    help_text = f"{help_result.stdout}\n{help_result.stderr}"
+                except OSError:
+                    help_text = ""
+                if "--train-data" in help_text:
+                    cmd = [
+                        finetune_bin,
+                        "--train-data", "train_prepared.txt",
+                        "--sample-start", "### Instruction",
+                        "--model-base", base_gguf,
+                        "--lora-out", "./adapter_out",
+                    ]
+                else:
+                    cmd = [
+                        finetune_bin,
+                        "--model", base_gguf,
+                        "--file", "train_prepared.txt",
+                        "--output", "./adapter_out/adapter.gguf",
+                        "--epochs", "1",
+                        "--ctx-size", str(trainer_ctx),
+                        "--batch-size", str(trainer_batch),
+                        "--ubatch-size", str(trainer_ubatch),
+                    ]
+            else:
+                cmd = ["finetune", "--help"]
+            code = subprocess.run(cmd, shell=False)
             if code.returncode != 0:
                 log.warning("finetune exited with %s; adapter may be incomplete.", code.returncode)
         print("Next: ollama-forge retrain --base", base, "--adapter ./adapter_out --name", name)
@@ -2015,6 +2052,9 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     base = args.base
     name = args.name
     base_gguf = getattr(args, "base_gguf", None)
+    trainer_ctx = int(getattr(args, "num_ctx", 0) or 4096)
+    trainer_batch = 128
+    trainer_ubatch = 64
     # Step 2: prepare
     try:
         n_samples = convert_jsonl_to_plain_text(paths, prepared_path, format_name=getattr(args, "format", "llama.cpp"))
@@ -2036,17 +2076,45 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         finetune_bin = shutil.which("finetune") or shutil.which("llama-finetune")
         if finetune_bin:
             adapter_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                finetune_bin,
-                "--train-data",
-                str(prepared_path.resolve()),
-                "--sample-start",
-                "### Instruction",
-                "--model-base",
-                str(Path(base_gguf).resolve()),
-                "--lora-out",
-                str(adapter_dir.resolve()),
-            ]
+            try:
+                help_result = subprocess.run(
+                    [finetune_bin, "--help"],
+                    capture_output=True,
+                    text=True,
+                )
+                help_text = f"{help_result.stdout}\n{help_result.stderr}"
+            except OSError:
+                help_text = ""
+            if "--train-data" in help_text:
+                cmd = [
+                    finetune_bin,
+                    "--train-data",
+                    str(prepared_path.resolve()),
+                    "--sample-start",
+                    "### Instruction",
+                    "--model-base",
+                    str(Path(base_gguf).resolve()),
+                    "--lora-out",
+                    str(adapter_dir.resolve()),
+                ]
+            else:
+                cmd = [
+                    finetune_bin,
+                    "--model",
+                    str(Path(base_gguf).resolve()),
+                    "--file",
+                    str(prepared_path.resolve()),
+                    "--output",
+                    str((adapter_dir / "adapter.gguf").resolve()),
+                    "--epochs",
+                    "1",
+                    "--ctx-size",
+                    str(trainer_ctx),
+                    "--batch-size",
+                    str(trainer_batch),
+                    "--ubatch-size",
+                    str(trainer_ubatch),
+                ]
             log.info("Running finetune (llama.cpp)...")
             result = subprocess.run(cmd)  # stdout/stderr inherited; progress visible
             if result.returncode != 0:
