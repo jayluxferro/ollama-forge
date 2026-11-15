@@ -8401,10 +8401,57 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         except Exception:
             pass
 
-    # Warn about multimodal models (abliteration only affects text decoder weights)
+    # Pre-flight checks for model format issues before creating the output dir
     if not from_checkpoint_dir and model_id:
         _model_path = Path(model_id)
         _check_dir = _model_path if _model_path.is_dir() else None
+
+        # Block MLX-quantized local checkpoints: PyTorch can't load them and the
+        # refusal direction computed from quantized activations would be garbage.
+        if _check_dir:
+            try:
+                from ollama_forge.model_family import is_mlx_quantized_checkpoint
+
+                if is_mlx_quantized_checkpoint(_check_dir):
+                    print_actionable_error(
+                        "Cannot abliterate an MLX-quantized model",
+                        cause=(
+                            f"{model_id}: config.json shows MLX weight quantization "
+                            "(bits/group_size in 'quantization' key)"
+                        ),
+                        next_steps=[
+                            "Abliterate the original fp16/bf16 HF model instead:",
+                            "  ollama-forge abliterate run --model <original-hf-repo> --name my-abliterated",
+                            "Then re-quantize the checkpoint with mlx-lm:",
+                            "  mlx_lm.convert --hf-path ./abliterate-my-abliterated/checkpoint --mlx-path ./abliterated-mlx --quantize",
+                        ],
+                    )
+                    return 1
+            except ImportError:
+                pass
+
+        # Auto-detect GGUF-only HF repos (e.g. unsloth/gemma-4-12b-it-GGUF) and
+        # pick the best GGUF filename so transformers can load them correctly.
+        if not _check_dir and not gguf_file_for_load_run:
+            try:
+                from ollama_forge.hf_fetch import is_gguf_only_repo, pick_one_gguf
+
+                _is_gguf_only, _gguf_files = is_gguf_only_repo(
+                    str(model_id),
+                    revision=getattr(args, "revision", None),
+                )
+                if _is_gguf_only and _gguf_files:
+                    prefer_q = getattr(args, "quant", None) or getattr(args, "prefer_quant", None)
+                    gguf_file_for_load_run = pick_one_gguf(_gguf_files, prefer_quant=prefer_q)
+                    log.info(
+                        "GGUF-only HF repo detected; loading '%s' from %s",
+                        gguf_file_for_load_run,
+                        model_id,
+                    )
+            except Exception as _e:
+                log.debug("Could not check if %s is GGUF-only: %s", model_id, _e)
+
+        # Warn about multimodal models (abliteration only affects text decoder weights)
         if _check_dir:
             try:
                 from ollama_forge.model_family import is_multimodal_checkpoint

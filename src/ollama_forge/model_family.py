@@ -394,6 +394,32 @@ def is_multimodal_checkpoint(checkpoint_dir: str | Path) -> bool:
     return False
 
 
+def is_mlx_quantized_checkpoint(checkpoint_dir: str | Path) -> bool:
+    """True if the checkpoint uses MLX weight quantization (mlx-lm format).
+
+    MLX quantization stores integer weights that PyTorch cannot load.  Abliterating
+    such a model is also conceptually wrong — quantization artifacts dominate the
+    activation statistics used to compute the refusal direction.  The right workflow
+    is to abliterate the original precision (fp16/bf16) model first, then quantize
+    the resulting checkpoint with mlx-lm.
+
+    Detects the ``"quantization": {"bits": N, "group_size": M}`` config key written
+    by ``mlx_lm.convert``.  This is distinct from BitsAndBytes / GPTQ quantization
+    which uses ``"quantization_config"`` with ``"load_in_4bit"``/``"load_in_8bit"``.
+    """
+    config_path = Path(checkpoint_dir) / "config.json"
+    if not config_path.is_file():
+        return False
+    with contextlib.suppress(Exception):
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        q = data.get("quantization")
+        # mlx-lm writes {"quantization": {"bits": N, "group_size": M, ...}}
+        # BnB writes {"quantization_config": {"quant_type": "nf4", ...}}
+        if isinstance(q, dict) and ("bits" in q or "group_size" in q):
+            return True
+    return False
+
+
 _GGUF_SUPPORTED_MODEL_TYPES: tuple[str, ...] = (
     "llama",
     "mistral",

@@ -71,6 +71,28 @@ def list_gguf_files(repo_id: str, revision: str | None = None) -> list[str]:
     return [f for f in files if f.lower().endswith(".gguf")]
 
 
+# Extensions that mean the HF repo has standard PyTorch/safetensors weights.
+_HF_WEIGHT_EXTENSIONS: tuple[str, ...] = (".safetensors", ".bin", ".pt")
+
+
+def is_gguf_only_repo(repo_id: str, revision: str | None = None) -> tuple[bool, list[str]]:
+    """Check whether a HF repo contains only GGUF files and no standard weight files.
+
+    Returns ``(is_gguf_only, list_of_gguf_filenames)``.  The check is cheap — it
+    fetches only the repo's file listing; no weight data is downloaded.
+
+    When ``is_gguf_only`` is True the caller can use
+    :func:`pick_one_gguf` to choose a filename and pass it as the
+    ``gguf_file`` kwarg to ``AutoModelForCausalLM.from_pretrained``.
+    """
+    from huggingface_hub import list_repo_files
+
+    all_files = list(list_repo_files(repo_id, revision=revision or "main"))
+    gguf = [f for f in all_files if f.lower().endswith(".gguf")]
+    has_weights = any(f.lower().endswith(_HF_WEIGHT_EXTENSIONS) for f in all_files)
+    return bool(gguf and not has_weights), gguf
+
+
 # Preferred quantization names (lowercase) for auto-pick when repo has multiple GGUF files.
 _PREFERRED_GGUF_SUBSTRINGS = ("q4_k_m", "q4_k_s", "q5_k_m", "q4_0", "q8_0")
 
