@@ -1,15 +1,11 @@
 """Tests for MLX-quantized and GGUF-only model detection."""
 
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from ollama_forge.hf_fetch import is_gguf_only_repo
-from ollama_forge.model_family import is_mlx_quantized_checkpoint
-
+from ollama_forge.model_family import is_mlx_quantized_checkpoint, is_mlx_quantized_config
 
 # ---------------------------------------------------------------------------
 # is_mlx_quantized_checkpoint
@@ -18,6 +14,26 @@ from ollama_forge.model_family import is_mlx_quantized_checkpoint
 
 def _write_config(d: Path, cfg: dict) -> None:
     (d / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+
+class TestIsMlxQuantizedConfig:
+    def test_bits_and_group_size(self) -> None:
+        assert is_mlx_quantized_config({"quantization": {"bits": 4, "group_size": 64}}) is True
+
+    def test_bits_only(self) -> None:
+        assert is_mlx_quantized_config({"quantization": {"bits": 2}}) is True
+
+    def test_bnb_quantization_config_not_flagged(self) -> None:
+        assert is_mlx_quantized_config({"quantization_config": {"quant_type": "nf4"}}) is False
+
+    def test_empty_config(self) -> None:
+        assert is_mlx_quantized_config({}) is False
+
+    def test_quantization_not_a_dict(self) -> None:
+        assert is_mlx_quantized_config({"quantization": "linear"}) is False
+
+    def test_quantization_dict_without_bits_or_group_size(self) -> None:
+        assert is_mlx_quantized_config({"quantization": {"type": "some_other"}}) is False
 
 
 class TestIsMlxQuantizedCheckpoint:

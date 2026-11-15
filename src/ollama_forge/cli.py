@@ -8363,7 +8363,8 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
             or (default_out if default_out else tempfile.mkdtemp(prefix="ollama-forge-abliterate-"))
         )
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        # output_dir.mkdir is intentionally deferred until after all pre-flight
+        # checks below pass — otherwise a failed check leaves an empty directory.
         refusal_pt = output_dir / "refusal_dir.pt"
         checkpoint_dir = output_dir / "checkpoint"
         gguf_path = output_dir / "model.gguf"
@@ -8406,29 +8407,53 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
         _model_path = Path(model_id)
         _check_dir = _model_path if _model_path.is_dir() else None
 
-        # Block MLX-quantized local checkpoints: PyTorch can't load them and the
-        # refusal direction computed from quantized activations would be garbage.
+        # Block MLX-quantized checkpoints (local dir or HF repo): PyTorch can't
+        # load MLX integer weights, and even if it could, the refusal direction
+        # computed from already-quantized activations would be meaningless.
+        _mlx_quantized = False
         if _check_dir:
             try:
                 from ollama_forge.model_family import is_mlx_quantized_checkpoint
 
-                if is_mlx_quantized_checkpoint(_check_dir):
-                    print_actionable_error(
-                        "Cannot abliterate an MLX-quantized model",
-                        cause=(
-                            f"{model_id}: config.json shows MLX weight quantization "
-                            "(bits/group_size in 'quantization' key)"
-                        ),
-                        next_steps=[
-                            "Abliterate the original fp16/bf16 HF model instead:",
-                            "  ollama-forge abliterate run --model <original-hf-repo> --name my-abliterated",
-                            "Then re-quantize the checkpoint with mlx-lm:",
-                            "  mlx_lm.convert --hf-path ./abliterate-my-abliterated/checkpoint --mlx-path ./abliterated-mlx --quantize",
-                        ],
-                    )
-                    return 1
+                _mlx_quantized = is_mlx_quantized_checkpoint(_check_dir)
             except ImportError:
                 pass
+        else:
+            # HF repo: download only config.json (~1 KB) to check without pulling weights.
+            try:
+                import json as _json
+
+                from huggingface_hub import hf_hub_download
+
+                from ollama_forge.model_family import is_mlx_quantized_config
+
+                _cfg_local = hf_hub_download(
+                    str(model_id),
+                    "config.json",
+                    revision=getattr(args, "revision", None) or "main",
+                )
+                _mlx_quantized = is_mlx_quantized_config(
+                    _json.loads(Path(_cfg_local).read_text(encoding="utf-8"))
+                )
+            except Exception as _e:
+                log.debug("Could not fetch config.json for %s: %s", model_id, _e)
+
+        if _mlx_quantized:
+            print_actionable_error(
+                "Cannot abliterate an MLX-quantized model",
+                cause=(
+                    f"{model_id}: config.json shows MLX weight quantization "
+                    "(bits/group_size in 'quantization' key)"
+                ),
+                next_steps=[
+                    "Abliterate the original fp16/bf16 HF model instead:",
+                    "  ollama-forge abliterate run --model <original-hf-repo> --name my-abliterated",
+                    "Then re-quantize the checkpoint with mlx-lm:",
+                    "  mlx_lm.convert --hf-path ./abliterate-my-abliterated/checkpoint"
+                    " --mlx-path ./abliterated-mlx --quantize",
+                ],
+            )
+            return 1
 
         # Auto-detect GGUF-only HF repos (e.g. unsloth/gemma-4-12b-it-GGUF) and
         # pick the best GGUF filename so transformers can load them correctly.
@@ -8463,6 +8488,10 @@ def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespac
                     )
             except ImportError:
                 pass
+
+    # All pre-flight checks passed — safe to create the output directory now.
+    if not from_checkpoint_dir and output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     if only_compute and not from_checkpoint_dir:
         harmful_path, harmless_path, temp_files = _resolve_abliterate_inputs(args)

@@ -394,6 +394,17 @@ def is_multimodal_checkpoint(checkpoint_dir: str | Path) -> bool:
     return False
 
 
+def is_mlx_quantized_config(config: dict) -> bool:
+    """True if a parsed config dict indicates MLX weight quantization (mlx-lm format).
+
+    mlx-lm writes ``{"quantization": {"bits": N, "group_size": M, ...}}``.
+    BitsAndBytes writes ``{"quantization_config": {"quant_type": "nf4", ...}}``.
+    The two are intentionally distinct so this check does not trip on BnB models.
+    """
+    q = config.get("quantization")
+    return isinstance(q, dict) and ("bits" in q or "group_size" in q)
+
+
 def is_mlx_quantized_checkpoint(checkpoint_dir: str | Path) -> bool:
     """True if the checkpoint uses MLX weight quantization (mlx-lm format).
 
@@ -412,11 +423,7 @@ def is_mlx_quantized_checkpoint(checkpoint_dir: str | Path) -> bool:
         return False
     with contextlib.suppress(Exception):
         data = json.loads(config_path.read_text(encoding="utf-8"))
-        q = data.get("quantization")
-        # mlx-lm writes {"quantization": {"bits": N, "group_size": M, ...}}
-        # BnB writes {"quantization_config": {"quant_type": "nf4", ...}}
-        if isinstance(q, dict) and ("bits" in q or "group_size" in q):
-            return True
+        return is_mlx_quantized_config(data)
     return False
 
 
