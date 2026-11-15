@@ -370,7 +370,7 @@ class TestVlmCliHandlers:
     def test_vlm_generate_handler(self, capsys):
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_generate
+        from ollama_forge.commands.vlm import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -394,7 +394,7 @@ class TestVlmCliHandlers:
     def test_vlm_generate_handler_verbose(self, capsys):
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_generate
+        from ollama_forge.commands.vlm import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -422,7 +422,7 @@ class TestVlmCliHandlers:
 
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_generate
+        from ollama_forge.commands.vlm import _cmd_vlm_generate
 
         args = argparse.Namespace(
             model="fake/model",
@@ -452,7 +452,7 @@ class TestVlmCliHandlers:
 
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_serve
+        from ollama_forge.commands.vlm import _cmd_vlm_serve
 
         args = argparse.Namespace(
             model="fake/model",
@@ -475,7 +475,7 @@ class TestVlmCliHandlers:
 
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_chat
+        from ollama_forge.commands.vlm import _cmd_vlm_chat
 
         args = argparse.Namespace(
             model="fake/model",
@@ -495,7 +495,7 @@ class TestVlmCliHandlers:
         """vlm convert handler should call vlm_convert and return 0."""
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_convert
+        from ollama_forge.commands.vlm import _cmd_vlm_convert
 
         args = argparse.Namespace(
             hf_path="fake/model",
@@ -515,7 +515,7 @@ class TestVlmCliHandlers:
         """vlm convert handler should work with --quantize."""
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_convert
+        from ollama_forge.commands.vlm import _cmd_vlm_convert
 
         args = argparse.Namespace(
             hf_path="fake/model",
@@ -535,7 +535,7 @@ class TestVlmCliHandlers:
         """vlm quantize handler should call vlm_convert with quantize=True and return 0."""
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_quantize
+        from ollama_forge.commands.vlm import _cmd_vlm_quantize
 
         args = argparse.Namespace(
             model="fake/model",
@@ -558,7 +558,7 @@ class TestVlmCliHandlers:
 
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_convert
+        from ollama_forge.commands.vlm import _cmd_vlm_convert
 
         args = argparse.Namespace(
             hf_path="fake/model",
@@ -583,7 +583,7 @@ class TestVlmCliHandlers:
 
         import argparse
 
-        from ollama_forge.cli import _cmd_vlm_quantize
+        from ollama_forge.commands.vlm import _cmd_vlm_quantize
 
         args = argparse.Namespace(
             model="fake/model",
