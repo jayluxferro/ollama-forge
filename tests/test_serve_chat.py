@@ -433,7 +433,7 @@ def test_turboquant_remote_chat_reports_non_stop_finish_reason(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """TurboQuant remote chat also reports length-stopped responses."""
-    from ollama_forge.cli import _turboquant_chat_remote
+    from ollama_forge.commands.turboquant import _turboquant_chat_remote
 
     class LengthStopHandler(_ChatMockHandler):
         def do_POST(self):

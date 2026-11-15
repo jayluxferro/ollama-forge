@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ import tempfile
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from ollama_forge.http_util import normalize_base_url
 from ollama_forge.log import get_logger
@@ -249,3 +250,82 @@ def check_item(name: str, ok: bool, missing_hint: str) -> bool:
     else:
         print(f"{name}: MISSING — {missing_hint}")
     return ok
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible SSE streaming utilities
+# ---------------------------------------------------------------------------
+
+
+def extract_stream_text(choice: dict[str, Any]) -> str:
+    """Best-effort text extraction from a streamed chat-completions chunk."""
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = delta.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+            return "".join(parts)
+    message = choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def stream_openai_chat_sse(resp: Any) -> tuple[str, str | None]:
+    """Read an SSE chat-completions HTTP response and print streamed tokens.
+
+    Returns ``(full_assistant_text, finish_reason)``.
+    """
+    assistant_text = ""
+    finish_reason = None
+    event_data: list[str] = []
+
+    def _consume(lines: list[str]) -> tuple[str, str | None, bool]:
+        if not lines:
+            return "", None, False
+        payload = "\n".join(lines)
+        if payload == "[DONE]":
+            return "", None, True
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            return "", None, False
+        choice = chunk.get("choices", [{}])[0]
+        return extract_stream_text(choice), choice.get("finish_reason"), False
+
+    while True:
+        raw_line = resp.readline()
+        if not raw_line:
+            tok, fin, done = _consume(event_data)
+            if tok:
+                print(tok, end="", flush=True)
+                assistant_text += tok
+            if fin is not None:
+                finish_reason = fin
+            break
+
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            tok, fin, done = _consume(event_data)
+            event_data.clear()
+            if tok:
+                print(tok, end="", flush=True)
+                assistant_text += tok
+            if fin is not None:
+                finish_reason = fin
+            if done:
+                break
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data: "):
+            event_data.append(line[6:])
+
+    return assistant_text, finish_reason
