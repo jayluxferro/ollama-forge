@@ -55,7 +55,7 @@ def test_chat_help() -> None:
 
 def test_which_llama_server_on_path() -> None:
     """When llama-server is on PATH, return it."""
-    from ollama_forge.cli import _which_llama_server
+    from ollama_forge.run_helpers import _which_llama_server
 
     with patch("shutil.which", return_value="/usr/local/bin/llama-server"):
         assert _which_llama_server() == "/usr/local/bin/llama-server"
@@ -63,7 +63,7 @@ def test_which_llama_server_on_path() -> None:
 
 def test_which_llama_server_not_found(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """When llama-server is nowhere, return None."""
-    from ollama_forge.cli import _which_llama_server
+    from ollama_forge.run_helpers import _which_llama_server
 
     # Run from a temp dir so ./llama.cpp doesn't match the repo checkout
     monkeypatch.chdir(tmp_path)
@@ -74,7 +74,7 @@ def test_which_llama_server_not_found(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 def test_which_llama_server_in_build_dir(tmp_path: Path) -> None:
     """When llama-server exists in llama.cpp/build/bin, find it."""
-    from ollama_forge.cli import _which_llama_server
+    from ollama_forge.run_helpers import _which_llama_server
 
     bin_dir = tmp_path / "build" / "bin"
     bin_dir.mkdir(parents=True)
@@ -94,7 +94,7 @@ def test_which_llama_server_in_build_dir(tmp_path: Path) -> None:
 
 def test_resolve_llama_cpp_dir_from_arg_explicit(tmp_path: Path) -> None:
     """Explicit --llama-cpp-dir is returned."""
-    from ollama_forge.cli import _resolve_llama_cpp_dir_from_arg
+    from ollama_forge.run_helpers import _resolve_llama_cpp_dir_from_arg
 
     args = argparse.Namespace(llama_cpp_dir=str(tmp_path))
     assert _resolve_llama_cpp_dir_from_arg(args) == tmp_path
@@ -102,7 +102,7 @@ def test_resolve_llama_cpp_dir_from_arg_explicit(tmp_path: Path) -> None:
 
 def test_resolve_llama_cpp_dir_from_arg_none() -> None:
     """When no dir given and no well-known dirs exist, return None."""
-    from ollama_forge.cli import _resolve_llama_cpp_dir_from_arg
+    from ollama_forge.run_helpers import _resolve_llama_cpp_dir_from_arg
 
     args = argparse.Namespace(llama_cpp_dir=None)
     with patch.object(Path, "is_dir", return_value=False):
@@ -118,7 +118,7 @@ def test_resolve_llama_cpp_dir_from_arg_none() -> None:
 
 def test_serve_missing_gguf(tmp_path: Path) -> None:
     """serve exits 1 when GGUF file doesn't exist."""
-    from ollama_forge.cli import _cmd_serve
+    from ollama_forge.commands.serve import _cmd_serve
 
     args = argparse.Namespace(
         model=str(tmp_path / "nonexistent.gguf"),
@@ -140,7 +140,7 @@ def test_serve_missing_gguf(tmp_path: Path) -> None:
 
 def test_serve_no_server_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """serve exits 1 when llama-server binary can't be found."""
-    from ollama_forge.cli import _cmd_serve
+    from ollama_forge.commands.serve import _cmd_serve
 
     gguf = tmp_path / "test.gguf"
     gguf.touch()
@@ -176,7 +176,7 @@ def test_serve_no_server_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 def test_lib_env_adds_bin_dir() -> None:
     """_llama_cpp_lib_env sets library path for the server binary's directory."""
-    from ollama_forge.cli import _llama_cpp_lib_env
+    from ollama_forge.run_helpers import _llama_cpp_lib_env
 
     env = _llama_cpp_lib_env("/some/path/build/bin/llama-server")
     if sys.platform == "darwin":
@@ -192,7 +192,7 @@ def test_lib_env_adds_bin_dir() -> None:
 
 def test_wait_for_server_success() -> None:
     """_wait_for_server returns True when server responds."""
-    from ollama_forge.cli import _wait_for_server
+    from ollama_forge.commands.serve import _wait_for_server
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -215,7 +215,7 @@ def test_wait_for_server_success() -> None:
 
 def test_wait_for_server_timeout() -> None:
     """_wait_for_server returns False when server never responds."""
-    from ollama_forge.cli import _wait_for_server
+    from ollama_forge.commands.serve import _wait_for_server
 
     # Use a port that nothing listens on
     assert not _wait_for_server("http://127.0.0.1:1", timeout=0.5, interval=0.1)
@@ -260,7 +260,7 @@ class _ChatMockHandler(BaseHTTPRequestHandler):
 
 def test_chat_single_turn() -> None:
     """Chat sends a message and receives a streamed response."""
-    from ollama_forge.cli import _cmd_chat
+    from ollama_forge.commands.serve import _cmd_chat
 
     server = HTTPServer(("127.0.0.1", 0), _ChatMockHandler)
     port = server.server_address[1]
@@ -288,7 +288,7 @@ def test_chat_single_turn() -> None:
 
 def test_chat_with_system_prompt() -> None:
     """Chat includes system message when --system is given."""
-    from ollama_forge.cli import _cmd_chat
+    from ollama_forge.commands.serve import _cmd_chat
 
     received_messages = []
 
@@ -333,7 +333,7 @@ def test_chat_with_system_prompt() -> None:
 
 def test_chat_clear_command() -> None:
     """The /clear command resets conversation history."""
-    from ollama_forge.cli import _cmd_chat
+    from ollama_forge.commands.serve import _cmd_chat
 
     request_count = [0]
     assertion_errors: list[str] = []
@@ -386,7 +386,7 @@ def test_chat_clear_command() -> None:
 
 def test_chat_reports_non_stop_finish_reason(capsys: pytest.CaptureFixture[str]) -> None:
     """Chat surfaces finish_reason when the server stops for length."""
-    from ollama_forge.cli import _cmd_chat
+    from ollama_forge.commands.serve import _cmd_chat
 
     class LengthStopHandler(_ChatMockHandler):
         def do_POST(self):
