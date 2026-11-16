@@ -41,7 +41,7 @@ def _save_last_plan(plan_command: str, plan_obj: dict) -> None:
 
 def _cmd_plan_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Plan wrapper for quickstart."""
-    from ollama_forge.cli import _cmd_quickstart  # lazy: avoids circular import at module load
+    from ollama_forge.commands.fetch import _cmd_quickstart
 
     fake = argparse.Namespace(
         name=args.name,
@@ -64,7 +64,7 @@ def _cmd_plan_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespa
 
 def _cmd_plan_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Plan wrapper for auto routing."""
-    from ollama_forge.cli import _cmd_auto  # lazy: avoids circular import at module load
+    from ollama_forge.commands.auto import _cmd_auto
 
     fake = argparse.Namespace(
         source=args.source,
@@ -179,9 +179,7 @@ def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace
 
 def _add_plan_args(subparsers) -> argparse.ArgumentParser:
     """Register the 'plan' subcommand and all its subparsers."""
-    # Lazy import to avoid circular dependency; _QUICKSTART_TASK_SYSTEMS lives in cli.py
-    # (will move to commands/fetch.py once that module is extracted)
-    from ollama_forge.cli import _QUICKSTART_TASK_SYSTEMS  # noqa: PLC0415
+    from ollama_forge.commands.fetch import _QUICKSTART_TASK_SYSTEMS
 
     p_plan = subparsers.add_parser(
         "plan",

@@ -2250,7 +2250,8 @@ def _cmd_abliterate_benchmark(parser: argparse.ArgumentParser, args: argparse.Na
 
 
 def _cmd_abliterate_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    from ollama_forge.cli import _convert_gguf_checkpoint, _llama_cpp_lib_env, _which_quantize_full
+    from ollama_forge.commands.convert import _convert_gguf_checkpoint
+    from ollama_forge.run_helpers import _llama_cpp_lib_env, _which_quantize_full
     """One command: compute direction, bake into weights, convert to GGUF, create Ollama model."""
     config_path = getattr(args, "config", None)
     cfg: dict | None = None
