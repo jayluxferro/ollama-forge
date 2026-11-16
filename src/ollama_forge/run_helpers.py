@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -329,3 +330,141 @@ def stream_openai_chat_sse(resp: Any) -> tuple[str, str | None]:
             event_data.append(line[6:])
 
     return assistant_text, finish_reason
+
+
+# ---------------------------------------------------------------------------
+# llama.cpp binary discovery
+# ---------------------------------------------------------------------------
+
+
+def _which_quantize() -> str | None:
+    """Resolve llama.cpp quantize binary (quantize or llama-quantize)."""
+    return shutil.which("quantize") or shutil.which("llama-quantize")
+
+
+def _which_quantize_full(llama_cpp_dir: Path | None = None) -> str | None:
+    """Resolve quantize binary: check PATH, then llama.cpp build dirs."""
+    on_path = _which_quantize()
+    if on_path:
+        return on_path
+    candidates: list[Path] = []
+    if llama_cpp_dir:
+        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-quantize")
+    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+        candidates.append(d / "build" / "bin" / "llama-quantize")
+        candidates.append(d / "build" / "bin" / "quantize")
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+    return None
+
+
+def _which_llama_server(llama_cpp_dir: Path | None = None) -> str | None:
+    """Resolve llama-server binary: check PATH, then llama.cpp build dirs."""
+    on_path = shutil.which("llama-server")
+    if on_path:
+        return on_path
+    candidates: list[Path] = []
+    if llama_cpp_dir:
+        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-server")
+    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+        candidates.append(d / "build" / "bin" / "llama-server")
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+    return None
+
+
+def _resolve_llama_cpp_dir_from_arg(args: argparse.Namespace) -> Path | None:
+    """Resolve llama.cpp directory from --llama-cpp-dir or well-known locations."""
+    llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
+    if not llama_cpp_dir:
+        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
+            if candidate.is_dir():
+                llama_cpp_dir = candidate
+                break
+    return llama_cpp_dir
+
+
+def _llama_cpp_lib_env(server_bin: str) -> dict[str, str]:
+    """Build environment dict so llama-server / llama-quantize can find shared libraries."""
+    env = dict(os.environ)
+    bin_dir = str(Path(server_bin).resolve().parent)
+    if sys.platform == "darwin":
+        existing = env.get("DYLD_LIBRARY_PATH", "")
+        env["DYLD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
+    elif sys.platform == "linux":
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
+    return env
+
+
+# ---------------------------------------------------------------------------
+# GGUF cache utilities
+# ---------------------------------------------------------------------------
+
+
+def _ollama_forge_cache_dir() -> Path:
+    """Return the ollama-forge cache root (``~/.cache/ollama-forge`` or ``OLLAMA_FORGE_CACHE``)."""
+    return Path(os.environ.get("OLLAMA_FORGE_CACHE", Path.home() / ".cache" / "ollama-forge"))
+
+
+def _gguf_cache_dir_for_repo(repo_id: str) -> Path:
+    """Return ``<cache>/gguf/<owner>/<repo>/`` for storing converted GGUFs."""
+    return _ollama_forge_cache_dir() / "gguf" / repo_id.replace("/", os.sep)
+
+
+def _resolve_gguf_from_forge_cache(repo_id: str) -> Path | None:
+    """Look for a previously converted GGUF in the ollama-forge cache.
+
+    Prefers quantized files (smaller) over raw bf16/f16 ones.
+    """
+    cache = _gguf_cache_dir_for_repo(repo_id)
+    if not cache.is_dir():
+        return None
+    gguf_files = list(cache.glob("*.gguf"))
+    if not gguf_files:
+        return None
+    if len(gguf_files) == 1:
+        return gguf_files[0]
+    from ollama_forge.hf_fetch import pick_one_gguf
+    names = [p.name for p in gguf_files]
+    best = pick_one_gguf(names)
+    return next(p for p in gguf_files if p.name == best)
+
+
+def _resolve_gguf_from_hf_cache(repo_id: str) -> Path | None:
+    """Search the HF cache for a GGUF file belonging to *repo_id*. Returns the best match or None."""
+    try:
+        from huggingface_hub import scan_cache_dir
+    except ImportError:
+        return None
+    try:
+        cache_info = scan_cache_dir()
+    except Exception:
+        return None
+    for repo in cache_info.repos:
+        if repo.repo_id != repo_id:
+            continue
+        gguf_files: list[Path] = []
+        for rev in repo.revisions:
+            for f in rev.files:
+                if f.file_name.endswith(".gguf"):
+                    gguf_files.append(f.file_path)
+        if not gguf_files:
+            return None
+        from ollama_forge.hf_fetch import pick_one_gguf
+        names = [p.name for p in gguf_files]
+        best = pick_one_gguf(names)
+        return next(p for p in gguf_files if p.name == best)
+    return None
+
+
+def _hf_cache_has_repo(repo_id: str) -> bool:
+    """Return True if the HF cache contains any snapshot for *repo_id*."""
+    try:
+        from huggingface_hub import scan_cache_dir
+        cache_info = scan_cache_dir()
+    except Exception:
+        return False
+    return any(r.repo_id == repo_id for r in cache_info.repos)

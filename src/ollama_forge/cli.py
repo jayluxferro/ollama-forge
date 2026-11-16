@@ -34,8 +34,16 @@ from dotenv import load_dotenv
 
 from ollama_forge.commands.abliterate import register as _register_abliterate_cmds
 from ollama_forge.commands.adapters import register as _register_adapters_cmds
+from ollama_forge.commands.auto import register as _register_auto_cmds
 from ollama_forge.commands.cache import register as _register_cache_cmds
+from ollama_forge.commands.convert import register as _register_convert_cmds
+from ollama_forge.commands.fetch import register as _register_fetch_cmds
+from ollama_forge.commands.model import register as _register_model_cmds
+from ollama_forge.commands.plan import register as _register_plan_cmds
+from ollama_forge.commands.quantize import register as _register_quantize_cmds
 from ollama_forge.commands.security_eval import register as _register_security_eval_cmds
+from ollama_forge.commands.serve import register as _register_serve_cmds
+from ollama_forge.commands.setup import register as _register_setup_cmds
 from ollama_forge.commands.study import register as _register_study_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
@@ -60,6 +68,15 @@ from ollama_forge.modelfile import (
 )
 from ollama_forge.recipe import load_recipe
 from ollama_forge.run_helpers import (
+    _hf_cache_has_repo,
+    _llama_cpp_lib_env,
+    _ollama_forge_cache_dir,
+    _resolve_gguf_from_forge_cache,
+    _resolve_gguf_from_hf_cache,
+    _resolve_llama_cpp_dir_from_arg,
+    _which_llama_server,
+    _which_quantize,
+    _which_quantize_full,
     check_item,
     print_actionable_error,
     require_ollama,
@@ -92,55 +109,6 @@ def _save_last_plan(plan_command: str, plan_obj: dict) -> None:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as e:
         log.debug("Could not save last plan to %s: %s", path, e)
-
-
-def _which_quantize() -> str | None:
-    """Resolve llama.cpp quantize binary (quantize or llama-quantize)."""
-    return shutil.which("quantize") or shutil.which("llama-quantize")
-
-
-def _which_quantize_full(llama_cpp_dir: Path | None = None) -> str | None:
-    """Resolve quantize binary: check PATH, then llama.cpp build dirs."""
-    on_path = _which_quantize()
-    if on_path:
-        return on_path
-    candidates: list[Path] = []
-    if llama_cpp_dir:
-        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-quantize")
-    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
-        candidates.append(d / "build" / "bin" / "llama-quantize")
-        candidates.append(d / "build" / "bin" / "quantize")
-    for c in candidates:
-        if c.is_file():
-            return str(c.resolve())
-    return None
-
-
-def _which_llama_server(llama_cpp_dir: Path | None = None) -> str | None:
-    """Resolve llama-server binary: check PATH, then llama.cpp build dirs."""
-    on_path = shutil.which("llama-server")
-    if on_path:
-        return on_path
-    candidates: list[Path] = []
-    if llama_cpp_dir:
-        candidates.append(llama_cpp_dir / "build" / "bin" / "llama-server")
-    for d in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
-        candidates.append(d / "build" / "bin" / "llama-server")
-    for c in candidates:
-        if c.is_file():
-            return str(c.resolve())
-    return None
-
-
-def _resolve_llama_cpp_dir_from_arg(args: argparse.Namespace) -> Path | None:
-    """Resolve llama.cpp directory from --llama-cpp-dir or well-known locations."""
-    llama_cpp_dir = getattr(args, "llama_cpp_dir", None) and Path(args.llama_cpp_dir)
-    if not llama_cpp_dir:
-        for candidate in [Path("llama.cpp"), Path.home() / "llama.cpp"]:
-            if candidate.is_dir():
-                llama_cpp_dir = candidate
-                break
-    return llama_cpp_dir
 
 
 def _convert_gguf_with_llama_cpp(
@@ -755,36 +723,6 @@ def _cmd_refresh_template(parser: argparse.ArgumentParser, args: argparse.Namesp
             print(merged)
         return 0
     return run_ollama_create(output_name, merged, out_path=getattr(args, "out_modelfile", None))
-
-
-def _ollama_forge_cache_dir() -> Path:
-    """Return the ollama-forge cache root (``~/.cache/ollama-forge`` or ``OLLAMA_FORGE_CACHE``)."""
-    return Path(os.environ.get("OLLAMA_FORGE_CACHE", Path.home() / ".cache" / "ollama-forge"))
-
-
-def _gguf_cache_dir_for_repo(repo_id: str) -> Path:
-    """Return ``<cache>/gguf/<owner>/<repo>/`` for storing converted GGUFs."""
-    return _ollama_forge_cache_dir() / "gguf" / repo_id.replace("/", os.sep)
-
-
-def _resolve_gguf_from_forge_cache(repo_id: str) -> Path | None:
-    """Look for a previously converted GGUF in the ollama-forge cache.
-
-    Prefers quantized files (smaller) over raw bf16/f16 ones.
-    """
-    cache = _gguf_cache_dir_for_repo(repo_id)
-    if not cache.is_dir():
-        return None
-    gguf_files = list(cache.glob("*.gguf"))
-    if not gguf_files:
-        return None
-    if len(gguf_files) == 1:
-        return gguf_files[0]
-    # Prefer quantized (smaller) files — they have quant tags like Q4_K_M in the name
-    from ollama_forge.hf_fetch import pick_one_gguf
-    names = [p.name for p in gguf_files]
-    best = pick_one_gguf(names)
-    return next(p for p in gguf_files if p.name == best)
 
 
 def _fetch_download_only_convert(args: argparse.Namespace) -> int:
@@ -2259,19 +2197,6 @@ def _cmd_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 # serve – spin up llama-server with a GGUF model
 # ---------------------------------------------------------------------------
 
-def _llama_cpp_lib_env(server_bin: str) -> dict[str, str]:
-    """Build environment dict so llama-server can find its shared libraries."""
-    env = dict(os.environ)
-    bin_dir = str(Path(server_bin).resolve().parent)
-    if sys.platform == "darwin":
-        existing = env.get("DYLD_LIBRARY_PATH", "")
-        env["DYLD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
-    elif sys.platform == "linux":
-        existing = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
-    return env
-
-
 def _wait_for_server(url: str, timeout: float = 30.0, interval: float = 0.5) -> bool:
     """Poll GET ``url`` until it responds 200 or *timeout* seconds elapse."""
     import time
@@ -2289,44 +2214,6 @@ def _wait_for_server(url: str, timeout: float = 30.0, interval: float = 0.5) -> 
             pass
         time.sleep(interval)
     return False
-
-
-def _resolve_gguf_from_hf_cache(repo_id: str) -> Path | None:
-    """Search the HF cache for a GGUF file belonging to *repo_id*. Returns the best match or None."""
-    try:
-        from huggingface_hub import scan_cache_dir
-    except ImportError:
-        return None
-    try:
-        cache_info = scan_cache_dir()
-    except Exception:
-        return None
-    for repo in cache_info.repos:
-        if repo.repo_id != repo_id:
-            continue
-        gguf_files: list[Path] = []
-        for rev in repo.revisions:
-            for f in rev.files:
-                if f.file_name.endswith(".gguf"):
-                    gguf_files.append(f.file_path)
-        if not gguf_files:
-            return None
-        # Prefer a quantised file over the raw bf16/f16 one
-        from ollama_forge.hf_fetch import pick_one_gguf
-        names = [p.name for p in gguf_files]
-        best = pick_one_gguf(names)
-        return next(p for p in gguf_files if p.name == best)
-    return None
-
-
-def _hf_cache_has_repo(repo_id: str) -> bool:
-    """Return True if the HF cache contains any snapshot for *repo_id*."""
-    try:
-        from huggingface_hub import scan_cache_dir
-        cache_info = scan_cache_dir()
-    except Exception:
-        return False
-    return any(r.repo_id == repo_id for r in cache_info.repos)
 
 
 def _cmd_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
