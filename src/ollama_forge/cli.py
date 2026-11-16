@@ -4,15 +4,11 @@ import argparse
 import contextlib
 import json
 import os
-import re
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 # Prevent PyTorch's MPS allocator from contending with MLX on the Metal
 # device. PyTorch's default high-watermark ratio lets its allocator issue
@@ -36,14 +32,10 @@ from ollama_forge.commands.abliterate import register as _register_abliterate_cm
 from ollama_forge.commands.adapters import register as _register_adapters_cmds
 from ollama_forge.commands.auto import register as _register_auto_cmds
 from ollama_forge.commands.cache import register as _register_cache_cmds
-from ollama_forge.commands.convert import register as _register_convert_cmds
-from ollama_forge.commands.fetch import register as _register_fetch_cmds
-from ollama_forge.commands.model import register as _register_model_cmds
 from ollama_forge.commands.plan import register as _register_plan_cmds
 from ollama_forge.commands.quantize import register as _register_quantize_cmds
 from ollama_forge.commands.security_eval import register as _register_security_eval_cmds
 from ollama_forge.commands.serve import register as _register_serve_cmds
-from ollama_forge.commands.setup import register as _register_setup_cmds
 from ollama_forge.commands.study import register as _register_study_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
@@ -58,23 +50,14 @@ from ollama_forge.hf_fetch import (
 from ollama_forge.log import get_logger, set_verbose
 from ollama_forge.modelfile import (
     build_modelfile,
-    get_stop_tokens_from_checkpoint,
     merge_modelfile_with_reference_template,
-    modelfile_append_num_predict,
-    modelfile_append_renderer_parser,
-    modelfile_append_stop_parameters,
-    modelfile_append_template,
-    template_from_hf_checkpoint,
 )
 from ollama_forge.recipe import load_recipe
 from ollama_forge.run_helpers import (
-    _hf_cache_has_repo,
+    _gguf_cache_dir_for_repo,
     _llama_cpp_lib_env,
-    _ollama_forge_cache_dir,
     _resolve_gguf_from_forge_cache,
-    _resolve_gguf_from_hf_cache,
     _resolve_llama_cpp_dir_from_arg,
-    _which_llama_server,
     _which_quantize,
     _which_quantize_full,
     check_item,
@@ -83,334 +66,10 @@ from ollama_forge.run_helpers import (
     run_cmd,
     run_ollama_create,
     run_ollama_show_modelfile,
-    stream_openai_chat_sse,
 )
 
 log = get_logger()
 
-
-def _plan_file_path() -> Path:
-    """Path for persisting last plan (for 'plan continue')."""
-    if os.environ.get("OLLAMA_FORGE_PLAN_FILE"):
-        return Path(os.environ["OLLAMA_FORGE_PLAN_FILE"]).expanduser().resolve()
-    return Path.cwd() / ".ollama-forge-last-plan.json"
-
-
-def _save_last_plan(plan_command: str, plan_obj: dict) -> None:
-    """Persist plan JSON so 'plan continue' can show or re-run it."""
-    path = _plan_file_path()
-    payload = {
-        "plan_command": plan_command,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-        **plan_obj,
-    }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except OSError as e:
-        log.debug("Could not save last plan to %s: %s", path, e)
-
-
-def _convert_gguf_with_llama_cpp(
-    checkpoint_dir: Path,
-    gguf_path: Path,
-    llama_cpp_dir: Path,
-    outtype: str = "bf16",
-) -> int:
-    """Convert HF checkpoint to GGUF using llama.cpp convert_hf_to_gguf.py. Returns exit code."""
-    print("Converting to GGUF (llama.cpp)...", file=sys.stderr)
-    convert_script = (llama_cpp_dir / "convert_hf_to_gguf.py").resolve()
-    try:
-        subprocess.run(
-            [
-                sys.executable,
-                str(convert_script),
-                str(checkpoint_dir.resolve()),
-                "--outfile",
-                str(gguf_path.resolve()),
-                "--outtype",
-                outtype,
-            ],
-            cwd=str(llama_cpp_dir.resolve()),
-            check=True,
-            timeout=3600,
-        )
-    except subprocess.TimeoutExpired:
-        print_actionable_error(
-            "GGUF conversion timed out after 3600s",
-            next_steps=[
-                "Try a smaller model or increase system resources",
-                "Re-run with --llama-cpp-dir <path>",
-            ],
-        )
-        return 1
-    except subprocess.CalledProcessError as e:
-        print_actionable_error(
-            "GGUF conversion failed (llama.cpp)",
-            cause=str(e),
-            next_steps=[
-                "Ensure llama.cpp convert_hf_to_gguf.py runs in that directory",
-                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
-                "Or try --gguf-converter unsloth (requires: pip install unsloth)",
-            ],
-        )
-        return 1
-    if not gguf_path.is_file():
-        print_actionable_error(
-            "GGUF file was not produced",
-            next_steps=["Check disk space and llama.cpp convert script output"],
-        )
-        return 1
-    return 0
-
-
-def _convert_gguf_checkpoint(
-    *,
-    checkpoint_dir: Path,
-    gguf_path: Path,
-    llama_cpp_dir: Path | None,
-    outtype: str = "bf16",
-    quant_type: str = "Q4_K_M",
-    gguf_converter: str = "auto",
-) -> int:
-    """Dispatch GGUF conversion to llama-cpp, unsloth, or auto (try llama-cpp then unsloth). Returns exit code."""
-    if gguf_converter == "unsloth":
-        return _convert_gguf_with_unsloth(checkpoint_dir, gguf_path, quant_type=quant_type)
-
-    if gguf_converter == "llama-cpp":
-        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
-            print_actionable_error(
-                "convert_hf_to_gguf.py not found",
-                next_steps=[
-                    "Clone llama.cpp and set --llama-cpp-dir to the clone path",
-                    "Or run: ollama-forge setup-llama-cpp",
-                ],
-            )
-            return 1
-        return _convert_gguf_with_llama_cpp(checkpoint_dir, gguf_path, llama_cpp_dir, outtype=outtype)
-
-    # auto: try llama-cpp first, fall back to unsloth
-    if llama_cpp_dir and (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
-        rc = _convert_gguf_with_llama_cpp(checkpoint_dir, gguf_path, llama_cpp_dir, outtype=outtype)
-        if rc == 0:
-            return 0
-        log.info("llama.cpp conversion failed; trying unsloth fallback...")
-
-    # Try unsloth
-    try:
-        import unsloth  # noqa: F401
-    except (ImportError, NotImplementedError):
-        if not llama_cpp_dir or not (llama_cpp_dir / "convert_hf_to_gguf.py").is_file():
-            print_actionable_error(
-                "No GGUF converter available",
-                next_steps=[
-                    "Set up llama.cpp: ollama-forge setup-llama-cpp",
-                    "Or install unsloth: pip install unsloth",
-                ],
-            )
-        else:
-            print_actionable_error(
-                "llama.cpp conversion failed and unsloth is not installed for fallback",
-                next_steps=[
-                    "Install unsloth: pip install unsloth",
-                    "Or fix the llama.cpp error above",
-                ],
-            )
-        return 1
-    return _convert_gguf_with_unsloth(checkpoint_dir, gguf_path, quant_type=quant_type)
-
-
-def _convert_gguf_with_unsloth(
-    checkpoint_dir: Path,
-    gguf_path: Path,
-    quant_type: str = "Q4_K_M",
-) -> int:
-    """Convert HF checkpoint to GGUF using unsloth. Returns exit code (0=success)."""
-    try:
-        import unsloth  # noqa: F401
-        from unsloth import FastLanguageModel  # type: ignore[import-untyped]
-    except (ImportError, NotImplementedError) as exc:
-        print_actionable_error(
-            f"unsloth is not available: {exc}",
-            next_steps=[
-                "Install: pip install unsloth",
-                "Or use --gguf-converter llama-cpp to skip unsloth",
-            ],
-        )
-        return 1
-
-    log.info("Converting to GGUF with unsloth...")
-    try:
-        model, tokenizer = FastLanguageModel.from_pretrained(str(checkpoint_dir.resolve()))
-        model.save_pretrained_gguf(
-            str(gguf_path.parent),
-            tokenizer,
-            quantization_method=quant_type,
-        )
-        # unsloth may produce files with varying names; find the .gguf in output dir
-        produced = list(gguf_path.parent.glob("*.gguf"))
-        if produced and not gguf_path.is_file():
-            # Rename the first produced GGUF to the expected path
-            produced[0].rename(gguf_path)
-        if gguf_path.is_file():
-            log.info("Unsloth GGUF conversion succeeded: %s", gguf_path)
-            return 0
-        print_actionable_error(
-            "unsloth did not produce a GGUF file",
-            next_steps=["Check unsloth output above for errors"],
-        )
-        return 1
-    except Exception as e:
-        print_actionable_error(
-            "unsloth GGUF conversion failed",
-            cause=str(e),
-            next_steps=[
-                "Check that unsloth supports this model architecture",
-                "Try --gguf-converter llama-cpp instead",
-            ],
-        )
-        return 1
-
-
-def _hf_checkpoint_to_ollama(
-    *,
-    checkpoint_dir: Path,
-    gguf_path: Path,
-    llama_cpp_dir: Path | None,
-    name: str,
-    outtype: str = "bf16",
-    requantize: bool = True,
-    quant_type: str = "Q4_K_M",
-    template_from: str | None = None,
-    system: str | None = None,
-    temperature: float | None = None,
-    num_ctx: int | None = None,
-    top_p: float | None = None,
-    repeat_penalty: float | None = None,
-    out_modelfile: str | Path | None = None,
-    gguf_converter: str = "auto",
-) -> int:
-    """Convert HF checkpoint → GGUF → (quantize) → derive template → ollama create. Returns exit code."""
-    from ollama_forge.model_family import remap_architecture_in_config
-
-    # -- 0. Remap architecture aliases in config.json before conversion --------------------
-    config_path = checkpoint_dir / "config.json"
-    if config_path.is_file():
-        orig_arch = remap_architecture_in_config(config_path)
-        if orig_arch:
-            log.info("Remapped architecture %r for GGUF conversion", orig_arch)
-
-    # -- 1. Convert HF checkpoint to GGUF -----------------------------------------------
-    rc = _convert_gguf_checkpoint(
-        checkpoint_dir=checkpoint_dir,
-        gguf_path=gguf_path,
-        llama_cpp_dir=llama_cpp_dir,
-        outtype=outtype,
-        quant_type=quant_type,
-        gguf_converter=gguf_converter,
-    )
-    if rc != 0:
-        return rc
-
-    # -- 2. Optionally requantize (skip when unsloth already quantized) -----------------
-    gguf_to_use = gguf_path
-    if requantize and gguf_converter != "unsloth":
-        quantize_bin = _which_quantize_full(llama_cpp_dir)
-        if not quantize_bin:
-            print_actionable_error(
-                "requantize (default) requires llama.cpp quantize",
-                next_steps=[
-                    "Run: ollama-forge setup-llama-cpp; add the build dir to PATH",
-                    "Or pass --no-requantize to keep full-size GGUF (no quantize step)",
-                ],
-            )
-            return 1
-        quant_gguf = gguf_path.parent / f"{gguf_path.stem}-{quant_type}.gguf"
-        print(f"Quantizing to {quant_type}...", file=sys.stderr)
-        env = _llama_cpp_lib_env(quantize_bin)
-        try:
-            subprocess.run(
-                [quantize_bin, str(gguf_path), str(quant_gguf), quant_type],
-                check=True,
-                timeout=7200,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            print_actionable_error(
-                "quantization timed out after 3600s",
-                next_steps=[
-                    "Try --no-requantize to skip quantize and use full-size GGUF",
-                    "Or re-run with more time / smaller quant type",
-                ],
-            )
-            return 1
-        except subprocess.CalledProcessError as e:
-            print_actionable_error(
-                "quantization failed",
-                cause=str(e),
-                next_steps=[
-                    "Ensure llama.cpp quantize (or llama-quantize) is on PATH",
-                    "Or pass --no-requantize to keep full-size GGUF",
-                ],
-            )
-            return 1
-        if quant_gguf.is_file():
-            gguf_to_use = quant_gguf
-
-    # -- 3. Build Modelfile with generation params --------------------------------------
-    gguf_for_modelfile = gguf_to_use.resolve()
-    content = build_modelfile(
-        str(gguf_for_modelfile),
-        system=system,
-        temperature=temperature,
-        num_ctx=num_ctx,
-        top_p=top_p,
-        repeat_penalty=repeat_penalty,
-    )
-
-    # -- 4. Template selection ----------------------------------------------------------
-    # Check for native Ollama RENDERER/PARSER support first — these handle chat
-    # formatting, thinking, tools, and vision natively, so we skip template derivation.
-    from ollama_forge.model_family import get_native_renderer_parser
-
-    renderer, parser = get_native_renderer_parser(checkpoint_dir)
-    if renderer:
-        content = modelfile_append_renderer_parser(content, renderer, parser)
-        log.info("Using native Ollama RENDERER %r / PARSER %r", renderer, parser)
-    elif template_from:
-        ref_content = run_ollama_show_modelfile(template_from)
-        if ref_content:
-            content = merge_modelfile_with_reference_template(
-                content, ref_content, base=str(gguf_for_modelfile), template_only=True
-            )
-            log.info("Using chat template from Ollama model %r (for tool/Chat API support)", template_from)
-        else:
-            log.info("Note: no Ollama model %r found; pull it first for tool support.", template_from)
-
-    # Detect model family for diagnostics
-    if not renderer:
-        try:
-            from ollama_forge.model_family import get_family_name
-
-            family_name = get_family_name(checkpoint_dir)
-            if family_name:
-                log.info("Detected model family: %s", family_name)
-        except ImportError:
-            pass
-
-    # If still no TEMPLATE, derive from the checkpoint's HF tokenizer
-    if not renderer and not re.search(r"TEMPLATE\s+\"\"\"", content, re.IGNORECASE):
-        hf_template = template_from_hf_checkpoint(checkpoint_dir)
-        if hf_template:
-            content = modelfile_append_template(content, hf_template)
-            stop_tokens = get_stop_tokens_from_checkpoint(checkpoint_dir)
-            if stop_tokens:
-                content = modelfile_append_stop_parameters(content, stop_tokens)
-            content = modelfile_append_num_predict(content, 2048)
-            log.info("Using chat template derived from checkpoint (HF format) for Ollama.")
-
-    # -- 5. Create Ollama model ---------------------------------------------------------
-    return run_ollama_create(name, content, out_path=out_modelfile)
 
 
 def _cmd_import(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -479,6 +138,7 @@ def _cmd_import(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
     gguf_path = output_dir / "model.gguf"
 
+    from ollama_forge.commands.convert import _hf_checkpoint_to_ollama
     return _hf_checkpoint_to_ollama(
         checkpoint_dir=checkpoint_dir,
         gguf_path=gguf_path,
@@ -785,6 +445,7 @@ def _fetch_download_only_convert(args: argparse.Namespace) -> int:
 
     # Convert to GGUF
     outtype = getattr(args, "outtype", "bf16") or "bf16"
+    from ollama_forge.commands.convert import _convert_gguf_checkpoint
     rc = _convert_gguf_checkpoint(
         checkpoint_dir=checkpoint_dir,
         gguf_path=gguf_path,
@@ -950,6 +611,7 @@ def _cmd_fetch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
         repeat_penalty=getattr(args, "repeat_penalty", None),
         out_modelfile=args.out_modelfile,
     )
+    from ollama_forge.commands.convert import _cmd_convert
     return _cmd_convert(parser, fake)
 
 
@@ -1008,6 +670,7 @@ def _cmd_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -
                 "system_source": system_source,
                 "action": action,
             }
+            from ollama_forge.commands.plan import _save_last_plan
             _save_last_plan("quickstart", plan_obj)
             print(json.dumps(plan_obj))
         else:
@@ -1051,365 +714,8 @@ def _cmd_start(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
     return _cmd_quickstart(parser, fake)
 
 
-def _cmd_plan_quickstart(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Plan wrapper for quickstart."""
-    fake = argparse.Namespace(
-        name=args.name,
-        profile=args.profile,
-        repo_id=args.repo_id,
-        quant=args.quant,
-        revision=args.revision,
-        task=args.task,
-        system=args.system,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-        top_p=args.top_p,
-        repeat_penalty=args.repeat_penalty,
-        out_modelfile=args.out_modelfile,
-        plan=True,
-        json=getattr(args, "json", False),
-    )
-    return _cmd_quickstart(parser, fake)
 
 
-def _cmd_plan_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Plan wrapper for auto routing."""
-    fake = argparse.Namespace(
-        source=args.source,
-        name=args.name,
-        system=args.system,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-        top_p=args.top_p,
-        repeat_penalty=args.repeat_penalty,
-        base=args.base,
-        adapter=args.adapter,
-        output=args.output,
-        gguf_file=args.gguf_file,
-        quant=args.quant,
-        quantize=args.quantize,
-        revision=args.revision,
-        no_prompt=args.no_prompt,
-        out_modelfile=args.out_modelfile,
-        plan=True,
-        json=getattr(args, "json", False),
-    )
-    return _cmd_auto(parser, fake)
-
-
-def _cmd_plan_doctor_fix(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Plan wrapper for doctor --fix."""
-    fake = argparse.Namespace(
-        fix=True,
-        plan=True,
-        fix_llama_cpp=args.fix_llama_cpp,
-        llama_cpp_dir=args.llama_cpp_dir,
-        json=getattr(args, "json", False),
-    )
-    return _cmd_doctor(parser, fake)
-
-
-def _cmd_plan_adapters_apply(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Plan wrapper for adapters recommend --apply."""
-    fake = argparse.Namespace(
-        base=args.base,
-        query=args.query,
-        limit=args.limit,
-        apply=True,
-        plan=True,
-        name=args.name,
-        revision=args.revision,
-        output=args.output,
-        system=args.system,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-        top_p=args.top_p,
-        repeat_penalty=args.repeat_penalty,
-        out_modelfile=args.out_modelfile,
-        json=getattr(args, "json", False),
-    )
-    from ollama_forge.commands.adapters import _cmd_adapters_recommend
-
-    return _cmd_adapters_recommend(parser, fake)
-
-
-def _cmd_plan_continue(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Show or execute the last persisted plan (from plan ... --json)."""
-    path = _plan_file_path()
-    if not path.is_file():
-        print_actionable_error(
-            "No saved plan found",
-            next_steps=[
-                "Run a plan with --json first, e.g.: ollama-forge plan quickstart --json",
-                f"Plan file path: {path}",
-            ],
-        )
-        return 1
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print_actionable_error("Invalid or unreadable plan file", cause=str(e), next_steps=[f"Remove or fix: {path}"])
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(data))
-        return 0
-    saved_at = data.get("saved_at", "unknown")
-    plan_cmd = data.get("plan_command", "unknown")
-    print(f"Last plan ({plan_cmd}, saved at {saved_at}):", file=sys.stderr)
-    if "action" in data:
-        action = data["action"]
-        print(f"  {action}", file=sys.stderr)
-        if getattr(args, "execute", False):
-            # Strip optional "Run: " prefix
-            cmd = action.strip()
-            if cmd.lower().startswith("run:"):
-                cmd = cmd[4:].strip()
-            code = subprocess.run(shlex.split(cmd))
-            return code.returncode
-    elif "actions" in data:
-        for step in data["actions"]:
-            print(f"  - {step}", file=sys.stderr)
-        if getattr(args, "execute", False):
-            last_code = 0
-            for step in data["actions"]:
-                cmd = step.strip()
-                if cmd.lower().startswith("run:"):
-                    cmd = cmd[4:].strip()
-                code = subprocess.run(shlex.split(cmd))
-                last_code = code.returncode
-            return last_code
-    else:
-        log.warning("Saved plan has no 'action' or 'actions'; nothing to run.")
-    return 0
-
-
-def _detect_auto_source(source: str) -> str:
-    """
-    Detect source type for auto workflow.
-    Returns one of: recipe, gguf, local_dir, hf_repo, base.
-    """
-    p = Path(source)
-    if p.is_dir():
-        return "local_dir"
-    suffix = p.suffix.lower()
-    if suffix in (".yaml", ".yml", ".json"):
-        return "recipe"
-    if suffix == ".gguf":
-        return "gguf"
-    if "/" in source:
-        return "hf_repo"
-    return "base"
-
-
-def _prompt_with_default(prompt: str, default: str) -> str:
-    """Prompt in interactive terminals; return default when blank or non-interactive."""
-    if not sys.stdin.isatty():
-        return default
-    try:
-        value = input(f"{prompt} [{default}]: ").strip()
-    except EOFError:
-        return default
-    return value or default
-
-
-def _is_local_adapter_dir(path: Path) -> bool:
-    """Heuristic: detect common adapter artifact files in a local directory."""
-    if not path.is_dir():
-        return False
-    return any(
-        (path / filename).exists()
-        for filename in (
-            "adapter_config.json",
-            "adapter_model.safetensors",
-            "adapter_model.bin",
-        )
-    )
-
-
-def _repo_looks_like_adapter(repo_id: str, revision: str) -> bool:
-    """Heuristic: detect adapter-like HF repos by file names."""
-    try:
-        from huggingface_hub import list_repo_files
-    except ImportError:
-        return False
-    try:
-        files = list_repo_files(repo_id, revision=revision or "main")
-    except Exception:
-        return False
-    names = {Path(f).name for f in files}
-    has_adapter_marker = bool({"adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"} & names)
-    has_gguf = any(str(f).lower().endswith(".gguf") for f in files)
-    return has_adapter_marker and not has_gguf
-
-
-def _cmd_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Auto route source to build/fetch/convert/create-from-base."""
-    source = args.source
-    source_type = _detect_auto_source(source)
-    prompt_enabled = sys.stdin.isatty() and not getattr(args, "no_prompt", False)
-    plan_only = getattr(args, "plan", False)
-
-    def maybe_plan(route: str, detail: str) -> bool:
-        if not plan_only:
-            return False
-        if getattr(args, "json", False):
-            plan_obj = {"route": route, "source": source, "action": detail}
-            _save_last_plan("auto", plan_obj)
-            print(json.dumps(plan_obj))
-        else:
-            print("Auto plan:")
-            print(f"  route: {route}")
-            print(f"  source: {source}")
-            print(f"  action: {detail}")
-        return True
-
-    name = args.name
-    if source_type != "recipe" and not name:
-        name = _prompt_with_default("Model name", "my-model") if prompt_enabled else "my-model"
-    if source_type == "recipe":
-        fake = argparse.Namespace(recipe=source, out_modelfile=args.out_modelfile)
-        if maybe_plan("build", f"ollama-forge build {source}"):
-            return 0
-        return _cmd_build(parser, fake)
-    if source_type == "gguf":
-        fake = argparse.Namespace(
-            gguf=source,
-            name=name,
-            quantize=args.quantize,
-            system=args.system,
-            temperature=args.temperature,
-            num_ctx=args.num_ctx,
-            top_p=args.top_p,
-            repeat_penalty=args.repeat_penalty,
-            out_modelfile=args.out_modelfile,
-        )
-        if maybe_plan(
-            "convert",
-            f"ollama-forge convert --gguf {source} --name {name}",
-        ):
-            return 0
-        return _cmd_convert(parser, fake)
-    if source_type == "local_dir":
-        source_path = Path(source).resolve()
-        if _is_local_adapter_dir(source_path):
-            base = args.base
-            if not base:
-                base = _prompt_with_default("Base model for adapter", "llama3.2") if prompt_enabled else "llama3.2"
-            fake = argparse.Namespace(
-                base=base,
-                adapter=str(source_path),
-                name=name,
-                system=args.system,
-                temperature=args.temperature,
-                num_ctx=args.num_ctx,
-                top_p=args.top_p,
-                repeat_penalty=args.repeat_penalty,
-                out_modelfile=args.out_modelfile,
-            )
-            if maybe_plan(
-                "retrain",
-                f"ollama-forge retrain --base {base} --adapter {source_path} --name {name}",
-            ):
-                return 0
-            from ollama_forge.commands.train import _cmd_retrain  # noqa: PLC0415
-            return _cmd_retrain(parser, fake)
-        # HF checkpoint (config.json) → import
-        if (source_path / "config.json").is_file():
-            fake = argparse.Namespace(
-                source=str(source_path),
-                name=name,
-                llama_cpp_dir=None,
-                outtype="bf16",
-                quant=args.quant or "Q4_K_M",
-                no_requantize=False,
-                template_from=None,
-                output_dir=None,
-                revision="main",
-                system=args.system,
-                temperature=args.temperature,
-                num_ctx=args.num_ctx,
-                top_p=args.top_p,
-                repeat_penalty=args.repeat_penalty,
-                out_modelfile=args.out_modelfile,
-            )
-            if maybe_plan(
-                "import",
-                f"ollama-forge import {source_path} --name {name}",
-            ):
-                return 0
-            return _cmd_import(parser, fake)
-        print_actionable_error(
-            f"unsupported local directory source: {source_path}",
-            next_steps=[
-                "Use auto with a recipe/.gguf/HF repo/base model",
-                "Or provide an adapter directory (with adapter_config.json)",
-                "Or provide an HF checkpoint directory (with config.json)",
-            ],
-        )
-        return 1
-    if source_type == "hf_repo":
-        if _repo_looks_like_adapter(source, args.revision):
-            base = args.base
-            if not base:
-                base = _prompt_with_default("Base model for adapter", "llama3.2") if prompt_enabled else "llama3.2"
-            fake = argparse.Namespace(
-                repo_id=source,
-                base=base,
-                name=name,
-                revision=args.revision,
-                output=args.output,
-                system=args.system,
-                temperature=args.temperature,
-                num_ctx=args.num_ctx,
-                top_p=args.top_p,
-                repeat_penalty=args.repeat_penalty,
-                out_modelfile=args.out_modelfile,
-            )
-            if maybe_plan(
-                "fetch-adapter",
-                f"ollama-forge fetch-adapter {source} --base {base} --name {name}",
-            ):
-                return 0
-            return _cmd_fetch_adapter(parser, fake)
-        quant = args.quant
-        if quant is None and prompt_enabled:
-            quant = _prompt_with_default("Preferred quantization", "Q4_K_M")
-        fake = argparse.Namespace(
-            repo_id=source,
-            name=name,
-            gguf_file=args.gguf_file,
-            quant=quant,
-            revision=args.revision,
-            system=args.system,
-            temperature=args.temperature,
-            num_ctx=args.num_ctx,
-            top_p=args.top_p,
-            repeat_penalty=args.repeat_penalty,
-            out_modelfile=args.out_modelfile,
-        )
-        if maybe_plan(
-            "fetch",
-            f"ollama-forge fetch {source} --name {name}",
-        ):
-            return 0
-        return _cmd_fetch(parser, fake)
-    fake = argparse.Namespace(
-        base=source,
-        name=name,
-        system=args.system,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-        top_p=args.top_p,
-        repeat_penalty=args.repeat_penalty,
-        adapter=args.adapter,
-        out_modelfile=args.out_modelfile,
-    )
-    if maybe_plan(
-        "create-from-base",
-        f"ollama-forge create-from-base --base {source} --name {name}",
-    ):
-        return 0
-    return _cmd_create_from_base(parser, fake)
 
 
 def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -1485,72 +791,6 @@ def _cmd_fetch_adapter(parser: argparse.ArgumentParser, args: argparse.Namespace
         out_modelfile=args.out_modelfile,
     )
     return _cmd_create_from_base(parser, fake)
-
-
-def _cmd_convert(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Create an Ollama model from a GGUF file (e.g. after HF→GGUF via llama.cpp)."""
-    gguf = Path(args.gguf).resolve()
-    if not gguf.is_file():
-        print_actionable_error(
-            f"GGUF file not found: {gguf}",
-            next_steps=[
-                "Check the path and file extension (.gguf)",
-                "Or fetch a GGUF from HF: ollama-forge fetch <repo_id> --name <name>",
-            ],
-        )
-        return 1
-    gguf_to_use = str(gguf)
-    if getattr(args, "quantize", None):
-        q = args.quantize
-        quantize_bin = _which_quantize_full()
-        if not quantize_bin:
-            print_actionable_error(
-                "--quantize requires llama.cpp quantize binary",
-                next_steps=[
-                    "Run: ollama-forge setup-llama-cpp",
-                    "Or use a pre-quantized GGUF and skip --quantize",
-                ],
-            )
-            return 1
-        out_gguf = gguf.parent / f"{gguf.stem}-{q}.gguf"
-        env = _llama_cpp_lib_env(quantize_bin)
-        try:
-            subprocess.run(
-                [quantize_bin, str(gguf), str(out_gguf), q],
-                check=True, env=env, timeout=7200,
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            print_actionable_error(
-                "quantize failed",
-                cause=str(e),
-                next_steps=[
-                    "Run: ollama-forge setup-llama-cpp --update",
-                    "Or use a pre-quantized GGUF and skip --quantize",
-                ],
-            )
-            return 1
-        log.info("Quantized to %s", out_gguf)
-        gguf_to_use = str(out_gguf)
-    adapter_path: str | None = None
-    if getattr(args, "adapter", None):
-        ap = Path(args.adapter).resolve()
-        if not ap.exists():
-            print_actionable_error(
-                f"Adapter path not found: {ap}",
-                next_steps=["Check --adapter path (directory or .bin/.gguf file)"],
-            )
-            return 1
-        adapter_path = str(ap)
-    content = build_modelfile(
-        gguf_to_use,
-        system=args.system,
-        temperature=args.temperature,
-        num_ctx=args.num_ctx,
-        top_p=getattr(args, "top_p", None),
-        repeat_penalty=getattr(args, "repeat_penalty", None),
-        adapter=adapter_path,
-    )
-    return run_ollama_create(args.name, content, out_path=args.out_modelfile)
 
 
 def _namespace_for_fetch(recipe: dict, out_modelfile: str | None) -> argparse.Namespace:
@@ -1639,6 +879,7 @@ def _cmd_build(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int
                 ],
             )
             return 1
+        from ollama_forge.commands.convert import _cmd_convert
         return _cmd_convert(parser, _namespace_for_convert(recipe, gguf, out_modelfile))
     return _cmd_create_from_base(parser, _namespace_for_create_from_base(recipe, out_modelfile))
 
@@ -1893,6 +1134,7 @@ def _cmd_doctor(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             planned.append("No fix actions needed.")
         if getattr(args, "json", False):
             plan_obj = {"route": "doctor-fix", "actions": planned}
+            from ollama_forge.commands.plan import _save_last_plan  # noqa: PLC0415
             _save_last_plan("doctor-fix", plan_obj)
             print(json.dumps(plan_obj))
         else:
@@ -2117,320 +1359,9 @@ def _cmd_setup_llama_cpp(parser: argparse.ArgumentParser, args: argparse.Namespa
 # ---------------------------------------------------------------------------
 
 
-def _cmd_quantize(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Quantize (or requantize) a GGUF file."""
-    input_path = Path(args.input).resolve()
-    if not input_path.is_file():
-        # Try resolving from forge/HF cache by repo ID
-        if "/" in args.input:
-            cached = _resolve_gguf_from_forge_cache(args.input) or _resolve_gguf_from_hf_cache(args.input)
-            if cached and cached.is_file():
-                input_path = cached
-                print(f"Resolved from cache: {input_path}", file=sys.stderr)
-        if not input_path.is_file():
-            print_actionable_error(
-                f"File not found: {args.input}",
-                next_steps=["Provide a path to a .gguf file or a cached repo ID (org/model)"],
-            )
-            return 1
-
-    quant = getattr(args, "quant", "Q4_K_M") or "Q4_K_M"
-    output = getattr(args, "output", None)
-    output_path = Path(output).resolve() if output else input_path.parent / f"{input_path.stem}-{quant}.gguf"
-
-    llama_cpp_dir = _resolve_llama_cpp_dir_from_arg(args)
-    quantize_bin = _which_quantize_full(llama_cpp_dir)
-    if not quantize_bin:
-        print_actionable_error(
-            "quantize binary not found",
-            next_steps=[
-                "Run: ollama-forge setup-llama-cpp; add build dir to PATH",
-                "Or pass --llama-cpp-dir <path-to-llama.cpp-clone>",
-            ],
-        )
-        return 1
-
-    size_gb = input_path.stat().st_size / (1024 ** 3)
-    print(f"Quantizing {input_path.name} ({size_gb:.1f} GiB) → {quant}...", file=sys.stderr)
-    print(f"Output: {output_path}", file=sys.stderr)
-
-    env = _llama_cpp_lib_env(quantize_bin)
-    try:
-        subprocess.run(
-            [quantize_bin, str(input_path), str(output_path), quant],
-            check=True,
-            timeout=7200,
-            env=env,
-        )
-    except FileNotFoundError:
-        print_actionable_error(
-            f"Could not execute: {quantize_bin}",
-            next_steps=["Rebuild llama.cpp: ollama-forge setup-llama-cpp --update"],
-        )
-        return 1
-    except subprocess.TimeoutExpired:
-        print_actionable_error(
-            "Quantization timed out after 2 hours",
-            next_steps=["Try a smaller model or a faster quant type (e.g. Q4_0)"],
-        )
-        return 1
-    except subprocess.CalledProcessError as e:
-        print_actionable_error(
-            "Quantization failed",
-            cause=str(e),
-            next_steps=[
-                "Ensure the input is a valid GGUF file",
-                "Try a different quant type: Q4_K_M, Q4_0, Q8_0, Q3_K_M",
-                "Rebuild llama.cpp: ollama-forge setup-llama-cpp --update",
-            ],
-        )
-        return 1
-
-    out_size_gb = output_path.stat().st_size / (1024 ** 3)
-    print(f"\nDone: {output_path} ({out_size_gb:.1f} GiB)", file=sys.stderr)
-    print(f"Serve with: ollama-forge serve {output_path}", file=sys.stderr)
-    print(output_path)
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # serve – spin up llama-server with a GGUF model
 # ---------------------------------------------------------------------------
-
-def _wait_for_server(url: str, timeout: float = 30.0, interval: float = 0.5) -> bool:
-    """Poll GET ``url`` until it responds 200 or *timeout* seconds elapse."""
-    import time
-    import urllib.error
-    import urllib.request
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    return True
-        except (OSError, urllib.error.URLError, ValueError):
-            pass
-        time.sleep(interval)
-    return False
-
-
-def _cmd_serve(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Start llama-server to serve a GGUF model via an OpenAI-compatible API."""
-    model_arg = args.model
-    gguf = Path(model_arg)
-
-    # If not a local file, try resolving from caches by repo ID
-    if not gguf.is_file() and "/" in model_arg:
-        # 1. Check ollama-forge GGUF cache (converted models)
-        forge_cached = _resolve_gguf_from_forge_cache(model_arg)
-        if forge_cached and forge_cached.is_file():
-            print(f"Resolved from cache: {forge_cached}", file=sys.stderr)
-            gguf = forge_cached
-        # 2. Check HF cache (downloaded GGUFs)
-        if not gguf.is_file():
-            cached = _resolve_gguf_from_hf_cache(model_arg)
-            if cached and cached.is_file():
-                print(f"Resolved from HF cache: {cached}", file=sys.stderr)
-                gguf = cached
-        if not gguf.is_file() and _hf_cache_has_repo(model_arg):
-            print_actionable_error(
-                f"Repo {model_arg} is in the HF cache but has no GGUF files",
-                next_steps=[
-                    f"Convert to GGUF first: ollama-forge import {model_arg} --name my-model",
-                    "Or fetch a GGUF repo: ollama-forge fetch <GGUF_REPO> --name my-model",
-                ],
-            )
-            return 1
-
-    if not gguf.is_file():
-        print_actionable_error(
-            f"GGUF file not found: {model_arg}",
-            next_steps=[
-                "Provide a valid path to a .gguf file",
-                "Or use a HF repo ID that has GGUF files in the cache",
-                "Download one with: ollama-forge fetch <HF_REPO>",
-            ],
-        )
-        return 1
-
-    llama_cpp_dir = _resolve_llama_cpp_dir_from_arg(args)
-    server_bin = _which_llama_server(llama_cpp_dir)
-    if not server_bin:
-        print_actionable_error(
-            "llama-server not found",
-            next_steps=[
-                "Run: ollama-forge setup-llama-cpp (builds llama-server)",
-                "Or install llama.cpp and add its bin dir to PATH",
-                "Or pass --llama-cpp-dir <path-to-llama.cpp-clone>",
-            ],
-        )
-        return 1
-
-    host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
-    port = getattr(args, "port", 11434) or 11434
-    ctx_size = getattr(args, "ctx_size", None)
-    n_gpu_layers = getattr(args, "n_gpu_layers", None)
-    threads = getattr(args, "threads", None)
-    parallel = getattr(args, "parallel", None)
-    api_key = getattr(args, "api_key", None)
-    extra_args = getattr(args, "server_args", None) or []
-
-    cmd: list[str] = [
-        server_bin,
-        "-m", str(gguf.resolve()),
-        "--host", host,
-        "--port", str(port),
-    ]
-    if ctx_size is not None:
-        cmd += ["-c", str(ctx_size)]
-    if n_gpu_layers is not None:
-        cmd += ["-ngl", str(n_gpu_layers)]
-    if threads is not None:
-        cmd += ["-t", str(threads)]
-    if parallel is not None:
-        cmd += ["-np", str(parallel)]
-    if api_key:
-        cmd += ["--api-key", api_key]
-    cmd += extra_args
-
-    env = _llama_cpp_lib_env(server_bin)
-    base_url = f"http://{host}:{port}"
-
-    print(f"Starting llama-server: {shlex.join(cmd)}", file=sys.stderr)
-    print(f"Endpoint: {base_url}/v1/chat/completions", file=sys.stderr)
-    if api_key:
-        print(f"API key : {api_key}", file=sys.stderr)
-
-    try:
-        proc = subprocess.Popen(cmd, env=env)
-    except FileNotFoundError:
-        print_actionable_error(
-            f"Could not execute: {server_bin}",
-            next_steps=["Rebuild llama.cpp: ollama-forge setup-llama-cpp --update"],
-        )
-        return 1
-
-    health_url = f"{base_url}/health"
-    timeout = getattr(args, "timeout", 60) or 60
-    print(f"Waiting for server to be ready (up to {timeout}s)...", file=sys.stderr)
-    if _wait_for_server(health_url, timeout=timeout):
-        print(f"\nServer ready at {base_url}", file=sys.stderr)
-        print(f"  Chat:       {base_url}/v1/chat/completions", file=sys.stderr)
-        print(f"  Completions:{base_url}/v1/completions", file=sys.stderr)
-        print(f"  Health:     {health_url}", file=sys.stderr)
-        print(f"\nConnect:  ollama-forge chat --base-url {base_url}", file=sys.stderr)
-        print("Press Ctrl+C to stop the server.", file=sys.stderr)
-    else:
-        print(
-            f"\nWarning: server did not respond at {health_url} within {timeout}s. "
-            "It may still be loading the model — check its output above.",
-            file=sys.stderr,
-        )
-
-    try:
-        return proc.wait()
-    except KeyboardInterrupt:
-        print("\nShutting down llama-server...", file=sys.stderr)
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        return 0
-
-
-# ---------------------------------------------------------------------------
-# chat – interactive chat against a running llama-server (OpenAI-compatible)
-# ---------------------------------------------------------------------------
-
-def _cmd_chat(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
-    """Interactive chat session with a running llama-server (or any OpenAI-compatible endpoint)."""
-    import urllib.request as _urlreq
-
-    base_url = (getattr(args, "base_url", None) or "http://127.0.0.1:11434").rstrip("/")
-    model = getattr(args, "model", None) or ""
-    system = getattr(args, "system", None)
-    api_key = getattr(args, "api_key", None)
-    temperature = getattr(args, "temperature", None)
-
-    # Quick health check
-    health = f"{base_url}/health"
-    try:
-        req = _urlreq.Request(health, method="GET")
-        with _urlreq.urlopen(req, timeout=5) as resp:
-            if resp.status != 200:
-                print(f"Warning: server at {base_url} returned {resp.status}", file=sys.stderr)
-    except (OSError, ValueError):
-        print(f"Warning: cannot reach {base_url}/health — is the server running?", file=sys.stderr)
-        print("  Start with: ollama-forge serve <model.gguf>", file=sys.stderr)
-
-    url = f"{base_url}/v1/chat/completions"
-    messages: list[dict[str, str]] = []
-    if system:
-        messages.append({"role": "system", "content": system})
-
-    print(f"Connected to {base_url}  (type 'quit' or Ctrl+C to exit)\n", file=sys.stderr)
-
-    try:
-        while True:
-            try:
-                user_input = input("You: ").strip()
-            except EOFError:
-                break
-            if not user_input:
-                continue
-            if user_input.lower() in ("quit", "exit", "/quit", "/exit"):
-                break
-            if user_input.lower() in ("/clear", "/reset"):
-                messages.clear()
-                if system:
-                    messages.append({"role": "system", "content": system})
-                print("(conversation cleared)", file=sys.stderr)
-                continue
-
-            messages.append({"role": "user", "content": user_input})
-
-            payload: dict[str, Any] = {
-                "messages": messages,
-                "stream": True,
-            }
-            if model:
-                payload["model"] = model
-            if temperature is not None:
-                payload["temperature"] = temperature
-
-            headers: dict[str, str] = {"Content-Type": "application/json"}
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-
-            body = json.dumps(payload).encode("utf-8")
-            req = _urlreq.Request(url, data=body, headers=headers, method="POST")
-
-            try:
-                with _urlreq.urlopen(req, timeout=300) as resp:
-                    print("Assistant: ", end="", flush=True)
-                    assistant_text, finish_reason = stream_openai_chat_sse(resp)
-                    print()  # newline after streamed response
-                    if finish_reason and finish_reason != "stop":
-                        print(f"(response stopped: {finish_reason})", file=sys.stderr)
-            except Exception as e:
-                print(f"\nError: {e}", file=sys.stderr)
-                # Remove the failed user message so conversation stays consistent
-                if messages and messages[-1]["role"] == "user":
-                    messages.pop()
-                continue
-
-            if assistant_text:
-                messages.append({"role": "assistant", "content": assistant_text})
-
-    except KeyboardInterrupt:
-        print("\n", file=sys.stderr)
-
-    print("Bye!", file=sys.stderr)
-    return 0
-
 
 def _cmd_downsize_pipeline(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Print the downsize (distillation) pipeline steps, or generate a script."""
@@ -2486,174 +1417,6 @@ def _load_env() -> None:
     load_dotenv(Path.home() / ".env")
     load_dotenv(override=False)  # do not overwrite shell exports
 
-
-def _add_plan_args(subparsers) -> "argparse.ArgumentParser":
-    """Register the 'plan' subcommand and all its subparsers."""
-    p_plan = subparsers.add_parser(
-        "plan",
-        help="Preview major operations without executing them",
-    )
-    plan_sub = p_plan.add_subparsers(dest="plan_command")
-
-    p_plan_quickstart = plan_sub.add_parser(
-        "quickstart",
-        help="Preview quickstart/start resolved settings and action",
-    )
-    p_plan_quickstart.add_argument(
-        "--name",
-        default="my-model",
-        help="Name for the new Ollama model (default: my-model)",
-    )
-    p_plan_quickstart.add_argument(
-        "--profile",
-        choices=["fast", "balanced", "quality", "low-vram"],
-        default="balanced",
-        help="Preset for quant/parameters (default: balanced)",
-    )
-    p_plan_quickstart.add_argument(
-        "--task",
-        choices=sorted(_QUICKSTART_TASK_SYSTEMS.keys()),
-        default=None,
-        help="Task preset for default system prompt",
-    )
-    p_plan_quickstart.add_argument(
-        "--repo-id",
-        default="TheBloke/Llama-2-7B-GGUF",
-        help="Hugging Face GGUF repo to use (default: TheBloke/Llama-2-7B-GGUF)",
-    )
-    p_plan_quickstart.add_argument(
-        "--quant",
-        default=None,
-        help="Override profile quantization (e.g. Q4_K_M)",
-    )
-    p_plan_quickstart.add_argument(
-        "--revision",
-        default="main",
-        help="Repo revision (default: main)",
-    )
-    p_plan_quickstart.add_argument("--system", help="System message (role/instructions)")
-    p_plan_quickstart.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
-    p_plan_quickstart.add_argument(
-        "--num-ctx",
-        type=int,
-        help="Context window size in tokens (e.g. 4096)",
-    )
-    p_plan_quickstart.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
-    p_plan_quickstart.add_argument(
-        "--repeat-penalty",
-        type=float,
-        help="Repeat penalty (e.g. 1.1)",
-    )
-    p_plan_quickstart.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
-    p_plan_quickstart.add_argument(
-        "--json",
-        action="store_true",
-        help="Output plan as JSON",
-    )
-    p_plan_quickstart.set_defaults(handler=_cmd_plan_quickstart)
-
-    p_plan_auto = plan_sub.add_parser(
-        "auto",
-        help="Preview auto route/action for a source",
-    )
-    p_plan_auto.add_argument(
-        "source",
-        help="Source input: recipe path, .gguf path, HF repo id, or local base model name",
-    )
-    p_plan_auto.add_argument("--name", default=None, help="Model name for non-recipe flows")
-    p_plan_auto.add_argument("--system", help="System message (role/instructions)")
-    p_plan_auto.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
-    p_plan_auto.add_argument(
-        "--num-ctx",
-        type=int,
-        help="Context window size in tokens (e.g. 4096)",
-    )
-    p_plan_auto.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
-    p_plan_auto.add_argument(
-        "--repeat-penalty",
-        type=float,
-        help="Repeat penalty (e.g. 1.1)",
-    )
-    p_plan_auto.add_argument("--base", help="Base model for adapter sources")
-    p_plan_auto.add_argument("--adapter", help="Path to LoRA/adapter directory (base mode)")
-    p_plan_auto.add_argument("--output", help="Adapter download directory in adapter repo mode")
-    p_plan_auto.add_argument("--gguf-file", help="Specific .gguf filename for HF repos")
-    p_plan_auto.add_argument("--quant", help="Preferred quantization for HF repo mode")
-    p_plan_auto.add_argument("--quantize", help="Quantize GGUF first in gguf mode")
-    p_plan_auto.add_argument("--revision", default="main", help="Repo revision (default: main)")
-    p_plan_auto.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="Disable interactive prompts and use defaults for missing values",
-    )
-    p_plan_auto.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
-    p_plan_auto.add_argument(
-        "--json",
-        action="store_true",
-        help="Output plan as JSON",
-    )
-    p_plan_auto.set_defaults(handler=_cmd_plan_auto)
-
-    p_plan_doctor = plan_sub.add_parser(
-        "doctor-fix",
-        help="Preview doctor --fix actions",
-    )
-    p_plan_doctor.add_argument(
-        "--fix-llama-cpp",
-        action="store_true",
-        help="Include setup-llama-cpp in plan when tools are missing",
-    )
-    p_plan_doctor.add_argument(
-        "--llama-cpp-dir",
-        default=None,
-        help="Directory for setup-llama-cpp when --fix-llama-cpp is used",
-    )
-    p_plan_doctor.add_argument(
-        "--json",
-        action="store_true",
-        help="Output plan as JSON",
-    )
-    p_plan_doctor.set_defaults(handler=_cmd_plan_doctor_fix)
-
-    p_plan_adapters = plan_sub.add_parser(
-        "adapters-apply",
-        help="Preview adapters recommend --apply action",
-    )
-    p_plan_adapters.add_argument("--base", required=True, help="Base model for apply")
-    p_plan_adapters.add_argument("--query", default=None, help="Search query override")
-    p_plan_adapters.add_argument("--limit", type=int, default=5, help="Max recommendations")
-    p_plan_adapters.add_argument("--name", default=None, help="Output model name")
-    p_plan_adapters.add_argument("--revision", default="main", help="Repo revision")
-    p_plan_adapters.add_argument("--output", default=None, help="Adapter download directory")
-    p_plan_adapters.add_argument("--system", help="System message")
-    p_plan_adapters.add_argument("--temperature", type=float, help="Temperature")
-    p_plan_adapters.add_argument("--num-ctx", type=int, help="Context window")
-    p_plan_adapters.add_argument("--top-p", type=float, help="Top-p")
-    p_plan_adapters.add_argument("--repeat-penalty", type=float, help="Repeat penalty")
-    p_plan_adapters.add_argument("--out-modelfile", default=None, help="Write Modelfile path")
-    p_plan_adapters.add_argument(
-        "--json",
-        action="store_true",
-        help="Output plan as JSON",
-    )
-    p_plan_adapters.set_defaults(handler=_cmd_plan_adapters_apply)
-
-    p_plan_continue = plan_sub.add_parser(
-        "continue",
-        help="Show or run the last saved plan (save with e.g. plan quickstart --json)",
-    )
-    p_plan_continue.add_argument(
-        "--execute",
-        action="store_true",
-        help="Run the planned command(s) instead of only showing them",
-    )
-    p_plan_continue.add_argument(
-        "--json",
-        action="store_true",
-        help="Output saved plan as JSON only",
-    )
-    p_plan_continue.set_defaults(handler=_cmd_plan_continue)
-    return p_plan
 
 
 def main() -> int:
@@ -2731,7 +1494,7 @@ def main() -> int:
     p_doctor.set_defaults(handler=_cmd_doctor)
 
     # plan (global dry-run wrappers for key flows)
-    p_plan = _add_plan_args(subparsers)
+    p_plan = _register_plan_cmds(subparsers)
 
     # quickstart (beginner one-command flow)
     p_quickstart = subparsers.add_parser(
@@ -2842,59 +1605,7 @@ def main() -> int:
     p_start.set_defaults(handler=_cmd_start)
 
     # auto (detect source type and route)
-    p_auto = subparsers.add_parser(
-        "auto",
-        help="Auto-detect source (recipe, gguf, hf repo, base) and run the right flow",
-    )
-    p_auto.add_argument(
-        "source",
-        help="Source input: recipe path, .gguf path, HF repo id, or local base model name",
-    )
-    p_auto.add_argument(
-        "--name",
-        default=None,
-        help="Name for created model when source is not a recipe (interactive/default: my-model)",
-    )
-    p_auto.add_argument("--system", help="System message (role/instructions)")
-    p_auto.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
-    p_auto.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
-    p_auto.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
-    p_auto.add_argument(
-        "--repeat-penalty",
-        type=float,
-        help="Repeat penalty (e.g. 1.1)",
-    )
-    p_auto.add_argument(
-        "--base",
-        help="Base model for adapter sources (auto-detected adapter repo/dir)",
-    )
-    p_auto.add_argument("--adapter", help="Path to LoRA/adapter directory (base mode)")
-    p_auto.add_argument(
-        "--output",
-        help="Directory to download adapter into for HF adapter repos",
-    )
-    p_auto.add_argument("--gguf-file", help="Specific .gguf filename for HF repos")
-    p_auto.add_argument(
-        "--quant",
-        help="Preferred quantization for HF repo mode (e.g. Q4_K_M)",
-    )
-    p_auto.add_argument(
-        "--quantize",
-        help="Quantize GGUF first in gguf mode (e.g. Q4_K_M)",
-    )
-    p_auto.add_argument("--revision", default="main", help="Repo revision (default: main)")
-    p_auto.add_argument(
-        "--no-prompt",
-        action="store_true",
-        help="Disable interactive prompts and use defaults for missing values",
-    )
-    p_auto.add_argument(
-        "--plan",
-        action="store_true",
-        help="Show detected route and planned action without executing",
-    )
-    p_auto.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
-    p_auto.set_defaults(handler=_cmd_auto)
+    p_auto = _register_auto_cmds(subparsers)
 
     # setup-llama-cpp (clone and build)
     p_setup = subparsers.add_parser(
@@ -2924,131 +1635,10 @@ def main() -> int:
     p_setup.set_defaults(handler=_cmd_setup_llama_cpp)
 
     # quantize (requantize a GGUF file)
-    p_quantize = subparsers.add_parser(
-        "quantize",
-        help="Quantize a GGUF model file (e.g. bf16 → Q4_K_M) to reduce size and memory usage",
-    )
-    p_quantize.add_argument(
-        "input",
-        help="Path to the .gguf file (or a cached repo ID like org/model)",
-    )
-    p_quantize.add_argument(
-        "--quant", "-q",
-        default="Q4_K_M",
-        help="Quantization type (default: Q4_K_M). Common: Q4_K_M, Q4_0, Q3_K_M, Q5_K_M, Q8_0",
-    )
-    p_quantize.add_argument(
-        "-o", "--output",
-        default=None,
-        help="Output file path (default: <input_stem>-<quant>.gguf in the same directory)",
-    )
-    p_quantize.add_argument(
-        "--llama-cpp-dir",
-        default=None,
-        help="Path to llama.cpp clone (for finding the quantize binary)",
-    )
-    p_quantize.set_defaults(handler=_cmd_quantize)
+    p_quantize = _register_quantize_cmds(subparsers)
 
-    # serve (spin up llama-server with a GGUF model)
-    p_serve = subparsers.add_parser(
-        "serve",
-        help="Start llama-server to serve a GGUF model via an OpenAI-compatible API",
-    )
-    p_serve.add_argument(
-        "model",
-        help="Path to a .gguf model file",
-    )
-    p_serve.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Host to bind (default: 127.0.0.1)",
-    )
-    p_serve.add_argument(
-        "--port",
-        type=int,
-        default=11434,
-        help="Port to listen on (default: 11434)",
-    )
-    p_serve.add_argument(
-        "-c", "--ctx-size",
-        type=int,
-        default=None,
-        help="Context size in tokens (default: model default)",
-    )
-    p_serve.add_argument(
-        "-ngl", "--n-gpu-layers",
-        type=int,
-        default=None,
-        help="Number of layers to offload to GPU (-1 = all)",
-    )
-    p_serve.add_argument(
-        "-t", "--threads",
-        type=int,
-        default=None,
-        help="Number of CPU threads (default: auto)",
-    )
-    p_serve.add_argument(
-        "-np", "--parallel",
-        type=int,
-        default=None,
-        help="Number of parallel request slots (default: auto)",
-    )
-    p_serve.add_argument(
-        "--api-key",
-        default=None,
-        help="Require this API key for all requests",
-    )
-    p_serve.add_argument(
-        "--llama-cpp-dir",
-        default=None,
-        help="Path to llama.cpp clone (for finding llama-server binary)",
-    )
-    p_serve.add_argument(
-        "--timeout",
-        type=int,
-        default=60,
-        help="Seconds to wait for server to become ready (default: 60)",
-    )
-    p_serve.add_argument(
-        "server_args",
-        nargs="*",
-        metavar="-- ...",
-        help="Extra arguments passed through to llama-server (place after --)",
-    )
-    p_serve.set_defaults(handler=_cmd_serve)
-
-    # chat (interactive chat with a running llama-server or OpenAI-compatible endpoint)
-    p_chat = subparsers.add_parser(
-        "chat",
-        help="Interactive chat with a running llama-server (or any OpenAI-compatible endpoint)",
-    )
-    p_chat.add_argument(
-        "--base-url",
-        default="http://127.0.0.1:11434",
-        help="Server base URL (default: http://127.0.0.1:11434)",
-    )
-    p_chat.add_argument(
-        "--model",
-        default=None,
-        help="Model name to send in requests (optional; llama-server ignores this)",
-    )
-    p_chat.add_argument(
-        "--system",
-        default=None,
-        help="System message for the conversation",
-    )
-    p_chat.add_argument(
-        "--api-key",
-        default=None,
-        help="API key (Bearer token) if the server requires authentication",
-    )
-    p_chat.add_argument(
-        "--temperature",
-        type=float,
-        default=None,
-        help="Sampling temperature (e.g. 0.7)",
-    )
-    p_chat.set_defaults(handler=_cmd_chat)
+    # serve / chat
+    p_serve, p_chat = _register_serve_cmds(subparsers)
 
     # create-from-base
     p_create = subparsers.add_parser(
@@ -3116,35 +1706,8 @@ def main() -> int:
     p_refresh.set_defaults(handler=_cmd_refresh_template)
 
     # convert (GGUF → Ollama; use after HF→GGUF via llama.cpp)
-    p_convert = subparsers.add_parser(
-        "convert",
-        help="Create an Ollama model from a GGUF file (e.g. after converting HF with llama.cpp)",
-    )
-    p_convert.add_argument(
-        "--gguf",
-        required=True,
-        help="Path to the .gguf model file",
-    )
-    p_convert.add_argument("--name", required=True, help="Name for the new Ollama model")
-    p_convert.add_argument("--system", help="System message (role/instructions)")
-    p_convert.add_argument("--temperature", type=float, help="Temperature (e.g. 0.7)")
-    p_convert.add_argument("--num-ctx", type=int, help="Context window size in tokens (e.g. 4096)")
-    p_convert.add_argument("--top-p", type=float, help="Top-p sampling (e.g. 0.9)")
-    p_convert.add_argument(
-        "--repeat-penalty",
-        type=float,
-        help="Repeat penalty (e.g. 1.1)",
-    )
-    p_convert.add_argument(
-        "--quantize",
-        help="Quantize the GGUF first (e.g. Q4_K_M); requires llama.cpp 'quantize' on PATH",
-    )
-    p_convert.add_argument(
-        "--adapter",
-        help="Path to adapter to stack on the GGUF base (directory or .bin/.gguf); adds ADAPTER to Modelfile",
-    )
-    p_convert.add_argument("--out-modelfile", help="Also write the Modelfile to this path")
-    p_convert.set_defaults(handler=_cmd_convert)
+    from ollama_forge.commands.convert import register as _register_convert_cmds
+    p_convert = _register_convert_cmds(subparsers)
 
     # import (HF safetensors → GGUF → Ollama)
     p_import = subparsers.add_parser(
