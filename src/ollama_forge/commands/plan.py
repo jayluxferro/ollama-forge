@@ -91,7 +91,7 @@ def _cmd_plan_auto(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 def _cmd_plan_doctor_fix(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Plan wrapper for doctor --fix."""
-    from ollama_forge.cli import _cmd_doctor  # lazy: avoids circular import at module load
+    from ollama_forge.commands.setup import _cmd_doctor  # noqa: PLC0415
 
     fake = argparse.Namespace(
         fix=True,
