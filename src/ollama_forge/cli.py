@@ -19,7 +19,9 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "0")
 
 # Import unsloth early (before transformers) so its optimizations apply.
 # Optional dependency — ignore if not installed or no GPU available.
-with contextlib.suppress(ImportError, NotImplementedError):
+# AssertionError covers "Torch not compiled with CUDA enabled" on CPU-only runners.
+# RuntimeError covers "Cannot re-initialize CUDA in forked subprocess".
+with contextlib.suppress(ImportError, NotImplementedError, AssertionError, RuntimeError):
     import unsloth  # noqa: F401
 
 from dotenv import load_dotenv
