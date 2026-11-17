@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/ollama-forge.svg)](https://pypi.org/project/ollama-forge/)
 
-Get models from Hugging Face, convert them, add adapters, and run them in [Ollama](https://ollama.com) — without needing deep expertise. One place for fetch, convert, adapters, and recipes.
+Get models from Hugging Face, convert them, fine-tune, serve, and evaluate them locally — without needing deep expertise. One place for fetch, convert, adapters, training, agentic serving, and research tooling.
 
 **Install:** `pip install ollama-forge` or `uv tool install ollama-forge` — [PyPI](https://pypi.org/project/ollama-forge/). From this repo: `uv sync` then `uv run ollama-forge`; or `uv tool install .` to use the CLI from anywhere.
 
@@ -12,6 +12,19 @@ ollama-forge fetch TheBloke/Llama-2-7B-GGUF --name my-model && ollama run my-mod
 ```
 
 Or the shortest path: `ollama-forge start --name my-model` then `ollama run my-model`.
+
+---
+
+## What's new
+
+| Feature | Command | Description |
+|---|---|---|
+| **Unified API server** | `forge api` | OpenAI-compatible `/v1/chat/completions` server that proxies Ollama and can serve local llama.cpp / MLX LM / MLX VLM backends with automatic routing and GPU memory tracking |
+| **Streamlit web UI** | `forge ui` | Multi-tab chat + model management + training UI; connects to any OpenAI-compatible endpoint |
+| **Tool-call eval** | `forge eval` | 8-case tool-call correctness mini-eval against any OpenAI-compatible endpoint; custom YAML suites supported |
+| **MLX fine-tuning** | `forge mlx-train` | YAML-driven `mlx-lm` fine-tuning: `--init` to scaffold config, `--dry-run` to validate, real LoRA adapter training on Apple Silicon |
+| **Model router** | Python API | `ModelRouter.from_available(models)` — heuristic routing (code→coder model, vision→VLM, etc.) from installed models |
+| **Context budget** | Python API | `ContextBudget(max_tokens=8192)` — running token tracker with warn threshold and `trim_to_fit()` for agentic loops |
 
 ---
 
@@ -38,15 +51,20 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | [TurboQuant](wiki/TurboQuant.md) | Extreme 2-4 bit quantization, KV cache compression, layer-adaptive, temporal decay |
 | [VLM (Vision Language Models)](wiki/VLM.md) | Multimodal inference (image/audio/video), TurboQuant KV cache, VisionFeatureCache, fine-tuning (LoRA/ORPO) on Apple Silicon via mlx-vlm >=0.4.4 |
 | [CI / Automation](wiki/CI-Automation.md) | Example GitHub Actions |
+| [API Server](wiki/API-Server.md) | `forge api` unified OpenAI-compatible server |
+| [UI](wiki/UI.md) | `forge ui` Streamlit web interface |
+| [Eval](wiki/Eval.md) | `forge eval` tool-call correctness evaluation |
+| [MLX Training](wiki/MLX-Training.md) | `forge mlx-train` YAML-driven fine-tuning |
 | [Command Reference](wiki/Command-Reference.md) | All commands |
 
 ---
 
 ## Why ollama-forge
 
-- **One place** — Fetch, convert, adapters, recipes; no scattered scripts.
+- **One place** — Fetch, convert, adapters, training, serving, eval; no scattered scripts.
 - **Simple** — Clear commands and docs; try things without being an ML expert.
-- **Local-first** — Get models running in Ollama on your machine.
+- **Local-first** — Everything runs on your machine (Ollama, llama.cpp, MLX on Apple Silicon).
+- **Research-ready** — Agentic API server, model router, context budget, tool-call eval, and a growing weight-space toolkit for advanced experimentation.
 
 ---
 
@@ -72,6 +90,10 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | GGUF file → Ollama | `convert --gguf <path> --name <name>` |
 | Find / use adapters | `adapters search`, `adapters recommend`, `fetch-adapter`, `retrain` |
 | One-file config build | `build recipe.yaml` |
+| Unified OpenAI-compatible API server | `api [--port 11435] [NAME=PATH ...]` |
+| Streamlit web UI (chat + models + train) | `ui [--port 8501]` |
+| Tool-call correctness eval | `eval --model <model> [--suite builtins\|path.yaml]` |
+| MLX LoRA fine-tuning (YAML config) | `mlx-train config.yaml [--init\|--dry-run]` |
 | Serve GGUF directly (llama.cpp) | `serve <model.gguf> [--port 11434] [-ngl -1]` |
 | Chat with a running server | `chat [--base-url <url>]` |
 | Quantize HF model (TurboQuant) | `turboquant quantize <model> --bits 3` |
@@ -135,6 +157,33 @@ uv run ollama-forge chat
 
 **Training data → model:** Validate JSONL, prepare for trainer, generate script: `train --data ./data/ --base llama3.2 --name my-model --write-script train.sh`. See [Training Data](wiki/Training-Data.md) and [Retrain Pipeline](wiki/Retrain-Pipeline.md).
 
+**MLX fine-tuning:** Scaffold a config, validate it, then train a LoRA adapter on Apple Silicon:
+```bash
+uv run ollama-forge mlx-train --init                # writes mlx_train_config.yaml
+uv run ollama-forge mlx-train config.yaml --dry-run # validate without running
+uv run ollama-forge mlx-train config.yaml           # run training
+```
+See `mlx-train --help` for all options (base model, dataset, learning rate, steps, batch size).
+
+**Unified API server + web UI:** Serve any model (Ollama proxy or local llama.cpp/MLX) on a single OpenAI-compatible endpoint, then open the web interface:
+```bash
+# Proxy Ollama (all installed models available)
+uv run ollama-forge api --port 11435
+
+# Register local backends alongside Ollama
+uv run ollama-forge api --port 11435 "mymodel=/path/to/model.gguf"
+uv run ollama-forge api --port 11435 "qwen=/path/to/mlx-model-dir"
+
+# Open the Streamlit UI (chat, model list, train tab)
+uv run ollama-forge ui --port 8501
+```
+
+**Tool-call eval:** Test any model's function-calling accuracy against 8 built-in cases or a custom YAML suite:
+```bash
+uv run ollama-forge eval --model llama3.2:3b
+uv run ollama-forge eval --model llama3.2:3b --suite my_suite.yaml
+```
+
 ---
 
 ## Other topics
@@ -145,4 +194,8 @@ uv run ollama-forge chat
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Install deps with `uv sync`, then run `security-eval ui` for the UI. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **TurboQuant** — Extreme 2-4 bit quantization with near-optimal quality. No llama.cpp needed. `turboquant quantize <model> --bits 3` then `turboquant serve` or `turboquant chat`. Includes asymmetric K/V cache compression, layer-adaptive precision (protects quality-critical layers), and temporal decay (progressively compresses old KV tokens). [Wiki](wiki/TurboQuant.md).
 - **VLM (Vision Language Models)** — Multimodal (image + audio + video + text) inference on Apple Silicon via [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) >=0.4.4. Generate, chat, serve (OpenAI-compatible), video understanding, convert, quantize (affine/mxfp4/nvfp4/mxfp8), and fine-tune (LoRA/QLoRA/full/ORPO). Features TurboQuant KV cache (`--kv-bits 3.5` for 76% memory savings) and VisionFeatureCache (`--vision-cache-size 20` for 11x+ multi-turn speedup). `vlm generate --model <model> --prompt "Describe this" --image photo.jpg`. [Wiki](wiki/VLM.md).
+- **Unified API server** — `api --port 11435 [NAME=PATH ...]` starts an OpenAI-compatible `/v1/chat/completions` server that proxies Ollama and optionally runs local llama.cpp / MLX LM / MLX VLM backends. Automatic GPU budget tracking, model routing, and concurrent request management. [Wiki](wiki/API-Server.md).
+- **Streamlit web UI** — `ui [--port 8501]` launches a multi-tab interface: Chat (streaming, model selector), Models (health + budget metrics), and Train (form → YAML → `mlx-train`). [Wiki](wiki/UI.md).
+- **Tool-call eval** — `eval --model <model> [--base-url <url>] [--suite builtins|path.yaml]` runs a correctness mini-eval of a model's function-calling against 8 built-in cases or a custom YAML suite. [Wiki](wiki/Eval.md).
+- **MLX fine-tuning** — `mlx-train config.yaml` runs YAML-driven LoRA fine-tuning via `mlx-lm` on Apple Silicon. `--init` scaffolds a starter config; `--dry-run` validates without running. [Wiki](wiki/MLX-Training.md).
 - **CI** — Example GitHub Actions in [CI / Automation](wiki/CI-Automation.md).
