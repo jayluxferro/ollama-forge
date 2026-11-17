@@ -33,10 +33,14 @@ forge wsp abliterate <model-path> \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--n-layers N` | 1 | Number of top layers to orthogonalise, ranked by ‖d_concept‖ |
-| `--min-layer M` | 0 | Exclude layers with index < M |
+| `--n-layers N` | **3** | Number of top layers to orthogonalise, ranked by ‖d_concept‖. Sweet spot for 7B models. |
+| `--min-layer M` | 0 | Exclude layers with index < M. Set to 10–15 to protect early semantic layers on very small models. |
 | `--proj-types` | all 7 | Subset of: `down_proj o_proj q_proj k_proj v_proj gate_proj up_proj` |
-| `--output-path` | — | (required) Destination for edited model weights |
+| `--output-path` | `<source>-abliterated/` | Destination for edited model weights |
+| `--probe-mode` | `last_token` | `last_token` (fast, captures final prompt-token position) or `full_response` (generates `--response-tokens` tokens and averages across all positions — use when `last_token` leaves the target behaviour intact) |
+| `--response-tokens N` | 50 | Tokens generated per probe prompt when `--probe-mode full_response` |
+| `--suppress-bank PATH` | built-in refusal bank | JSON file (list of strings) — prompts that trigger the concept to remove. Use this to target any behaviour, not just refusal. |
+| `--retain-bank PATH` | built-in benign bank | JSON file (list of strings) — benign prompts that anchor the retain direction. |
 
 ### How it works
 

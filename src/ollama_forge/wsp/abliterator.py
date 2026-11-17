@@ -153,23 +153,45 @@ class AbliterationResult:
 class _CapturingNorm:
     """Wraps a layernorm (RMSNorm) to capture its input — the residual stream.
 
-    Captures the LAST TOKEN position from the prompt prefill, then disables
-    itself so subsequent generate steps are not captured.
+    ``mode="last_token"`` (default): captures the last prompt token position from
+    the prefill pass, then disables itself.  This is fast and sufficient for most
+    abliteration runs.
+
+    ``mode="all_tokens"``: captures every token position — both the full prompt
+    prefill (all positions) and each subsequent autoregressive step.  Callers
+    accumulate all captures and average them to get a richer concept direction
+    that reflects generation-time activations rather than just the prompt
+    representation.
     """
 
-    def __init__(self, original_norm, capture_list: list, active_flag: list):
+    def __init__(
+        self,
+        original_norm,
+        capture_list: list,
+        active_flag: list,
+        mode: str = "last_token",
+    ):
         self._orig = original_norm
         self._captures = capture_list
         self._active = active_flag   # single-element list (mutable from outside)
+        self._mode = mode
 
     def __call__(self, x):
         import mlx.core as mx
         if self._active[0]:
-            # x shape: (batch, seq_len, d_model) during prefill
-            h_last = x[:, -1, :]     # last prompt token
-            mx.eval(h_last)
-            self._captures.append(np.array(h_last[0]).astype(np.float32))
-            self._active[0] = False
+            if self._mode == "last_token":
+                # x shape: (batch, seq_len, d_model) during prefill
+                h_last = x[:, -1, :]
+                mx.eval(h_last)
+                self._captures.append(np.array(h_last[0]).astype(np.float32))
+                self._active[0] = False   # capture once, then stop
+            else:
+                # all_tokens: capture every position from every forward pass
+                # (batch, seq_len, d_model) — seq_len=1 for autoregressive steps
+                mx.eval(x)
+                arr = np.array(x[0]).astype(np.float32)   # (seq_len, d_model)
+                for pos in range(arr.shape[0]):
+                    self._captures.append(arr[pos])
         return self._orig(x)
 
     def __getattr__(self, name: str):
@@ -183,25 +205,41 @@ def run_abliteration_probe(
     retain_bank: list[str],
     layer_indices: list[int],
     progress_fn: Callable[[str], None] | None = None,
+    probe_mode: str = "last_token",
+    full_response_tokens: int = 50,
 ) -> ResidualProbeResult:
     """Capture residual stream activations for suppress and retain prompts.
 
     Installs _CapturingNorm wrappers on each layer's input_layernorm to capture
-    the pre-normalisation residual stream at the last prompt-token position.
-    Uses generate() with max_tokens=1 to trigger the prefill pass.
+    the pre-normalisation residual stream.
 
     Args:
-        model:          mlx_lm model (already loaded)
-        tokenizer:      mlx_lm tokenizer
-        suppress_bank:  prompts that trigger the concept to suppress (e.g. refusal)
-        retain_bank:    benign prompts the model should handle normally
-        layer_indices:  which layers to capture (usually all)
-        progress_fn:    optional progress callback
+        model:                 mlx_lm model (already loaded)
+        tokenizer:             mlx_lm tokenizer
+        suppress_bank:         prompts that trigger the concept to suppress
+        retain_bank:           benign prompts to anchor the retain direction
+        layer_indices:         which layers to capture (usually all)
+        progress_fn:           optional progress callback
+        probe_mode:            ``"last_token"`` (default) — capture only the last
+                               prompt-token position (fast, one forward pass);
+                               ``"full_response"`` — generate ``full_response_tokens``
+                               tokens and average activations across the entire
+                               prefill *and* all autoregressive steps.  This yields
+                               a direction aligned with generation-time behaviour
+                               rather than just prompt representation.
+        full_response_tokens:  tokens to generate when ``probe_mode="full_response"``
+                               (default: 50).
 
     Returns:
         ResidualProbeResult with per-layer mean residual vectors for each class
     """
     from mlx_lm import generate
+
+    if probe_mode not in ("last_token", "full_response"):
+        raise ValueError(f"probe_mode must be 'last_token' or 'full_response', got {probe_mode!r}")
+
+    cap_mode = "last_token" if probe_mode == "last_token" else "all_tokens"
+    max_tokens = 1 if probe_mode == "last_token" else full_response_tokens
 
     def _prog(msg: str) -> None:
         if progress_fn:
@@ -216,13 +254,11 @@ def run_abliteration_probe(
     for idx, (kind, prompt) in enumerate(all_prompts):
         _prog(f"probe {idx+1}/{n}  {'.' * min(idx, 20)}")
 
-        # Format with chat template
         msgs = [{"role": "user", "content": prompt}]
         prompt_chat = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=True
         )
 
-        # Install capture hooks on input_layernorm of each layer
         captures: dict[int, list] = {li: [] for li in layer_indices}
         active_flags: dict[int, list] = {li: [True] for li in layer_indices}
         originals: dict[int, object] = {}
@@ -231,22 +267,23 @@ def run_abliteration_probe(
             orig = model.model.layers[li].input_layernorm
             originals[li] = orig
             model.model.layers[li].input_layernorm = _CapturingNorm(
-                orig, captures[li], active_flags[li]
+                orig, captures[li], active_flags[li], mode=cap_mode
             )
 
         try:
-            generate(model, tokenizer, prompt=prompt_chat, max_tokens=1, verbose=False)
+            generate(model, tokenizer, prompt=prompt_chat, max_tokens=max_tokens, verbose=False)
         finally:
             for li in layer_indices:
                 model.model.layers[li].input_layernorm = originals[li]
 
-        # Accumulate per-layer activations
+        # Accumulate per-layer activations (average across all captured positions)
         bucket = suppress_acts if kind == "suppress" else retain_acts
         for li in layer_indices:
             if captures[li]:
-                bucket[li].append(captures[li][0])  # (d_model,)
+                # mean over all token positions captured for this prompt
+                bucket[li].append(np.mean(np.stack(captures[li]), axis=0))  # (d_model,)
 
-    # Compute per-layer means
+    # Compute per-layer means across prompts
     pr = ResidualProbeResult(
         n_suppress=len(suppress_bank),
         n_retain=len(retain_bank),
@@ -259,7 +296,7 @@ def run_abliteration_probe(
         if retain_acts[li]:
             pr.h_retain_mean[li] = np.mean(np.stack(retain_acts[li]), axis=0)
 
-    _prog(f"probe complete — {pr.n_suppress} suppress  {pr.n_retain} retain")
+    _prog(f"probe complete — {pr.n_suppress} suppress  {pr.n_retain} retain  mode={probe_mode}")
     return pr
 
 
@@ -399,29 +436,40 @@ class AbliterationCorrector:
         self,
         suppress_bank: list[str] | None = None,
         retain_bank: list[str] | None = None,
-        n_layers: int = 1,
-        min_layer: int = 15,
+        n_layers: int = 3,
+        min_layer: int = 0,
         proj_types: list[str] | None = None,
         output_path: str | Path | None = None,
         progress_fn: Callable[[str], None] | None = None,
+        probe_mode: str = "last_token",
+        full_response_tokens: int = 50,
     ) -> AbliterationResult:
         """Run abliteration: probe → rank → orthogonalise → save.
 
         Args:
-            suppress_bank:  prompts defining the concept to remove.
-                            Defaults to _REFUSAL_SUPPRESS (refusal direction).
-            retain_bank:    benign prompts to anchor the retain direction.
-                            Defaults to _REFUSAL_RETAIN.
-            n_layers:       how many top-separation layers to target (default: 1).
-                            Start with 1; increase if abliteration is incomplete.
-            min_layer:      skip layers < this index during ranking (default: 15).
-                            Early layers encode general semantics — editing them
-                            tends to degrade factual retrieval.
-            proj_types:     which projections to orthogonalise per targeted layer.
-                            Defaults to all seven: down_proj, o_proj, q_proj,
-                            k_proj, v_proj, gate_proj, up_proj.
-            output_path:    where to save the abliterated model.
-            progress_fn:    optional progress callback(message: str).
+            suppress_bank:         prompts defining the concept to remove.
+                                   Defaults to _REFUSAL_SUPPRESS (refusal direction).
+            retain_bank:           benign prompts to anchor the retain direction.
+                                   Defaults to _REFUSAL_RETAIN.
+            n_layers:              how many top-separation layers to target (default: 3).
+                                   Empirically n=3 is the sweet spot for 7B models:
+                                   n=1 leaves some soft-tier refusals intact; n≥8 offers
+                                   no additional benefit and slightly increases Δfrob.
+            min_layer:             skip layers < this index during ranking (default: 0).
+                                   Set to 10–15 to avoid early semantic layers on very
+                                   small models where factual retrieval degrades.
+            proj_types:            which projections to orthogonalise per targeted layer.
+                                   Defaults to all seven: down_proj, o_proj, q_proj,
+                                   k_proj, v_proj, gate_proj, up_proj.
+            output_path:           where to save the abliterated model.
+            progress_fn:           optional progress callback(message: str).
+            probe_mode:            ``"last_token"`` (default) — fast, uses only the last
+                                   prompt-token residual stream position; ``"full_response"``
+                                   — generates ``full_response_tokens`` tokens and averages
+                                   activations across all positions.  Use ``full_response``
+                                   when ``last_token`` leaves the target behaviour intact.
+            full_response_tokens:  tokens to generate per probe prompt when
+                                   ``probe_mode="full_response"`` (default: 50).
 
         Returns:
             AbliterationResult with per-matrix records and a human-readable .report().
@@ -479,6 +527,8 @@ class AbliterationCorrector:
             retain_bank=retain_bank,
             layer_indices=layer_indices,
             progress_fn=_prog,
+            probe_mode=probe_mode,
+            full_response_tokens=full_response_tokens,
         )
 
         if probe.n_suppress < 1:

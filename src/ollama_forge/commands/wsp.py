@@ -340,10 +340,14 @@ def _cmd_abliterate(parser: argparse.ArgumentParser, args: argparse.Namespace) -
 
     model_name = args.model
     model_path_str = getattr(args, "model_path", None)
-    n_layers = getattr(args, "n_layers", 1)
-    min_layer = getattr(args, "min_layer", 15)
+    n_layers = getattr(args, "n_layers", 3)
+    min_layer = getattr(args, "min_layer", 0)
     proj_types = getattr(args, "proj_types", None)
     output_path = getattr(args, "output_path", None)
+    probe_mode = getattr(args, "probe_mode", "last_token")
+    full_response_tokens = getattr(args, "full_response_tokens", 50)
+    suppress_bank_path = getattr(args, "suppress_bank", None)
+    retain_bank_path = getattr(args, "retain_bank", None)
 
     if model_path_str:
         model_path = Path(model_path_str)
@@ -357,9 +361,26 @@ def _cmd_abliterate(parser: argparse.ArgumentParser, args: argparse.Namespace) -
             )
             return 2
 
+    # Load custom probe banks from JSON files if provided
+    suppress_bank = None
+    retain_bank = None
+    if suppress_bank_path is not None:
+        import json as _json
+        suppress_bank = _json.loads(Path(suppress_bank_path).read_text())
+        if not isinstance(suppress_bank, list) or not all(isinstance(s, str) for s in suppress_bank):
+            print("Error: --suppress-bank must be a JSON file containing a list of strings.", file=sys.stderr)
+            return 2
+    if retain_bank_path is not None:
+        import json as _json
+        retain_bank = _json.loads(Path(retain_bank_path).read_text())
+        if not isinstance(retain_bank, list) or not all(isinstance(s, str) for s in retain_bank):
+            print("Error: --retain-bank must be a JSON file containing a list of strings.", file=sys.stderr)
+            return 2
+
+    mode_label = f"probe={probe_mode}" + (f"/{full_response_tokens}tok" if probe_mode == "full_response" else "")
     print(
         f"Abliteration — {model_path.name}  "
-        f"[{n_layers} layer(s), min_layer={min_layer}]",
+        f"[n={n_layers}, min_layer={min_layer}, {mode_label}]",
         file=sys.stderr,
     )
     print("", file=sys.stderr)
@@ -374,11 +395,15 @@ def _cmd_abliterate(parser: argparse.ArgumentParser, args: argparse.Namespace) -
 
     try:
         result = corrector.abliterate(
+            suppress_bank=suppress_bank,
+            retain_bank=retain_bank,
             n_layers=n_layers,
             min_layer=min_layer,
             proj_types=proj_types,
             output_path=output_path,
             progress_fn=_prog,
+            probe_mode=probe_mode,
+            full_response_tokens=full_response_tokens,
         )
     except (FileNotFoundError, ValueError, Exception) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -665,17 +690,17 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--n-layers",
         dest="n_layers",
         type=int,
-        default=1,
-        help="How many top-separation layers to orthogonalise (default: 1)",
+        default=3,
+        help="How many top-separation layers to orthogonalise (default: 3). "
+        "n=3 is the empirically validated sweet spot for 7B models.",
     )
     p_abl.add_argument(
         "--min-layer",
         dest="min_layer",
         type=int,
-        default=15,
-        help="Skip layers below this index during ranking (default: 15). "
-        "Early layers encode general semantics — editing them tends to degrade "
-        "factual retrieval.",
+        default=0,
+        help="Skip layers below this index during ranking (default: 0). "
+        "Set to 10–15 to protect early semantic layers on very small models.",
     )
     p_abl.add_argument(
         "--proj-types",
@@ -690,6 +715,39 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         dest="output_path",
         metavar="DIR",
         help="Output directory for the abliterated model (default: <source>-abliterated/)",
+    )
+    p_abl.add_argument(
+        "--probe-mode",
+        dest="probe_mode",
+        choices=["last_token", "full_response"],
+        default="last_token",
+        help="How to collect residual stream activations (default: last_token). "
+        "'last_token' captures only the final prompt-token position — fast and "
+        "sufficient for most cases. 'full_response' generates --response-tokens "
+        "tokens and averages activations across all positions; use this when "
+        "last_token leaves the target behaviour intact.",
+    )
+    p_abl.add_argument(
+        "--response-tokens",
+        dest="full_response_tokens",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Tokens to generate per probe prompt when --probe-mode=full_response (default: 50).",
+    )
+    p_abl.add_argument(
+        "--suppress-bank",
+        dest="suppress_bank",
+        metavar="PATH",
+        help="JSON file containing a list of strings — prompts that trigger the concept "
+        "to remove (overrides the built-in refusal bank).",
+    )
+    p_abl.add_argument(
+        "--retain-bank",
+        dest="retain_bank",
+        metavar="PATH",
+        help="JSON file containing a list of benign strings to anchor the retain direction "
+        "(overrides the built-in retain bank).",
     )
     p_abl.set_defaults(handler=_cmd_abliterate)
 

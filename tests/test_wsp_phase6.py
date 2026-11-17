@@ -346,3 +346,175 @@ def test_abliteration_corrector_proj_types_override(tmp_path: Path) -> None:
     # Only down_proj corrections should appear
     proj_types_seen = {c.proj_type for c in result.corrections}
     assert proj_types_seen == {"down_proj"}
+
+
+# ── new: probe mode tests (pure Python, no MLX inference) ────────────────────
+
+def test_capturing_norm_last_token_mode() -> None:
+    """_CapturingNorm last_token: captures once at prefill, then deactivates."""
+    import sys
+    import types
+
+    from ollama_forge.wsp.abliterator import _CapturingNorm
+
+    # Install a minimal mlx.core stub so the norm's __call__ can run
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.eval = lambda x: None
+    sys.modules["mlx.core"] = fake_mx
+
+    class _FakeNorm:
+        def __call__(self, x):
+            return x
+
+    captures: list = []
+    active = [True]
+    norm = _CapturingNorm(_FakeNorm(), captures, active, mode="last_token")
+
+    # Prefill pass: (1, 3, 4) — should capture last token position and stop
+    x = np.ones((1, 3, 4), dtype=np.float32)
+    norm(x)
+
+    assert active[0] is False      # deactivated after first capture
+    assert len(captures) == 1
+    assert captures[0].shape == (4,)  # d_model only
+
+    # Second call — should not capture
+    norm(x)
+    assert len(captures) == 1
+
+
+def test_capturing_norm_all_tokens_mode_captures_every_position() -> None:
+    """_CapturingNorm all_tokens: active flag never flips; collects every position."""
+    import types
+
+    from ollama_forge.wsp.abliterator import _CapturingNorm
+
+    class _FakeNorm:
+        def __call__(self, x):
+            return x
+
+    # Minimal mlx stub
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.eval = lambda x: None
+    import sys
+    sys.modules["mlx.core"] = fake_mx
+
+    captures: list = []
+    active = [True]
+    norm = _CapturingNorm(_FakeNorm(), captures, active, mode="all_tokens")
+
+    # Prefill (1, 3, 4) — should capture 3 positions
+    x_prefill = np.ones((1, 3, 4), dtype=np.float32)
+    norm(x_prefill)
+    assert len(captures) == 3
+    assert active[0] is True  # never deactivated in all_tokens mode
+
+    # Autoregressive step (1, 1, 4) — should append 1 more
+    x_ar = np.ones((1, 1, 4), dtype=np.float32) * 2
+    norm(x_ar)
+    assert len(captures) == 4
+
+
+def test_run_abliteration_probe_full_response_mode() -> None:
+    """run_abliteration_probe: full_response mode averages across all captured positions."""
+    from ollama_forge.wsp.abliterator import ResidualProbeResult, run_abliteration_probe
+
+    class _MockNorm:
+        def __call__(self, x):
+            return x
+
+    class _MockLayer:
+        def __init__(self):
+            self.input_layernorm = _MockNorm()
+
+    class _MockModelInner:
+        def __init__(self):
+            self.layers = [_MockLayer(), _MockLayer()]
+
+    class _MockModel:
+        def __init__(self):
+            self.model = _MockModelInner()
+
+    mock_model = _MockModel()
+
+    def fake_generate(model, tokenizer, prompt, max_tokens, verbose):
+        # Simulate capturing: each layer captures `max_tokens` positions
+        for li in range(2):
+            norm = model.model.layers[li].input_layernorm
+            if hasattr(norm, "_captures") and norm._active[0]:
+                for _ in range(max_tokens):
+                    norm._captures.append(np.random.randn(8).astype(np.float32))
+                    if norm._mode == "last_token":
+                        norm._active[0] = False
+                        break
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.apply_chat_template.return_value = "<chat>prompt</chat>"
+
+    with patch("mlx_lm.generate", side_effect=fake_generate):
+        result = run_abliteration_probe(
+            model=mock_model,
+            tokenizer=mock_tokenizer,
+            suppress_bank=["prompt A"],
+            retain_bank=["prompt B"],
+            layer_indices=[0, 1],
+            probe_mode="full_response",
+            full_response_tokens=5,
+        )
+
+    assert isinstance(result, ResidualProbeResult)
+    assert result.n_suppress == 1
+    assert result.n_retain == 1
+
+
+def test_run_abliteration_probe_invalid_mode_raises() -> None:
+    """run_abliteration_probe raises ValueError for unknown probe_mode."""
+    from ollama_forge.wsp.abliterator import run_abliteration_probe
+
+    with pytest.raises(ValueError, match="probe_mode"):
+        run_abliteration_probe(
+            model=None,
+            tokenizer=None,
+            suppress_bank=["a"],
+            retain_bank=["b"],
+            layer_indices=[0],
+            probe_mode="invalid_mode",
+        )
+
+
+def test_abliterate_probe_mode_passed_through(tmp_path: Path) -> None:
+    """abliterate() forwards probe_mode and full_response_tokens to run_abliteration_probe."""
+    cfg = {"num_hidden_layers": 2}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    (tmp_path / "model.safetensors").touch()
+
+    probe_kwargs_seen: dict = {}
+
+    def fake_probe(**kwargs):
+        probe_kwargs_seen.update(kwargs)
+        return _make_fake_residual_probe(2)
+
+    fake_weights = _make_fake_weights(2)
+
+    def fake_save(path, weights, metadata=None):
+        pass
+
+    with patch("mlx_lm.load", return_value=(MagicMock(), MagicMock())), \
+         patch("ollama_forge.wsp.abliterator.run_abliteration_probe", side_effect=fake_probe), \
+         patch("ollama_forge.wsp.analyzer._find_safetensors_files",
+               return_value=[tmp_path / "model.safetensors"]), \
+         patch("ollama_forge.wsp.analyzer._load_all_weights", return_value=fake_weights), \
+         patch("mlx.core.save_safetensors", side_effect=fake_save):
+        corrector = AbliterationCorrector(tmp_path)
+        corrector.abliterate(
+            suppress_bank=["a"] * 2,
+            retain_bank=["b"] * 2,
+            n_layers=1,
+            min_layer=0,
+            output_path=tmp_path / "out",
+            probe_mode="full_response",
+            full_response_tokens=25,
+        )
+
+    assert probe_kwargs_seen.get("probe_mode") == "full_response"
+    assert probe_kwargs_seen.get("full_response_tokens") == 25
