@@ -151,6 +151,7 @@ def _cmd_sharpen(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     n_layers = getattr(args, "n_layers", 3)
     n_directions = getattr(args, "n_directions", 1)
     proj_type = getattr(args, "proj_type", "down_proj")
+    sparse_fraction = getattr(args, "sparse_fraction", 0.0)
     output_path = getattr(args, "output_path", None)
 
     # Resolve model path
@@ -204,6 +205,7 @@ def _cmd_sharpen(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
             n_layers=n_layers,
             n_directions=n_directions,
             proj_type=proj_type,
+            sparse_fraction=sparse_fraction,
             output_path=output_path,
             progress_fn=_sharp_progress,
         )
@@ -356,6 +358,14 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         choices=["gate_proj", "up_proj", "down_proj"],
         default="down_proj",
         help="MLP projection to edit (default: down_proj)",
+    )
+    p_sharp.add_argument(
+        "--sparse-fraction",
+        dest="sparse_fraction",
+        type=float,
+        default=0.0,
+        help="Only zero the top fraction of values aligned with the dominant direction "
+        "(0.005 ≈ 65k values/layer matching the paper; 0 = full rank-k removal)",
     )
     p_sharp.add_argument(
         "--output-path",

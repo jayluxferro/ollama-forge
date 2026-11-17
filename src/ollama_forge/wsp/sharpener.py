@@ -101,22 +101,32 @@ def _randomized_svd(
     Returns (U, s, Vh) with shapes (m, k), (k,), (k, n).
     """
     rng = np.random.default_rng(seed)
-    A = np.asarray(A, dtype=np.float32)  # ensure float32 to avoid fp16 overflow
+    A = np.asarray(A, dtype=np.float64)
     m, n = A.shape
     k = min(n_components + 10, min(m, n))
 
-    # Random projection to find approximate column range
-    Omega = rng.standard_normal((n, k)).astype(np.float32)
-    Q = A @ Omega
-    for _ in range(n_iter):
-        Q, _ = np.linalg.qr(Q)
-        Q = A @ (A.T @ Q)
-    Q, _ = np.linalg.qr(Q)
+    # Normalize before power iteration: prevents float64 overflow on large
+    # weight matrices (e.g. 8960×1536 with sv[0] ≈ 300 → ||A||² ≈ 1e9).
+    # Singular values scale linearly, so we rescale them back below.
+    scale = float(np.linalg.norm(A, "fro"))
+    A_n = A / scale if scale > 0 else A
 
-    # SVD of the small projected matrix
-    B = Q.T @ A                                    # (k, n)
-    U_B, s, Vh = np.linalg.svd(B, full_matrices=False)
-    U = Q @ U_B                                    # (m, k)
+    # Suppress spurious FPU exception warnings from Apple Accelerate BLAS on
+    # large (n > 4096) float64 matrices — the results are always finite.
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        # Random projection to find approximate column range
+        Omega = rng.standard_normal((n, k))
+        Q = A_n @ Omega
+        for _ in range(n_iter):
+            Q, _ = np.linalg.qr(Q)
+            Q = A_n @ (A_n.T @ Q)
+        Q, _ = np.linalg.qr(Q)
+
+        # SVD of the small projected matrix
+        B = Q.T @ A_n                              # (k, n)
+        U_B, s, Vh = np.linalg.svd(B, full_matrices=False)
+        U = Q @ U_B                                # (m, k)
+    s = s * scale                                  # rescale back to original magnitude
 
     nc = min(n_components, len(s))
     return U[:, :nc], s[:nc], Vh[:nc, :]
@@ -127,24 +137,36 @@ def _randomized_svd(
 def _zero_top_directions(
     W: np.ndarray,
     n_directions: int,
+    sparse_fraction: float = 0.0,
 ) -> tuple[np.ndarray, int, float]:
     """Remove the top-n singular directions from W.
+
+    If sparse_fraction > 0, only zero the values whose contribution to the
+    dominant direction exceeds the top (1 - sparse_fraction) quantile, keeping
+    the total edit budget small (similar to the original paper's approach of
+    zeroing ~65k values per layer).  sparse_fraction=0 (default) removes the
+    full rank-k component (more aggressive; faster to compute).
 
     Returns (W_modified, n_params_changed, delta_frob_ratio).
     """
     U, s, Vh = _randomized_svd(W, n_components=n_directions)
 
-    # Rank-k approximation to remove
-    removal = np.zeros_like(W)
+    W64 = W.astype(np.float64)
+    removal = np.zeros_like(W64)
     for i in range(len(s)):
-        removal += s[i] * np.outer(U[:, i], Vh[i, :])
+        component = s[i] * np.outer(U[:, i], Vh[i, :])
+        if sparse_fraction > 0.0:
+            # Keep only the top (1-sparse_fraction) largest-magnitude elements
+            thresh = np.quantile(np.abs(component), 1.0 - sparse_fraction)
+            component = np.where(np.abs(component) >= thresh, component, 0.0)
+        removal += component
 
-    W_new = (W - removal).astype(np.float16)
+    W_new = (W64 - removal).astype(np.float16)
     W_fp16 = W.astype(np.float16)
 
-    changed = int(np.sum(np.abs(W_new.astype(np.float32) - W_fp16.astype(np.float32)) > 1e-4))
-    frob_w = float(np.linalg.norm(W, "fro"))
-    frob_delta = float(np.linalg.norm(W_new.astype(np.float32) - W_fp16.astype(np.float32), "fro"))
+    changed = int(np.sum(W_new != W_fp16))
+    frob_w = float(np.linalg.norm(W64, "fro"))
+    frob_delta = float(np.linalg.norm(W_new.astype(np.float64) - W64, "fro"))
     delta_ratio = frob_delta / frob_w if frob_w > 0 else 0.0
 
     return W_new, changed, delta_ratio
@@ -167,12 +189,10 @@ def _total_param_count(weights: dict) -> int:
 
 
 def _copy_support_files(src: Path, dst: Path) -> None:
-    """Copy config.json (stripped of quantization) and all tokenizer* files."""
-    # config.json — remove quantization entry so the model is treated as fp16
+    """Copy config.json and all tokenizer files."""
     cfg_src = src / "config.json"
     if cfg_src.exists():
         cfg = json.loads(cfg_src.read_text())
-        cfg.pop("quantization", None)
         (dst / "config.json").write_text(json.dumps(cfg, indent=2))
 
     # Tokenizer and other non-weight files
@@ -201,17 +221,21 @@ class Sharpener:
         n_layers: int = 3,
         n_directions: int = 1,
         proj_type: str = "down_proj",
+        sparse_fraction: float = 0.0,
         output_path: str | Path | None = None,
         progress_fn: Callable[[str], None] | None = None,
     ) -> SharpenResult:
         """Edit the top-n_layers candidate layers and write a new model.
 
         Args:
-            weight_map:    WeightMap from Phase 2 (or dict with same interface).
-            obstruction:   Which obstruction type to target.
-            n_layers:      How many candidate layers to edit (top-ranked first).
-            n_directions:  How many singular directions to zero per layer.
-            proj_type:     Which MLP projection to edit (default: down_proj).
+            weight_map:       WeightMap from Phase 2 (or dict with same interface).
+            obstruction:      Which obstruction type to target.
+            n_layers:         How many candidate layers to edit (top-ranked first).
+            n_directions:     How many singular directions to zero per layer.
+            proj_type:        Which MLP projection to edit (default: down_proj).
+            sparse_fraction:  If >0, only zero the top fraction of values aligned
+                              with the dominant direction (keeps edit budget tiny;
+                              0.005 ≈ 65k values per layer, matching the paper).
             output_path:   Where to write the sharpened model directory.
                            Defaults to <source_name>-sharp/ beside source.
             progress_fn:   Optional callback(message).
@@ -304,15 +328,26 @@ class Sharpener:
                 arr = np.array(w_raw.astype(mx.float32))
 
             # zero top directions
-            arr_fp16, n_changed, delta_frob = _zero_top_directions(arr, n_directions)
+            arr_fp16, n_changed, delta_frob = _zero_top_directions(arr, n_directions, sparse_fraction)
             total_edited += n_changed
 
-            # store modified layer as fp16 mlx array; remove quantization keys
-            new_weights[wkey] = mx.array(arr_fp16)
-            for suffix in (".scales", ".biases"):
-                dead_key = wkey.replace(".weight", suffix)
-                if dead_key in new_weights:
-                    del new_weights[dead_key]
+            if quantized:
+                # Re-quantize edited layer so the output model stays in the same
+                # format as the input (uint32 + scales + biases).  mlx_lm can
+                # then load the output directly with the original quantization config.
+                w_edit_mx = mx.array(arr_fp16.astype(np.float32))
+                mx.eval(w_edit_mx)
+                q_group = int(q_cfg.get("group_size", 64))
+                w_q, new_scales, new_biases = mx.quantize(w_edit_mx, group_size=q_group, bits=q_bits)
+                mx.eval(w_q, new_scales, new_biases)
+                skey = wkey.replace(".weight", ".scales")
+                bkey = wkey.replace(".weight", ".biases")
+                new_weights[wkey] = w_q
+                new_weights[skey] = new_scales
+                new_weights[bkey] = new_biases
+            else:
+                # Non-quantized model: store as fp16, no scales/biases
+                new_weights[wkey] = mx.array(arr_fp16)
 
             edits.append(EditRecord(
                 layer_idx=li,

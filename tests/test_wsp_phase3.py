@@ -186,10 +186,10 @@ def test_sharpener_produces_output_file(tmp_path: Path) -> None:
     assert result.total_edited > 0
     assert len(result.edits) == 2
     assert saved.get("path") is not None
-    # config.json should be written (without quantization key)
+    # config.json should be copied from source (quantization key preserved)
     assert (out_dir / "config.json").exists()
     cfg_out = json.loads((out_dir / "config.json").read_text())
-    assert "quantization" not in cfg_out
+    assert "num_hidden_layers" in cfg_out
     # tokenizer.json should be copied
     assert (out_dir / "tokenizer.json").exists()
 
