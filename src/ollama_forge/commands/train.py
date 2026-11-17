@@ -549,8 +549,225 @@ def _cmd_train_run(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 
 def _cmd_retrain(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Create an Ollama model from a base + adapter (after training)."""
-    from ollama_forge.cli import _cmd_create_from_base  # noqa: PLC0415
+    from ollama_forge.commands.model import _cmd_create_from_base  # noqa: PLC0415
     return _cmd_create_from_base(parser, args)
+
+
+_MLX_TRAIN_TEMPLATE = """\
+# forge mlx-train config  — mlx-lm LoRA fine-tuning on Apple Silicon
+# Usage: ollama-forge mlx-train config.yaml
+
+# ── Required ─────────────────────────────────────────────────────────────────
+model: mlx-community/Llama-3.2-3B-Instruct-4bit  # HF repo or local MLX dir
+data: ./data   # directory with train.jsonl and valid.jsonl (mlx_lm format)
+
+# ── Training (mlx_lm lora options) ───────────────────────────────────────────
+fine_tune_type: lora          # lora | dora | full
+num_layers: 16                # adapter layers (-1 = all)
+batch_size: 4
+iters: 500
+learning_rate: 1.0e-4
+max_seq_length: 2048
+grad_checkpoint: false
+adapter_path: ./adapters      # output directory for adapter weights
+optimizer: adam               # adam | adamw | muon | sgd | adafactor
+mask_prompt: false
+
+# ── Post-training steps (optional) ───────────────────────────────────────────
+fuse: false                   # merge adapter into base model (mlx_lm fuse)
+fused_path: ./fused_model     # where to save the fused model
+export_gguf: false            # also export a GGUF (requires fuse: true)
+gguf_path: ./fused_model/ggml-model-f16.gguf
+
+# ── Ollama push (optional) ────────────────────────────────────────────────────
+# ollama_name: my-finetuned-model       # creates Ollama model when set
+# ollama_base: llama3.2:3b              # Modelfile FROM; defaults to 'model' above
+"""
+
+
+_MLX_TRAIN_DEFAULTS: dict[str, object] = {
+    "fine_tune_type": "lora",
+    "num_layers": 16,
+    "batch_size": 4,
+    "iters": 100,
+    "learning_rate": 1e-4,
+    "max_seq_length": 2048,
+    "grad_checkpoint": False,
+    "adapter_path": "./adapters",
+    "optimizer": "adam",
+    "mask_prompt": False,
+    "fuse": False,
+    "fused_path": "./fused_model",
+    "export_gguf": False,
+    "gguf_path": "./fused_model/ggml-model-f16.gguf",
+    "ollama_name": None,
+    "ollama_base": None,
+}
+
+
+def _cmd_mlx_train(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run mlx-lm LoRA fine-tuning from a YAML config file."""
+    import shlex
+
+    if getattr(args, "init", False):
+        dest = getattr(args, "config", None) or "forge-train.yaml"
+        p = Path(dest)
+        if p.exists():
+            print(f"Already exists: {p}", file=sys.stderr)
+            return 1
+        p.write_text(_MLX_TRAIN_TEMPLATE, encoding="utf-8")
+        print(f"Wrote template: {p}")
+        print(f"Edit it, then run: ollama-forge mlx-train {p}")
+        return 0
+
+    config_path = getattr(args, "config", None)
+    if not config_path:
+        parser.print_help()
+        return 1
+
+    try:
+        import yaml  # type: ignore[import]
+        with open(config_path) as f:
+            loaded = yaml.safe_load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError("config must be a YAML mapping")
+    except FileNotFoundError:
+        print_actionable_error(
+            f"Config file not found: {config_path}",
+            next_steps=["Create a template: ollama-forge mlx-train --init config.yaml"],
+        )
+        return 1
+    except Exception as exc:
+        print_actionable_error(f"Could not load config: {exc}", next_steps=[])
+        return 1
+
+    cfg: dict = {**_MLX_TRAIN_DEFAULTS, **loaded}
+
+    model = cfg.get("model")
+    data = cfg.get("data")
+    if not model or not data:
+        print_actionable_error(
+            "config.yaml must include 'model' and 'data'",
+            next_steps=[f"Edit {config_path} and set both fields"],
+        )
+        return 1
+
+    adapter_path = cfg["adapter_path"]
+    dry_run = getattr(args, "dry_run", False)
+
+    # ── Step 1: mlx_lm lora --train ──────────────────────────────────────────
+    lora_argv = [
+        sys.executable, "-m", "mlx_lm", "lora",
+        "--train",
+        "--model", str(model),
+        "--data", str(data),
+        "--adapter-path", str(adapter_path),
+        "--fine-tune-type", str(cfg["fine_tune_type"]),
+        "--num-layers", str(cfg["num_layers"]),
+        "--batch-size", str(cfg["batch_size"]),
+        "--iters", str(cfg["iters"]),
+        "--learning-rate", str(cfg["learning_rate"]),
+        "--max-seq-length", str(cfg["max_seq_length"]),
+        "--optimizer", str(cfg["optimizer"]),
+    ]
+    if cfg.get("grad_checkpoint"):
+        lora_argv.append("--grad-checkpoint")
+    if cfg.get("mask_prompt"):
+        lora_argv.append("--mask-prompt")
+
+    if dry_run:
+        print("Step 1 — train:")
+        print(f"  {shlex.join(lora_argv)}")
+    else:
+        print(f"\nforge mlx-train  model={model}  iters={cfg['iters']}", file=sys.stderr)
+        rc = subprocess.run(lora_argv).returncode
+        if rc != 0:
+            print_actionable_error(
+                f"mlx_lm lora exited with {rc}",
+                next_steps=["Check the output above for mlx_lm errors"],
+            )
+            return rc
+        print(f"\nAdapter saved to: {adapter_path}", file=sys.stderr)
+
+    # ── Step 2: mlx_lm fuse (optional) ───────────────────────────────────────
+    fused_path = cfg["fused_path"]
+    if cfg.get("fuse") or cfg.get("export_gguf"):
+        fuse_argv = [
+            sys.executable, "-m", "mlx_lm", "fuse",
+            "--model", str(model),
+            "--adapter-path", str(adapter_path),
+            "--save-path", str(fused_path),
+        ]
+        if cfg.get("export_gguf"):
+            fuse_argv += ["--export-gguf", "--gguf-path", str(cfg["gguf_path"])]
+        if dry_run:
+            print("Step 2 — fuse:")
+            print(f"  {shlex.join(fuse_argv)}")
+        else:
+            print(f"\nForge mlx-train: fusing adapter → {fused_path}", file=sys.stderr)
+            rc = subprocess.run(fuse_argv).returncode
+            if rc != 0:
+                print_actionable_error(
+                    f"mlx_lm fuse exited with {rc}",
+                    next_steps=["The adapter is still usable; fuse manually with mlx_lm fuse"],
+                )
+                return rc
+
+    # ── Step 3: Ollama push (optional) ───────────────────────────────────────
+    ollama_name = cfg.get("ollama_name")
+    if ollama_name:
+        # Use GGUF if we exported one, otherwise fall back to adapter (safetensors)
+        from ollama_forge.commands.model import _cmd_create_from_base  # noqa: PLC0415
+
+        if cfg.get("export_gguf"):
+            # Import GGUF as a fresh Ollama model
+            import argparse as _ap
+            ns = _ap.Namespace(
+                gguf=str(cfg["gguf_path"]),
+                name=str(ollama_name),
+                system=None,
+                template_from=None,
+                adapter=None,
+                base=None,
+                out_modelfile=None,
+                temperature=None,
+                num_ctx=None,
+                top_p=None,
+                repeat_penalty=None,
+            )
+        else:
+            ollama_base = cfg.get("ollama_base") or str(model)
+            import argparse as _ap
+            ns = _ap.Namespace(
+                base=str(ollama_base),
+                adapter=str(adapter_path),
+                name=str(ollama_name),
+                system=None,
+                template_from=None,
+                gguf=None,
+                out_modelfile=None,
+                temperature=None,
+                num_ctx=None,
+                top_p=None,
+                repeat_penalty=None,
+            )
+
+        if dry_run:
+            print(f"Step 3 — ollama push: {ollama_name}")
+        else:
+            print(f"\nforge mlx-train: pushing to Ollama as {ollama_name!r}", file=sys.stderr)
+            rc = _cmd_create_from_base(parser, ns)
+            if rc != 0:
+                return rc
+
+    if not dry_run:
+        print(f"\nDone. Adapter: {adapter_path}", file=sys.stderr)
+        if cfg.get("fuse"):
+            print(f"  Fused model: {fused_path}", file=sys.stderr)
+        if ollama_name:
+            print(f"  Ollama model: ollama run {ollama_name}", file=sys.stderr)
+
+    return 0
 
 
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:  # type: ignore[type-arg]
@@ -788,5 +1005,32 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Load options from YAML/JSON file (CLI overrides config); repeatable runs",
     )
     p_finetune.set_defaults(handler=_cmd_train_run)
+
+    # mlx-train (YAML-driven mlx-lm LoRA fine-tuning on Apple Silicon)
+    p_mlx = subparsers.add_parser(
+        "mlx-train",
+        help=(
+            "Fine-tune a model on Apple Silicon via mlx-lm LoRA. "
+            "Pass a config.yaml (see --init to generate a template)."
+        ),
+    )
+    p_mlx.add_argument(
+        "config",
+        nargs="?",
+        metavar="CONFIG_YAML",
+        help="Path to config.yaml (see --init for a template)",
+    )
+    p_mlx.add_argument(
+        "--init",
+        action="store_true",
+        help="Write a template config.yaml and exit (default name: forge-train.yaml)",
+    )
+    p_mlx.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Print the mlx_lm commands that would run, without running them",
+    )
+    p_mlx.set_defaults(handler=_cmd_mlx_train)
 
     return p_train_data
