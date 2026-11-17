@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+pytest.importorskip("mlx")
 
 from ollama_forge.wsp.corrector import ProbeResult
 from ollama_forge.wsp.gradient_corrector import (

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+pytest.importorskip("mlx")
 
 from ollama_forge.wsp.analyzer import (
     LayerAnalysis,
