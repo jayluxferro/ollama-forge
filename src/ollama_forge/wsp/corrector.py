@@ -41,33 +41,74 @@ import numpy as np
 # ── built-in probe bank ───────────────────────────────────────────────────────
 
 # (prompt, expected_substring_in_answer)  — lower-cased matching
+# Two sections: HARD (small models often fail — these generate the failure direction)
+# and EASY FACTUAL (small models almost always pass — anchors the pass direction
+# away from general knowledge retrieval so the correction is task-specific).
 _PROBE_BANK: list[tuple[str, str]] = [
-    # Multi-step reasoning — small models often fail
+    # ── hard multi-step reasoning (target ~10 failures) ───────────────────────
     ("Alice has twice as many stickers as Bob. Bob has 3 more than Carol. "
      "Carol has 4. How many stickers does Alice have? Give only the number.", "14"),
     ("A snail climbs 3 m up a 10 m well each day but slides 2 m back each night. "
      "On which day does it reach the top? Give only the number.", "8"),
-    ("What is the sum of all integers from 1 to 100? Give only the number.", "5050"),
-    ("If you flip a fair coin 3 times, how many ways can you get exactly 2 heads?"
-     " Give only the number.", "3"),
     ("A bat and ball cost $1.10. The bat costs $1.00 more than the ball. "
      "How much does the ball cost in cents? Give only the number.", "5"),
-    ("What comes next: 1, 1, 2, 3, 5, 8, __? Give only the number.", "13"),
-    ("What is 2^10? Give only the number.", "1024"),
     ("If P implies Q and Q implies R and P is true, is R true? Reply only yes or no.", "yes"),
-    ("Some cats are black. All black cats are fast. Can we say all cats are fast? Reply only yes or no.", "no"),
-    ("What is the next prime after 11? Give only the number.", "13"),
-    # Simple factual / arithmetic — small models usually pass these
+    ("Some cats are black. All black cats are fast. Can we say all cats are fast?"
+     " Reply only yes or no.", "no"),
+    # Deceptive counting / multi-step
+    ("A farmer has 17 sheep. All but 9 die. How many sheep are left?"
+     " Give only the number.", "9"),
+    ("Mary is 24. She is twice as old as Ann was when Mary was as old as Ann is now."
+     " How old is Ann now? Give only the number.", "18"),
+    ("A train travels 60 km/h for 1.5 hours, then 90 km/h for 2 hours. "
+     "What is the total distance in km? Give only the number.", "270"),
+    ("How many times does the digit 1 appear in the integers from 1 to 20?"
+     " Give only the number.", "12"),
+    ("Three friends split a restaurant bill equally. The bill is $73.50 and they "
+     "leave a 20% tip. How much does each person pay in dollars? "
+     "Give only the number rounded to two decimal places.", "29.40"),
+    # Conditional chains
+    ("If all Bloops are Razzles, and all Razzles are Lazzles, are all Bloops Lazzles?"
+     " Reply only yes or no.", "yes"),
+    ("No fish are mammals. All sharks are fish. Are any sharks mammals?"
+     " Reply only yes or no.", "no"),
+    # Pattern / modular arithmetic
+    ("What is 2^10? Give only the number.", "1024"),
+    ("What is the sum of all integers from 1 to 100? Give only the number.", "5050"),
+    ("If today is Wednesday and a meeting is in 10 days, what day is the meeting?"
+     " Give only the day name.", "saturday"),
+    ("What is the remainder when 157 is divided by 12? Give only the number.", "1"),
+    ("How many prime numbers are there between 10 and 30? Give only the number.", "5"),
+    # Combinatorics (tricky for small models)
+    ("If you flip a fair coin 3 times, how many ways can you get exactly 2 heads?"
+     " Give only the number.", "3"),
+    ("In how many ways can you arrange the letters A, B, C? Give only the number.", "6"),
+    # ── benchmark-format questions (no "give only" instruction) ─────────────────
+    # These match real benchmark question phrasing. Without explicit format
+    # constraints, the model tends to be verbose, producing the correct answer
+    # buried after a long preamble. These are "fail" when the answer does not
+    # appear in the first ~100 chars of the response.
+    # Included as HARD examples so the probe captures the verbosity failure direction.
+    ("A bat and a ball cost $1.10 total. The bat costs $1 more than the ball."
+     " How much does the ball cost in cents?", "5"),
+    ("What comes next in the sequence: 2, 4, 8, 16, __?", "32"),
+    ("If all bloops are razzles and all razzles are lazzles, are all bloops lazzles?"
+     " Reply yes or no.", "yes"),
+    ("A farmer has 17 sheep. All but 9 die. How many are left?", "9"),
+    ("What is 2^8?", "256"),
+    ("A rectangle has length 11 cm and perimeter 36 cm. What is its width?", "7"),
+    # ── easy factual (small models almost always pass — anchor the pass mean) ──
     ("What is the capital of France? Give only the city name.", "paris"),
     ("What is 12 × 12? Give only the number.", "144"),
-    ("What is 100 ÷ 4? Give only the number.", "25"),
     ("What is the square root of 64? Give only the number.", "8"),
     ("How many sides does a hexagon have? Give only the number.", "6"),
-    ("What is 15% of 200? Give only the number.", "30"),
     ("What is H2O? Reply in one word.", "water"),
-    ("What is 7 + 8 × 2? Give only the number.", "23"),
-    ("What is the first element in the periodic table? Give only the element name.", "hydrogen"),
+    ("What is the first element in the periodic table? Give only the element name.",
+     "hydrogen"),
     ("How many days are in a leap year? Give only the number.", "366"),
+    ("What is 100 ÷ 4? Give only the number.", "25"),
+    ("What is 15% of 200? Give only the number.", "30"),
+    ("What comes next: 1, 1, 2, 3, 5, 8, __? Give only the number.", "13"),
 ]
 
 
@@ -280,20 +321,25 @@ def attribute_failure_layers(
     n_layers: int,
     proj_type: str = "down_proj",
     top_k: int = 5,
+    min_layer: int = 0,
 ) -> list[AttributionResult]:
     """Rank layers by how strongly they amplify the behavioral failure direction.
 
-    For each layer l, computes:
+    For each layer l ≥ min_layer, computes:
         d_k[l] = h_fail_mean[l] − h_pass_mean[l]   (failure direction in input space)
         response = ‖W_down[l] @ d_k_norm[l]‖        (W's amplification of failure dir)
 
     Higher response = this layer amplifies failure-correlated patterns more.
+    min_layer skips early layers (0..min_layer-1) which handle general semantics and
+    whose correction tends to hurt factual retrieval.
     """
     import mlx.core as mx
 
     results: list[AttributionResult] = []
 
     for li in range(n_layers):
+        if li < min_layer:
+            continue
         if li not in probe_result.h_fail_mean or li not in probe_result.h_pass_mean:
             continue
 
@@ -387,6 +433,7 @@ class BehavioralCorrector:
         n_layers: int = 2,
         proj_type: str = "down_proj",
         alpha: float = 0.1,
+        min_layer: int = 0,
         output_path: str | Path | None = None,
         progress_fn: Callable[[str], None] | None = None,
     ) -> CorrectionResult:
@@ -398,6 +445,9 @@ class BehavioralCorrector:
             n_layers:     how many top-attributed layers to correct (default: 2)
             proj_type:    which MLP projection to edit (default: down_proj)
             alpha:        correction strength in [0, 1] (default: 0.1)
+            min_layer:    skip layers below this index during attribution (default: 0).
+                          Set to ~half the model depth to avoid early-layer edits that
+                          degrade factual retrieval.
             output_path:  where to save the corrected model
             progress_fn:  optional progress callback
         """
@@ -442,6 +492,7 @@ class BehavioralCorrector:
             tokenizer=tokenizer,
             probe_bank=probe_bank,
             layer_indices=layer_indices,
+            max_tokens=80,
             progress_fn=_prog,
         )
 
@@ -472,13 +523,17 @@ class BehavioralCorrector:
         weights = _load_all_weights(files)
 
         # ── 5. attribute ──────────────────────────────────────────────────────
-        _prog("attributing failure layers…")
+        _prog(
+            f"attributing failure layers (min_layer={min_layer})…"
+            if min_layer > 0 else "attributing failure layers…"
+        )
         attributions = attribute_failure_layers(
             probe_result=probe_result,
             weights=weights,
             n_layers=n_model_layers,
             proj_type=proj_type,
             top_k=max(n_layers, 5),
+            min_layer=min_layer,
         )
 
         candidates = attributions[:n_layers]

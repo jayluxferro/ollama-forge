@@ -227,6 +227,7 @@ def _cmd_correct(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     n_layers = getattr(args, "n_layers", 2)
     proj_type = getattr(args, "proj_type", "down_proj")
     alpha = getattr(args, "alpha", 0.1)
+    min_layer = getattr(args, "min_layer", 0)
     output_path = getattr(args, "output_path", None)
 
     if model_path_str:
@@ -261,6 +262,7 @@ def _cmd_correct(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
             n_layers=n_layers,
             proj_type=proj_type,
             alpha=alpha,
+            min_layer=min_layer,
             output_path=output_path,
             progress_fn=_prog,
         )
@@ -461,6 +463,15 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="Correction strength 0–1 (default: 0.1; larger = stronger damping)",
+    )
+    p_corr.add_argument(
+        "--min-layer",
+        dest="min_layer",
+        type=int,
+        default=0,
+        help="Skip layers below this index during attribution (default: 0). "
+        "Set to ~half the model depth to avoid early-layer edits that degrade "
+        "factual retrieval (e.g. 14 for a 28-layer model).",
     )
     p_corr.add_argument(
         "--output-path",
