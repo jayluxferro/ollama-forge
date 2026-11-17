@@ -6,6 +6,12 @@ Phase 3: surgical editing — remove obstructions with minimal weight budget.
 """
 
 from ollama_forge.wsp.analyzer import LayerAnalysis, WeightMap, WeightSpaceAnalyzer
+from ollama_forge.wsp.corrector import (
+    BehavioralCorrector,
+    CorrectionRecord,
+    CorrectionResult,
+    ProbeResult,
+)
 from ollama_forge.wsp.diagnostics import (
     ObstructionReport,
     run_diagnostics,
@@ -21,4 +27,8 @@ __all__ = [
     "EditRecord",
     "SharpenResult",
     "Sharpener",
+    "BehavioralCorrector",
+    "CorrectionRecord",
+    "CorrectionResult",
+    "ProbeResult",
 ]

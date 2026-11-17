@@ -218,6 +218,61 @@ def _cmd_sharpen(parser: argparse.ArgumentParser, args: argparse.Namespace) -> i
     return 0
 
 
+def _cmd_correct(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.wsp.analyzer import find_model_path
+    from ollama_forge.wsp.corrector import BehavioralCorrector
+
+    model_name = args.model
+    model_path_str = getattr(args, "model_path", None)
+    n_layers = getattr(args, "n_layers", 2)
+    proj_type = getattr(args, "proj_type", "down_proj")
+    alpha = getattr(args, "alpha", 0.1)
+    output_path = getattr(args, "output_path", None)
+
+    if model_path_str:
+        model_path = Path(model_path_str)
+    else:
+        model_path = find_model_path(model_name)
+        if model_path is None:
+            print(
+                f"Error: cannot find local weights for '{model_name}'.\n"
+                "Use --model-path to specify the directory.",
+                file=sys.stderr,
+            )
+            return 2
+
+    print(
+        f"Behavioral Causal Correction — {model_path.name}  "
+        f"[{n_layers} layer(s), α={alpha}]",
+        file=sys.stderr,
+    )
+    print("", file=sys.stderr)
+
+    corrector = BehavioralCorrector(model_path)
+
+    steps: list[str] = []
+
+    def _prog(msg: str) -> None:
+        steps.append(msg)
+        print(f"  {msg}", file=sys.stderr)
+
+    try:
+        result = corrector.correct(
+            n_layers=n_layers,
+            proj_type=proj_type,
+            alpha=alpha,
+            output_path=output_path,
+            progress_fn=_prog,
+        )
+    except (FileNotFoundError, ValueError, Exception) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print()
+    print(result.report())
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "wsp",
@@ -374,6 +429,46 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Output directory for the sharpened model (default: <source>-sharp/)",
     )
     p_sharp.set_defaults(handler=_cmd_sharpen)
+
+    # ── correct ───────────────────────────────────────────────────────────────
+    p_corr = sub.add_parser(
+        "correct",
+        help="Behavioral Causal Correction (Phase 4): probe → attribute → rank-1 fix",
+    )
+    p_corr.add_argument("model", help="Model name or HF repo id")
+    p_corr.add_argument(
+        "--model-path",
+        dest="model_path",
+        metavar="PATH",
+        help="Path to source .safetensors directory (overrides auto-discovery)",
+    )
+    p_corr.add_argument(
+        "--n-layers",
+        dest="n_layers",
+        type=int,
+        default=2,
+        help="How many top-attributed layers to correct (default: 2)",
+    )
+    p_corr.add_argument(
+        "--proj-type",
+        dest="proj_type",
+        choices=["gate_proj", "up_proj", "down_proj"],
+        default="down_proj",
+        help="MLP projection to correct (default: down_proj)",
+    )
+    p_corr.add_argument(
+        "--alpha",
+        type=float,
+        default=0.1,
+        help="Correction strength 0–1 (default: 0.1; larger = stronger damping)",
+    )
+    p_corr.add_argument(
+        "--output-path",
+        dest="output_path",
+        metavar="DIR",
+        help="Output directory for the corrected model (default: <source>-bcc/)",
+    )
+    p_corr.set_defaults(handler=_cmd_correct)
 
     p.set_defaults(handler=lambda parser, args: (p.print_help(), 0)[1])
     return p
