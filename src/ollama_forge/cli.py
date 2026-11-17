@@ -40,6 +40,7 @@ from ollama_forge.commands.study import register as _register_study_cmds
 from ollama_forge.commands.eval import register as _register_eval_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
 from ollama_forge.commands.ui import register as _register_ui_cmds
+from ollama_forge.commands.wsp import register as _register_wsp_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
 from ollama_forge.commands.vlm import register as _register_vlm_cmds
 from ollama_forge.log import get_logger, set_verbose
@@ -138,6 +139,7 @@ def main() -> int:
     _register_api_cmds(subparsers)
     _register_ui_cmds(subparsers)
     _register_eval_cmds(subparsers)
+    _register_wsp_cmds(subparsers)
 
     _register_model_cmds(subparsers)
     from ollama_forge.commands.convert import register as _register_convert_cmds
@@ -236,6 +238,8 @@ def main() -> int:
         return 0
     if parsed.command == "train-data" and not getattr(parsed, "train_data_cmd", None):
         p_train_data.print_help()
+        return 0
+    if parsed.command == "wsp" and not getattr(parsed, "wsp_command", None):
         return 0
     handler = getattr(parsed, "handler", None)
     if handler is None:
