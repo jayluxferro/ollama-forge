@@ -29,6 +29,7 @@ from ollama_forge.commands.adapters import register as _register_adapters_cmds
 from ollama_forge.commands.api import register as _register_api_cmds
 from ollama_forge.commands.auto import register as _register_auto_cmds
 from ollama_forge.commands.cache import register as _register_cache_cmds
+from ollama_forge.commands.eval import register as _register_eval_cmds
 from ollama_forge.commands.fetch import register as _register_fetch_cmds
 from ollama_forge.commands.model import register as _register_model_cmds
 from ollama_forge.commands.plan import register as _register_plan_cmds
@@ -37,12 +38,11 @@ from ollama_forge.commands.security_eval import register as _register_security_e
 from ollama_forge.commands.serve import register as _register_serve_cmds
 from ollama_forge.commands.setup import register as _register_setup_cmds
 from ollama_forge.commands.study import register as _register_study_cmds
-from ollama_forge.commands.eval import register as _register_eval_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
-from ollama_forge.commands.ui import register as _register_ui_cmds
-from ollama_forge.commands.wsp import register as _register_wsp_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
+from ollama_forge.commands.ui import register as _register_ui_cmds
 from ollama_forge.commands.vlm import register as _register_vlm_cmds
+from ollama_forge.commands.wsp import register as _register_wsp_cmds
 from ollama_forge.log import get_logger, set_verbose
 
 log = get_logger()

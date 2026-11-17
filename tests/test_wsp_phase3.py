@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+
 pytest.importorskip("mlx")
 
+from ollama_forge.commands.wsp import _cmd_sharpen
+from ollama_forge.wsp.analyzer import LayerAnalysis, WeightMap
 from ollama_forge.wsp.sharpener import (
     EditRecord,
     Sharpener,
@@ -17,9 +20,6 @@ from ollama_forge.wsp.sharpener import (
     _randomized_svd,
     _zero_top_directions,
 )
-from ollama_forge.wsp.analyzer import LayerAnalysis, WeightMap
-from ollama_forge.commands.wsp import _cmd_sharpen
-
 
 # ── _randomized_svd ───────────────────────────────────────────────────────────
 

@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+
 pytest.importorskip("mlx")
 
+from ollama_forge.commands.wsp import _cmd_locate
 from ollama_forge.wsp.analyzer import (
     LayerAnalysis,
     WeightMap,
@@ -20,8 +21,6 @@ from ollama_forge.wsp.analyzer import (
     _svd_metrics,
     find_model_path,
 )
-from ollama_forge.commands.wsp import _cmd_locate
-
 
 # ── _effective_rank ───────────────────────────────────────────────────────────
 

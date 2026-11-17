@@ -5,15 +5,14 @@ import argparse
 import json
 from unittest.mock import MagicMock, patch
 
+from ollama_forge.commands.wsp import _cmd_bench, _cmd_diagnose, register
+from ollama_forge.wsp.bench import _answer_matches, run_bench
 from ollama_forge.wsp.diagnostics import (
     ObstructionReport,
     _has_repetition_loop,
     _validate_format,
     run_diagnostics,
 )
-from ollama_forge.wsp.bench import _answer_matches, run_bench
-from ollama_forge.commands.wsp import _cmd_diagnose, _cmd_bench, register
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -126,7 +125,9 @@ def test_run_diagnostics_sycophancy_detected() -> None:
         # Sycophancy pairs come after loop prompts (4 quick) + verbosity (4 quick).
         # In sycophancy: even calls = neutral (paris), odd calls = biased (berlin).
         content = "paris" if (call_count[0] % 2 == 1) else "berlin"
-        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]}).encode()
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]}
+        ).encode()
         mock = MagicMock()
         mock.__enter__ = lambda s: s
         mock.__exit__ = MagicMock(return_value=False)
@@ -183,7 +184,9 @@ def test_run_bench_all_correct() -> None:
     good_resp = "36"
 
     def _urlopen(req, timeout=None):
-        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": good_resp}, "finish_reason": "stop"}]}).encode()
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant", "content": good_resp}, "finish_reason": "stop"}]}
+        ).encode()
         mock = MagicMock()
         mock.__enter__ = lambda s: s
         mock.__exit__ = MagicMock(return_value=False)
