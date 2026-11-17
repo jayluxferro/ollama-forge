@@ -12,6 +12,12 @@ from ollama_forge.wsp.corrector import (
     CorrectionResult,
     ProbeResult,
 )
+from ollama_forge.wsp.abliterator import (
+    AbliterationCorrector,
+    AbliterationRecord,
+    AbliterationResult,
+    ResidualProbeResult,
+)
 from ollama_forge.wsp.gradient_corrector import (
     GGCRecord,
     GGCResult,
@@ -39,4 +45,8 @@ __all__ = [
     "GGCRecord",
     "GGCResult",
     "GradientCorrector",
+    "AbliterationCorrector",
+    "AbliterationRecord",
+    "AbliterationResult",
+    "ResidualProbeResult",
 ]
