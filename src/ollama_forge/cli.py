@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 
 from ollama_forge.commands.abliterate import register as _register_abliterate_cmds
 from ollama_forge.commands.adapters import register as _register_adapters_cmds
+from ollama_forge.commands.api import register as _register_api_cmds
 from ollama_forge.commands.auto import register as _register_auto_cmds
 from ollama_forge.commands.cache import register as _register_cache_cmds
 from ollama_forge.commands.fetch import register as _register_fetch_cmds
@@ -130,8 +131,9 @@ def main() -> int:
     # quantize (requantize a GGUF file)
     _register_quantize_cmds(subparsers)
 
-    # serve / chat
+    # serve / chat / api
     p_serve, p_chat = _register_serve_cmds(subparsers)
+    _register_api_cmds(subparsers)
 
     _register_model_cmds(subparsers)
     from ollama_forge.commands.convert import register as _register_convert_cmds
