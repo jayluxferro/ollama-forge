@@ -38,6 +38,7 @@ from ollama_forge.commands.serve import register as _register_serve_cmds
 from ollama_forge.commands.setup import register as _register_setup_cmds
 from ollama_forge.commands.study import register as _register_study_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
+from ollama_forge.commands.ui import register as _register_ui_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
 from ollama_forge.commands.vlm import register as _register_vlm_cmds
 from ollama_forge.log import get_logger, set_verbose
@@ -131,9 +132,10 @@ def main() -> int:
     # quantize (requantize a GGUF file)
     _register_quantize_cmds(subparsers)
 
-    # serve / chat / api
+    # serve / chat / api / ui
     p_serve, p_chat = _register_serve_cmds(subparsers)
     _register_api_cmds(subparsers)
+    _register_ui_cmds(subparsers)
 
     _register_model_cmds(subparsers)
     from ollama_forge.commands.convert import register as _register_convert_cmds
