@@ -25,6 +25,7 @@ Or the shortest path: `ollama-forge start --name my-model` then `ollama run my-m
 | **MLX fine-tuning** | `forge mlx-train` | YAML-driven `mlx-lm` fine-tuning: `--init` to scaffold config, `--dry-run` to validate, real LoRA adapter training on Apple Silicon |
 | **Model router** | Python API | `ModelRouter.from_available(models)` — heuristic routing (code→coder model, vision→VLM, etc.) from installed models |
 | **Context budget** | Python API | `ContextBudget(max_tokens=8192)` — running token tracker with warn threshold and `trim_to_fit()` for agentic loops |
+| **Weight-Space Sharpening** | `forge wsp` | 6-phase toolkit for surgical LLM weight editing: obstruction diagnosis, spectral analysis, rank-k sharpening, causal correction, and abliteration (residual stream orthogonalisation for refusal removal) |
 
 ---
 
@@ -44,6 +45,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | [Training Data](wiki/Training-Data.md) | JSONL validate, prepare, train script |
 | [Retrain Pipeline](wiki/Retrain-Pipeline.md) | Data → adapter → Ollama |
 | [Abliterate](wiki/Abliterate.md) | Refusal removal |
+| [Weight-Space Sharpening](wiki/WSP.md) | `forge wsp` pipeline: 6 phases from diagnosis through abliteration; `forge wsp abliterate` for refusal removal via residual stream orthogonalisation |
 | [Security Eval](wiki/Security-Eval.md) | LLM security evaluation: prompt sets, KPIs, UI |
 | [Downsizing](wiki/Downsizing.md) | Teacher → student distillation |
 | [Hugging Face without GGUF](wiki/Hugging-Face-Without-GGUF.md) | When the repo has no GGUF |
@@ -108,6 +110,7 @@ Detailed guides live in the [**wiki/**](wiki/Home.md):
 | VLM convert HF → MLX | `vlm convert --hf-path <repo_id> [--q-mode mxfp4]` |
 | VLM quantize | `vlm quantize --model <repo_id> --bits 4 [--q-mode affine]` |
 | VLM fine-tune (LoRA/ORPO) | `vlm finetune --model <model> --dataset <path> [--train-mode orpo]` |
+| Remove soft-tier refusals (WSP abliteration) | `wsp abliterate <model-path> --n-layers 3 --output-path <path>` |
 | Download GGUF only (no Ollama) | `fetch <repo_id> --download-only` |
 | Check / fix environment | `check`, `doctor [--fix]` |
 | Install llama.cpp | `setup-llama-cpp` |
@@ -190,6 +193,7 @@ uv run ollama-forge eval --model llama3.2:3b --suite my_suite.yaml
 
 - **Hugging Face repo without GGUF** — Convert with llama.cpp first, then `convert`. [Wiki](wiki/Hugging-Face-Without-GGUF.md).
 - **Refusal removal (abliterate)** — Quickstart: `abliterate easy --model <id> --name <name>` or `abliterate wizard` for prompts. Install deps with `uv sync`. For agents with tool support use the lightweight **proxy**: `abliterate proxy --name <name>`. [Wiki](wiki/Abliterate.md).
+- **Weight-space sharpening (WSP)** — 6-phase pipeline for surgical LLM weight editing without gradient descent: obstruction diagnosis, spectral analysis, rank-k sharpening, Behavioral + Gradient-Guided Causal Correction, and abliteration (residual stream orthogonalisation). Sweet spot for Qwen2.5-7B: `forge wsp abliterate <model-path> --n-layers 3 --output-path <path>`. [Wiki](wiki/WSP.md).
 - **Downsizing (distillation)** — `downsize --teacher <hf> --student <hf> --name <name>`. [Wiki](wiki/Downsizing.md).
 - **LLM security evaluation** — Run prompt sets against Ollama/serve, score refusal/compliance, get ASR and KPIs: `security-eval run <prompt_set>`. Install deps with `uv sync`, then run `security-eval ui` for the UI. [Wiki: Security Eval](wiki/Security-Eval.md).
 - **TurboQuant** — Extreme 2-4 bit quantization with near-optimal quality. No llama.cpp needed. `turboquant quantize <model> --bits 3` then `turboquant serve` or `turboquant chat`. Includes asymmetric K/V cache compression, layer-adaptive precision (protects quality-critical layers), and temporal decay (progressively compresses old KV tokens). [Wiki](wiki/TurboQuant.md).
