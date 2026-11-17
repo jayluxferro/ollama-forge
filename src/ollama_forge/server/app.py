@@ -103,6 +103,13 @@ def create_app(
         backend, path = await _resolve_backend(model_id)
         is_stream = bool(payload.get("stream"))
 
+        # Local subprocess backends (mlx_lm, mlx_vlm, llama_cpp) are started
+        # with --model <path>. If the request carries the registered short name
+        # (e.g. "qwen1.5b") the subprocess will try to fetch that name from
+        # HuggingFace. Replace it with the actual path before proxying.
+        backend_path = getattr(backend, "_model_path", None)
+        proxy_payload = payload if backend_path is None else {**payload, "model": str(backend_path)}
+
         if is_stream:
             async def _gen() -> AsyncIterator[bytes]:
                 tracker.mark_in_flight(model_id)
@@ -113,7 +120,7 @@ def create_app(
                     assert backend._client is not None  # type: ignore[attr-defined]
                     async with backend._client.stream(  # type: ignore[attr-defined]
                         "POST", path,
-                        json=payload,
+                        json=proxy_payload,
                         timeout=httpx.Timeout(None, connect=10.0),
                     ) as resp:
                         async for chunk in resp.aiter_bytes():
@@ -129,7 +136,7 @@ def create_app(
             assert backend._client is not None  # type: ignore[attr-defined]
             resp = await backend._client.post(  # type: ignore[attr-defined]
                 path,
-                json=payload,
+                json=proxy_payload,
                 timeout=httpx.Timeout(None, connect=10.0),
             )
         finally:
