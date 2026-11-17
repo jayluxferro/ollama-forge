@@ -37,6 +37,7 @@ from ollama_forge.commands.security_eval import register as _register_security_e
 from ollama_forge.commands.serve import register as _register_serve_cmds
 from ollama_forge.commands.setup import register as _register_setup_cmds
 from ollama_forge.commands.study import register as _register_study_cmds
+from ollama_forge.commands.eval import register as _register_eval_cmds
 from ollama_forge.commands.train import register as _register_train_cmds
 from ollama_forge.commands.ui import register as _register_ui_cmds
 from ollama_forge.commands.turboquant import register as _register_turboquant_cmds
@@ -136,6 +137,7 @@ def main() -> int:
     p_serve, p_chat = _register_serve_cmds(subparsers)
     _register_api_cmds(subparsers)
     _register_ui_cmds(subparsers)
+    _register_eval_cmds(subparsers)
 
     _register_model_cmds(subparsers)
     from ollama_forge.commands.convert import register as _register_convert_cmds
