@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # uv / pip ecosystem for the main project
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # llama.cpp is a vendored upstream copy — its requirements are managed
+      # by the llama.cpp project, not by us.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+
+  # Explicitly exclude llama.cpp vendored directory from scanning
+  # by not registering it as a managed ecosystem
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
