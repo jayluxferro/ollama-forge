@@ -12,6 +12,11 @@ from ollama_forge.wsp.corrector import (
     CorrectionResult,
     ProbeResult,
 )
+from ollama_forge.wsp.gradient_corrector import (
+    GGCRecord,
+    GGCResult,
+    GradientCorrector,
+)
 from ollama_forge.wsp.diagnostics import (
     ObstructionReport,
     run_diagnostics,
@@ -31,4 +36,7 @@ __all__ = [
     "CorrectionRecord",
     "CorrectionResult",
     "ProbeResult",
+    "GGCRecord",
+    "GGCResult",
+    "GradientCorrector",
 ]

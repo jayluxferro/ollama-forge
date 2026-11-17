@@ -10,8 +10,9 @@ import re
 import urllib.request
 
 # ── question banks ────────────────────────────────────────────────────────────
+# expected may be a str (single accepted answer) or list[str] (any match wins)
 
-_MATH_QA: list[tuple[str, str]] = [
+_MATH_QA: list[tuple[str, str | list[str]]] = [
     ("What is 15% of 240?", "36"),
     ("Solve: 3x + 7 = 22. What is x?", "5"),
     ("A rectangle has length 11 cm and perimeter 36 cm. What is its width?", "7"),
@@ -20,16 +21,18 @@ _MATH_QA: list[tuple[str, str]] = [
     ("What is 2^8?", "256"),
 ]
 
-_FACTUAL_QA: list[tuple[str, str]] = [
+_FACTUAL_QA: list[tuple[str, str | list[str]]] = [
     ("What is the capital of Japan?", "tokyo"),
-    ("How many planets are in our solar system?", "8"),
+    # accept "eight" for verbose enumerations that push the digit past the token limit
+    ("How many planets are in our solar system?", ["8", "eight"]),
     ("What is the chemical symbol for gold?", "au"),
     ("In which year did World War II end?", "1945"),
-    ("What is the speed of light in km/s (approximate)?", "300000"),
+    # accept the precise SI value as well as the common approximation
+    ("What is the speed of light in km/s (approximate)?", ["300000", "299792", "299,792"]),
     ("What is the largest ocean on Earth?", "pacific"),
 ]
 
-_CODING_QA: list[tuple[str, str]] = [
+_CODING_QA: list[tuple[str, str | list[str]]] = [
     (
         "Write a Python one-liner to reverse a list called lst. Reply with ONLY the code.",
         "[::-1]",
@@ -52,7 +55,7 @@ _CODING_QA: list[tuple[str, str]] = [
     ),
 ]
 
-_REASONING_QA: list[tuple[str, str]] = [
+_REASONING_QA: list[tuple[str, str | list[str]]] = [
     ("If all bloops are razzles and all razzles are lazzles, are all bloops lazzles? Reply yes or no.", "yes"),
     (
         "A bat and a ball cost $1.10 total. The bat costs $1 more than the ball."
@@ -76,7 +79,7 @@ def _chat_once(prompt: str, model: str, base_url: str, timeout: float) -> str:
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 128,
+        "max_tokens": 256,
         "temperature": 0.0,
         "stream": False,
     }).encode()
@@ -91,10 +94,15 @@ def _chat_once(prompt: str, model: str, base_url: str, timeout: float) -> str:
     return (data["choices"][0]["message"].get("content") or "").strip().lower()
 
 
-def _answer_matches(response: str, expected: str) -> bool:
+def _answer_matches(response: str, expected: str | list[str]) -> bool:
+    """Return True if any accepted answer appears in response."""
+    candidates = [expected] if isinstance(expected, str) else expected
     r = response.lower()
-    e = expected.lower()
-    return e in r or bool(re.search(rf"\b{re.escape(e)}\b", r))
+    for e in candidates:
+        e = e.lower()
+        if e in r or bool(re.search(rf"\b{re.escape(e)}\b", r)):
+            return True
+    return False
 
 
 def run_bench(

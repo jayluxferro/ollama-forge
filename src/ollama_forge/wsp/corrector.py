@@ -123,8 +123,10 @@ class ProbeResult:
     h_fail_mean: dict[int, np.ndarray] = field(default_factory=dict)
     # layer_idx → mean activation vector (d_mlp,) for pass examples
     h_pass_mean: dict[int, np.ndarray] = field(default_factory=dict)
-    fail_examples: list[str] = field(default_factory=list)
+    fail_examples: list[str] = field(default_factory=list)   # prompts
     pass_examples: list[str] = field(default_factory=list)
+    fail_expected: list[str] = field(default_factory=list)   # expected substrings
+    fail_responses: list[str] = field(default_factory=list)  # actual model responses
 
 
 @dataclass
@@ -256,6 +258,8 @@ def run_mlx_probe(
     fail_acts: dict[int, list[np.ndarray]] = {li: [] for li in layer_indices}
     pass_acts: dict[int, list[np.ndarray]] = {li: [] for li in layer_indices}
     fail_examples: list[str] = []
+    fail_expected_list: list[str] = []
+    fail_responses_list: list[str] = []
     pass_examples: list[str] = []
 
     n = len(probe_bank)
@@ -289,8 +293,12 @@ def run_mlx_probe(
 
         # Accumulate activations
         bucket_acts = pass_acts if passed else fail_acts
-        bucket_examples = pass_examples if passed else fail_examples
-        bucket_examples.append(prompt)
+        if passed:
+            pass_examples.append(prompt)
+        else:
+            fail_examples.append(prompt)
+            fail_expected_list.append(expected)
+            fail_responses_list.append(response.strip())
 
         for li in layer_indices:
             if captures[li]:
@@ -302,6 +310,8 @@ def run_mlx_probe(
         n_pass=len(pass_examples),
         fail_examples=fail_examples,
         pass_examples=pass_examples,
+        fail_expected=fail_expected_list,
+        fail_responses=fail_responses_list,
     )
     for li in layer_indices:
         if fail_acts[li]:
