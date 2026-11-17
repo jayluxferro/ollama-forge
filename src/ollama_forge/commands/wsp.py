@@ -1,4 +1,4 @@
-"""forge wsp — weight-space programming toolkit (Phases 1–2: diagnose + locate)."""
+"""forge wsp — weight-space programming toolkit (Phases 1–3: diagnose, locate, sharpen)."""
 from __future__ import annotations
 
 import argparse
@@ -140,6 +140,82 @@ def _cmd_locate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     return 0
 
 
+def _cmd_sharpen(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from ollama_forge.wsp.analyzer import WeightMap, WeightSpaceAnalyzer, find_model_path
+    from ollama_forge.wsp.sharpener import Sharpener
+
+    model_name = args.model
+    model_path_str = getattr(args, "model_path", None)
+    weight_map_path = getattr(args, "weight_map", None)
+    obstruction = getattr(args, "obstruction", "loops")
+    n_layers = getattr(args, "n_layers", 3)
+    n_directions = getattr(args, "n_directions", 1)
+    proj_type = getattr(args, "proj_type", "down_proj")
+    output_path = getattr(args, "output_path", None)
+
+    # Resolve model path
+    if model_path_str:
+        model_path = Path(model_path_str)
+    else:
+        model_path = find_model_path(model_name)
+        if model_path is None:
+            print(
+                f"Error: cannot find local weights for '{model_name}'.\n"
+                "Use --model-path to specify the directory containing .safetensors files.",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Load or build weight map
+    if weight_map_path:
+        wm_data = json.loads(Path(weight_map_path).read_text())
+        weight_map = WeightMap.from_json(wm_data)
+        print(f"Loaded weight map from {weight_map_path}", file=sys.stderr)
+    else:
+        print("No --weight-map given; running locate scan first...", file=sys.stderr)
+        analyzer = WeightSpaceAnalyzer(model_path)
+        steps: list[str] = []
+
+        def _loc_progress(msg: str) -> None:
+            steps.append(msg)
+            print(f"  {msg}", file=sys.stderr)
+
+        try:
+            weight_map = analyzer.scan(progress_fn=_loc_progress)
+        except (FileNotFoundError, Exception) as exc:
+            print(f"Error during scan: {exc}", file=sys.stderr)
+            return 1
+
+    # Run sharpener
+    print(f"\nSharpening {model_path.name}  [{obstruction}, {n_layers} layer(s), {n_directions} dir(s)]",
+          file=sys.stderr)
+    sharpener = Sharpener(model_path)
+
+    sharp_steps: list[str] = []
+
+    def _sharp_progress(msg: str) -> None:
+        sharp_steps.append(msg)
+        print(f"  {msg}", file=sys.stderr)
+
+    try:
+        result = sharpener.sharpen(
+            weight_map=weight_map,
+            obstruction=obstruction,
+            n_layers=n_layers,
+            n_directions=n_directions,
+            proj_type=proj_type,
+            output_path=output_path,
+            progress_fn=_sharp_progress,
+        )
+    except (FileNotFoundError, ValueError, Exception) as exc:
+        print(f"Error during sharpen: {exc}", file=sys.stderr)
+        return 1
+
+    print()
+    print(result.report())
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "wsp",
@@ -235,6 +311,59 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Save weight map to this JSON file for use with forge wsp sharpen",
     )
     p_locate.set_defaults(handler=_cmd_locate)
+
+    # ── sharpen ───────────────────────────────────────────────────────────────
+    p_sharp = sub.add_parser(
+        "sharpen",
+        help="Edit model weights (Phase 3): zero obstruction-circuit directions",
+    )
+    p_sharp.add_argument("model", help="Model name or HF repo id")
+    p_sharp.add_argument(
+        "--model-path",
+        dest="model_path",
+        metavar="PATH",
+        help="Path to source .safetensors directory (overrides auto-discovery)",
+    )
+    p_sharp.add_argument(
+        "--weight-map",
+        dest="weight_map",
+        metavar="JSON",
+        help="Path to weight map JSON from forge wsp locate (runs locate if omitted)",
+    )
+    p_sharp.add_argument(
+        "--obstruction",
+        choices=["loops", "sycophancy", "verbosity", "format_fixation"],
+        default="loops",
+        help="Which obstruction to target (default: loops)",
+    )
+    p_sharp.add_argument(
+        "--n-layers",
+        dest="n_layers",
+        type=int,
+        default=3,
+        help="How many candidate layers to edit (default: 3)",
+    )
+    p_sharp.add_argument(
+        "--n-directions",
+        dest="n_directions",
+        type=int,
+        default=1,
+        help="Singular directions to zero per layer (default: 1; paper used 1)",
+    )
+    p_sharp.add_argument(
+        "--proj-type",
+        dest="proj_type",
+        choices=["gate_proj", "up_proj", "down_proj"],
+        default="down_proj",
+        help="MLP projection to edit (default: down_proj)",
+    )
+    p_sharp.add_argument(
+        "--output-path",
+        dest="output_path",
+        metavar="DIR",
+        help="Output directory for the sharpened model (default: <source>-sharp/)",
+    )
+    p_sharp.set_defaults(handler=_cmd_sharpen)
 
     p.set_defaults(handler=lambda parser, args: (p.print_help(), 0)[1])
     return p
