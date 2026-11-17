@@ -305,19 +305,25 @@ def orthogonalise_weight(
 
     Returns (W_corrected_fp16, n_params_changed, delta_frob_ratio).
     """
-    d_norm = (d / (np.linalg.norm(d) + 1e-12)).astype(np.float64)
+    d_norm_raw = (d / (np.linalg.norm(d) + 1e-12)).astype(np.float64)
+    # Guard: replace any NaN/Inf in d_norm with zeros (can arise from extreme activations)
+    d_norm = np.where(np.isfinite(d_norm_raw), d_norm_raw, 0.0)
     W64 = W.astype(np.float64)
 
-    if mode == "write":
-        # W shape: (d_model, d_in)
-        # v = W.T @ d_norm has shape (d_in,)
-        v = W64.T @ d_norm                        # (d_in,)
-        delta = np.outer(d_norm, v)               # (d_model, d_in)
-    else:  # "read"
-        # W shape: (d_out, d_model)
-        # v = W @ d_norm has shape (d_out,)
-        v = W64 @ d_norm                          # (d_out,)
-        delta = np.outer(v, d_norm)               # (d_out, d_model)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        if mode == "write":
+            # W shape: (d_model, d_in)
+            # v = W.T @ d_norm has shape (d_in,)
+            v = W64.T @ d_norm                    # (d_in,)
+            delta = np.outer(d_norm, v)           # (d_model, d_in)
+        else:  # "read"
+            # W shape: (d_out, d_model)
+            # v = W @ d_norm has shape (d_out,)
+            v = W64 @ d_norm                      # (d_out,)
+            delta = np.outer(v, d_norm)           # (d_out, d_model)
+
+    # Guard: clamp any NaN/Inf in delta (should not happen after d_norm guard, but be safe)
+    delta = np.where(np.isfinite(delta), delta, 0.0)
 
     W_new = (W64 - delta).astype(np.float16)
     W_fp16_orig = W64.astype(np.float16)
