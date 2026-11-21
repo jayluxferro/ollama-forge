@@ -451,29 +451,39 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             return 1
 
         # Architecture not in mlx_lm — fall back to mlx_vlm (supports VLMs like inkling2)
+        import shutil
+        import subprocess
+
         print(f"  mlx_lm: {msg}", file=sys.stderr)
-        print("  Retrying with mlx_vlm…", file=sys.stderr)
-        try:
-            from mlx_vlm.convert import convert as vlm_convert
-        except ImportError:
+        print("  Retrying with mlx_vlm (subprocess)…", file=sys.stderr)
+
+        # Find a Python that can import mlx_vlm (may differ from the forge venv's Python
+        # if scipy has an ABI issue on this OS version)
+        vlm_py: str | None = None
+        for candidate in ("python3.11", "python3.12", "python3"):
+            exe = shutil.which(candidate)
+            if exe is None:
+                continue
+            if subprocess.run([exe, "-c", "import mlx_vlm"], capture_output=True).returncode == 0:
+                vlm_py = exe
+                break
+
+        if vlm_py is None:
             print(
-                "Error: architecture not in mlx_lm's registry and mlx_vlm is not installed.\n"
-                "  pip install mlx-vlm",
+                "Error: architecture not in mlx_lm's registry and no Python with mlx_vlm found.\n"
+                "  pip3.11 install mlx-vlm",
                 file=sys.stderr,
             )
             return 1
-        try:
-            vlm_convert(
-                hf_path=hf_path,
-                mlx_path=output,
-                quantize=quantize,
-                q_bits=q_bits,
-                q_group_size=q_group_size,
-                trust_remote_code=trust_remote_code,
-            )
-        except Exception as exc2:
-            print(f"Error (mlx_vlm): {exc2}", file=sys.stderr)
-            return 1
+
+        cmd = [vlm_py, "-m", "mlx_vlm.convert", "--hf-path", hf_path, "--mlx-path", output]
+        if quantize:
+            cmd += ["--quantize", "--q-bits", str(q_bits), "--q-group-size", str(q_group_size)]
+        if trust_remote_code:
+            cmd += ["--trust-remote-code"]
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            return result.returncode
 
     print(f"\nMLX model saved to {output}")
     print(f"Next:  forge wsp abliterate {output} --output {output}-abliterated")

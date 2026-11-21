@@ -228,12 +228,104 @@ def _get_layer_vlm(model, i: int):
     raise AttributeError(f"Cannot find layer {i} on {type(model).__name__}; check model structure")
 
 
+def _find_vlm_python() -> str | None:
+    """Return the first Python interpreter on PATH that can import mlx_vlm."""
+    import shutil
+    import subprocess
+
+    for candidate in ("python3.11", "python3.12", "python3"):
+        exe = shutil.which(candidate)
+        if exe is None:
+            continue
+        rc = subprocess.run(
+            [exe, "-c", "import mlx_vlm"],
+            capture_output=True,
+        ).returncode
+        if rc == 0:
+            return exe
+    return None
+
+
+def _run_vlm_probe_subprocess(
+    model_path: str,
+    suppress_bank: list[str],
+    retain_bank: list[str],
+    probe_mode: str,
+    full_response_tokens: int,
+    progress_fn,
+) -> "ResidualProbeResult":
+    """Run the VLM probe in a subprocess (for envs where mlx_vlm can't load in-process)."""
+    import subprocess
+    import tempfile
+
+    helper = Path(__file__).parent / "_vlm_probe_helper.py"
+    vlm_py = _find_vlm_python()
+    if vlm_py is None:
+        raise RuntimeError(
+            "Architecture not supported by mlx_lm, and no Python interpreter with mlx_vlm "
+            "was found on PATH.\n  Install mlx_vlm: pip3.11 install mlx-vlm"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="forge_vlm_probe_") as tmp:
+        tmp_path = Path(tmp)
+        # Write prompt banks so the helper can read them
+        sup_file = tmp_path / "suppress.json"
+        ret_file = tmp_path / "retain.json"
+        sup_file.write_text(json.dumps(suppress_bank))
+        ret_file.write_text(json.dumps(retain_bank))
+        out_dir = tmp_path / "out"
+
+        cmd = [
+            vlm_py,
+            str(helper),
+            "--model-path", model_path,
+            "--output-dir", str(out_dir),
+            "--suppress-bank", str(sup_file),
+            "--retain-bank", str(ret_file),
+            "--probe-mode", probe_mode,
+            "--full-response-tokens", str(full_response_tokens),
+        ]
+        if progress_fn:
+            progress_fn(f"probe subprocess: {vlm_py} _vlm_probe_helper.py …")
+
+        result = subprocess.run(cmd, check=False, text=True, stderr=subprocess.PIPE)
+        if progress_fn:
+            for line in (result.stderr or "").splitlines():
+                progress_fn(line)
+        if result.returncode != 0:
+            raise RuntimeError(f"VLM probe subprocess failed (rc={result.returncode})")
+
+        meta = json.loads((out_dir / "meta.json").read_text())
+        n_layers = meta["n_layers"]
+
+        pr = ResidualProbeResult(
+            n_suppress=meta["n_suppress"],
+            n_retain=meta["n_retain"],
+            suppress_examples=suppress_bank,
+            retain_examples=retain_bank,
+        )
+        for li in range(n_layers):
+            sp = out_dir / f"h_suppress_mean_{li}.npy"
+            rt = out_dir / f"h_retain_mean_{li}.npy"
+            if sp.exists():
+                pr.h_suppress_mean[li] = np.load(str(sp))
+            if rt.exists():
+                pr.h_retain_mean[li] = np.load(str(rt))
+
+    return pr
+
+
 def _load_model_for_wsp(model_path: str):
     """Load a model for WSP editing.
 
     Tries mlx_lm first; on "not supported" falls back to mlx_vlm (for VLM
     architectures like inkling2_loop).  Returns (model, tokenizer, generate_fn,
     layer_fn) where tokenizer may be a _VLMProcessorAdapter.
+
+    When mlx_vlm can't be imported in-process (e.g. scipy ABI mismatch on
+    Darwin 27+ with Python 3.10 wheels), returns None for model/tokenizer and
+    raises a _VLMSubprocessNeeded sentinel so the caller can switch to the
+    subprocess probe path.
     """
     try:
         from mlx_lm import generate as _mlx_gen
@@ -249,19 +341,21 @@ def _load_model_for_wsp(model_path: str):
         if "not supported" not in str(e):
             raise
 
+    # Architecture not in mlx_lm — try mlx_vlm in-process
     try:
         from mlx_vlm import generate as _vlm_gen
         from mlx_vlm import load as _vlm_load
-    except ImportError:
-        raise RuntimeError(
-            "Architecture not supported by mlx_lm.  "
-            "Install mlx-vlm to enable VLM support: pip install mlx-vlm"
-        ) from None
+    except ImportError as imp_err:
+        raise _VLMSubprocessNeeded(str(imp_err)) from None
 
     model, processor = _vlm_load(model_path)
     cfg = model.config.__dict__ if hasattr(model, "config") else {}
     tokenizer = _VLMProcessorAdapter(processor, cfg)
     return model, tokenizer, _vlm_gen, _get_layer_vlm
+
+
+class _VLMSubprocessNeeded(Exception):
+    """Raised when mlx_vlm can't be imported in-process; probe must run as a subprocess."""
 
 
 def run_abliteration_probe(
@@ -576,10 +670,6 @@ class AbliterationCorrector:
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # ── 2. load model for probing ─────────────────────────────────────────
-        _prog("loading model for probing…")
-        model, tokenizer, _generate_fn, _layer_fn = _load_model_for_wsp(str(self.model_path))
-
         cfg_path = self.model_path / "config.json"
         cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
         n_model_layers = cfg.get("num_hidden_layers", 28)
@@ -589,22 +679,38 @@ class AbliterationCorrector:
         q_group = int(q_cfg.get("group_size", 64))
 
         layer_indices = list(range(n_model_layers))
-
-        # ── 3. run residual stream probe ──────────────────────────────────────
         n_total = len(suppress_bank) + len(retain_bank)
-        _prog(f"probing {n_total} examples across {n_model_layers} layers…")
-        probe = run_abliteration_probe(
-            model=model,
-            tokenizer=tokenizer,
-            suppress_bank=suppress_bank,
-            retain_bank=retain_bank,
-            layer_indices=layer_indices,
-            progress_fn=_prog,
-            probe_mode=probe_mode,
-            full_response_tokens=full_response_tokens,
-            _generate_fn=_generate_fn,
-            _layer_fn=_layer_fn,
-        )
+
+        # ── 2+3. load model for probing and run residual stream probe ─────────
+        _prog("loading model for probing…")
+        try:
+            model, tokenizer, _generate_fn, _layer_fn = _load_model_for_wsp(str(self.model_path))
+
+            _prog(f"probing {n_total} examples across {n_model_layers} layers…")
+            probe = run_abliteration_probe(
+                model=model,
+                tokenizer=tokenizer,
+                suppress_bank=suppress_bank,
+                retain_bank=retain_bank,
+                layer_indices=layer_indices,
+                progress_fn=_prog,
+                probe_mode=probe_mode,
+                full_response_tokens=full_response_tokens,
+                _generate_fn=_generate_fn,
+                _layer_fn=_layer_fn,
+            )
+        except _VLMSubprocessNeeded:
+            # mlx_vlm can't load in-process (e.g. scipy ABI issue on Darwin 27+
+            # with Python 3.10 wheels) — run the probe in a compatible subprocess.
+            _prog("mlx_vlm unavailable in-process; running probe as subprocess…")
+            probe = _run_vlm_probe_subprocess(
+                model_path=str(self.model_path),
+                suppress_bank=list(suppress_bank),
+                retain_bank=list(retain_bank),
+                probe_mode=probe_mode,
+                full_response_tokens=full_response_tokens,
+                progress_fn=_prog,
+            )
 
         if probe.n_suppress < 1:
             raise ValueError("suppress_bank is empty — cannot compute concept direction.")
