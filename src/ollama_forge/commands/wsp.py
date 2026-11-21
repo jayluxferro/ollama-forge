@@ -446,14 +446,34 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
         )
     except Exception as exc:
         msg = str(exc)
-        print(f"Error: {msg}", file=sys.stderr)
-        if "not supported" in msg:
+        if "not supported" not in msg:
+            print(f"Error: {msg}", file=sys.stderr)
+            return 1
+
+        # Architecture not in mlx_lm — fall back to mlx_vlm (supports VLMs like inkling2)
+        print(f"  mlx_lm: {msg}", file=sys.stderr)
+        print("  Retrying with mlx_vlm…", file=sys.stderr)
+        try:
+            from mlx_vlm.convert import convert as vlm_convert
+        except ImportError:
             print(
-                "\nArchitecture not in mlx_lm's registry. "
-                "Check https://github.com/ml-explore/mlx-lm for a newer release.",
+                "Error: architecture not in mlx_lm's registry and mlx_vlm is not installed.\n"
+                "  pip install mlx-vlm",
                 file=sys.stderr,
             )
-        return 1
+            return 1
+        try:
+            vlm_convert(
+                hf_path=hf_path,
+                mlx_path=output,
+                quantize=quantize,
+                q_bits=q_bits,
+                q_group_size=q_group_size,
+                trust_remote_code=trust_remote_code,
+            )
+        except Exception as exc2:
+            print(f"Error (mlx_vlm): {exc2}", file=sys.stderr)
+            return 1
 
     print(f"\nMLX model saved to {output}")
     print(f"Next:  forge wsp abliterate {output} --output {output}-abliterated")
@@ -863,12 +883,11 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Convert a HuggingFace model to MLX safetensors (required before WSP editing)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            "Download and convert any mlx_lm-supported HuggingFace model to MLX format.\n"
+            "Download and convert a HuggingFace model to MLX safetensors format.\n"
             "The resulting directory can then be passed to forge wsp abliterate.\n\n"
-            "Note: the model's architecture must be in mlx_lm's registry.  Run\n"
-            "  mlx_lm.convert --help  or visit https://github.com/ml-explore/mlx-lm\n"
-            "to see the full list.  Custom architectures (e.g. inkling2_loop) require a\n"
-            "newer mlx_lm release that adds support for them."
+            "mlx_lm is tried first; if the architecture is not in its registry (e.g.\n"
+            "inkling2_loop / Inkling-2-Mini), mlx_vlm is used automatically as a fallback.\n"
+            "Both packages are included in the forge install on Apple Silicon."
         ),
     )
     p_tml.add_argument("hf_path", metavar="HF_REPO_OR_PATH", help="HuggingFace repo id or local safetensors directory")

@@ -198,6 +198,72 @@ class _CapturingNorm:
         return getattr(self._orig, name)
 
 
+class _VLMProcessorAdapter:
+    """Wraps an mlx_vlm processor to present the apply_chat_template interface the probe expects."""
+
+    def __init__(self, processor, config: dict):
+        self._processor = processor
+        self._config = config
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        from mlx_vlm.prompt_utils import apply_chat_template as _vlm_tpl
+
+        content = " ".join(m["content"] for m in messages if m.get("role") == "user")
+        return _vlm_tpl(self._processor, self._config, content, num_images=0)
+
+    def __getattr__(self, name: str):
+        return getattr(self._processor, name)
+
+
+def _get_layer_vlm(model, i: int):
+    """Return layer i from a VLM model (tries multiple common nesting paths)."""
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers[i]
+    if hasattr(model, "language_model"):
+        lm = model.language_model
+        if hasattr(lm, "model") and hasattr(lm.model, "layers"):
+            return lm.model.layers[i]
+        if hasattr(lm, "layers"):
+            return lm.layers[i]
+    raise AttributeError(f"Cannot find layer {i} on {type(model).__name__}; check model structure")
+
+
+def _load_model_for_wsp(model_path: str):
+    """Load a model for WSP editing.
+
+    Tries mlx_lm first; on "not supported" falls back to mlx_vlm (for VLM
+    architectures like inkling2_loop).  Returns (model, tokenizer, generate_fn,
+    layer_fn) where tokenizer may be a _VLMProcessorAdapter.
+    """
+    try:
+        from mlx_lm import generate as _mlx_gen
+        from mlx_lm import load as _mlx_load
+
+        model, tokenizer = _mlx_load(model_path)
+
+        def _layer_fn(m, i):
+            return m.model.layers[i]
+
+        return model, tokenizer, _mlx_gen, _layer_fn
+    except Exception as e:
+        if "not supported" not in str(e):
+            raise
+
+    try:
+        from mlx_vlm import generate as _vlm_gen
+        from mlx_vlm import load as _vlm_load
+    except ImportError:
+        raise RuntimeError(
+            "Architecture not supported by mlx_lm.  "
+            "Install mlx-vlm to enable VLM support: pip install mlx-vlm"
+        ) from None
+
+    model, processor = _vlm_load(model_path)
+    cfg = model.config.__dict__ if hasattr(model, "config") else {}
+    tokenizer = _VLMProcessorAdapter(processor, cfg)
+    return model, tokenizer, _vlm_gen, _get_layer_vlm
+
+
 def run_abliteration_probe(
     model,
     tokenizer,
@@ -207,6 +273,8 @@ def run_abliteration_probe(
     progress_fn: Callable[[str], None] | None = None,
     probe_mode: str = "last_token",
     full_response_tokens: int = 50,
+    _generate_fn=None,
+    _layer_fn=None,
 ) -> ResidualProbeResult:
     """Capture residual stream activations for suppress and retain prompts.
 
@@ -214,8 +282,8 @@ def run_abliteration_probe(
     the pre-normalisation residual stream.
 
     Args:
-        model:                 mlx_lm model (already loaded)
-        tokenizer:             mlx_lm tokenizer
+        model:                 mlx_lm / mlx_vlm model (already loaded)
+        tokenizer:             tokenizer or VLM processor with apply_chat_template
         suppress_bank:         prompts that trigger the concept to suppress
         retain_bank:           benign prompts to anchor the retain direction
         layer_indices:         which layers to capture (usually all)
@@ -229,11 +297,20 @@ def run_abliteration_probe(
                                rather than just prompt representation.
         full_response_tokens:  tokens to generate when ``probe_mode="full_response"``
                                (default: 50).
+        _generate_fn:          generate(model, tokenizer, prompt, max_tokens, verbose)
+                               callable; defaults to mlx_lm.generate.
+        _layer_fn:             _layer_fn(model, i) → layer; defaults to
+                               ``model.model.layers[i]``.
 
     Returns:
         ResidualProbeResult with per-layer mean residual vectors for each class
     """
-    from mlx_lm import generate
+    if _generate_fn is None:
+        from mlx_lm import generate as _generate_fn  # noqa: N806
+    if _layer_fn is None:
+        def _layer_fn(m, i):  # noqa: E306
+            return m.model.layers[i]
+    generate = _generate_fn
 
     if probe_mode not in ("last_token", "full_response"):
         raise ValueError(f"probe_mode must be 'last_token' or 'full_response', got {probe_mode!r}")
@@ -264,9 +341,10 @@ def run_abliteration_probe(
         originals: dict[int, object] = {}
 
         for li in layer_indices:
-            orig = model.model.layers[li].input_layernorm
+            layer = _layer_fn(model, li)
+            orig = layer.input_layernorm
             originals[li] = orig
-            model.model.layers[li].input_layernorm = _CapturingNorm(
+            layer.input_layernorm = _CapturingNorm(
                 orig, captures[li], active_flags[li], mode=cap_mode
             )
 
@@ -274,7 +352,7 @@ def run_abliteration_probe(
             generate(model, tokenizer, prompt=prompt_chat, max_tokens=max_tokens, verbose=False)
         finally:
             for li in layer_indices:
-                model.model.layers[li].input_layernorm = originals[li]
+                _layer_fn(model, li).input_layernorm = originals[li]
 
         # Accumulate per-layer activations (average across all captured positions)
         bucket = suppress_acts if kind == "suppress" else retain_acts
@@ -474,11 +552,6 @@ class AbliterationCorrector:
         Returns:
             AbliterationResult with per-matrix records and a human-readable .report().
         """
-        try:
-            from mlx_lm import load as mlx_load
-        except ImportError:
-            raise RuntimeError("mlx_lm required — install with: pip install mlx-lm") from None
-
         def _prog(msg: str) -> None:
             if progress_fn:
                 progress_fn(msg)
@@ -505,7 +578,7 @@ class AbliterationCorrector:
 
         # ── 2. load model for probing ─────────────────────────────────────────
         _prog("loading model for probing…")
-        model, tokenizer = mlx_load(str(self.model_path))
+        model, tokenizer, _generate_fn, _layer_fn = _load_model_for_wsp(str(self.model_path))
 
         cfg_path = self.model_path / "config.json"
         cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
@@ -529,6 +602,8 @@ class AbliterationCorrector:
             progress_fn=_prog,
             probe_mode=probe_mode,
             full_response_tokens=full_response_tokens,
+            _generate_fn=_generate_fn,
+            _layer_fn=_layer_fn,
         )
 
         if probe.n_suppress < 1:
