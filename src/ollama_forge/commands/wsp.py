@@ -436,6 +436,60 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
     if quantize:
         print(f"  Quantise: {q_bits}-bit, group size {q_group_size}", file=sys.stderr)
 
+    # Pre-flight: check for quantization formats MLX cannot dequantize (NVFP4, FP8 block).
+    # These need an external dequantization pass before MLX conversion.
+    _quant_blocker: str | None = None
+    _arch_blocker: str | None = None
+    _check_local: str | None = None
+    if Path(hf_path).is_dir():
+        _check_local = hf_path
+    else:
+        _hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+        _slug = "models--" + hf_path.replace("/", "--")
+        _snaps = _hf_cache / _slug / "snapshots"
+        if _snaps.is_dir():
+            for _snap in sorted(_snaps.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if (_snap / "config.json").exists():
+                    _check_local = str(_snap)
+                    break
+    if _check_local:
+        _cfg_text = Path(_check_local) / "config.json"
+        if _cfg_text.exists():
+            _cfg = json.loads(_cfg_text.read_text())
+            _qcfg = _cfg.get("quantization_config", {})
+            _quant_algo = (_qcfg.get("quant_algo") or _qcfg.get("quant_method") or "").upper()
+            if any(x in _quant_algo for x in ("NVFP4", "FP4", "FP8")):
+                _quant_blocker = _quant_algo
+            _mtype = _cfg.get("model_type", "") or (
+                _cfg.get("text_config", {}) or {}
+            ).get("model_type", "")
+            _unsupported_archs = {
+                "inkling2_loop": (
+                    "inkling2_loop has 146 extra controller weights (loop-gating tensors) "
+                    "that mlx_lm and mlx_vlm do not support. The architecture is not a simple "
+                    "rename of inkling2 — the loop parameters must be loaded too."
+                ),
+            }
+            if _mtype in _unsupported_archs:
+                _arch_blocker = _unsupported_archs[_mtype]
+    if _quant_blocker or _arch_blocker:
+        print("Error: this model cannot be converted to MLX format yet:", file=sys.stderr)
+        if _arch_blocker:
+            print(f"  Architecture: {_arch_blocker}", file=sys.stderr)
+        if _quant_blocker:
+            print(
+                f"  Weights: {_quant_blocker} quantization (FP4/FP8 block format) requires "
+                "dequantization before MLX can load the safetensors. This is not yet "
+                "implemented in the forge.",
+                file=sys.stderr,
+            )
+        print(
+            "\nTo run WSP on this model today, use it via its Ollama tag directly:\n"
+            "  ollama run <model-tag>  # or forge wsp diagnose <model-tag>",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         convert(
             hf_path=hf_path,
@@ -542,7 +596,7 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
             print(
                 f"  mlx_vlm: {orig_type!r} not supported — retrying as {base_type!r} "
-                f"(weights are identical; loop runs in Ollama runtime).",
+                f"(stripping variant suffix; standard transformer weights should be loadable).",
                 file=sys.stderr,
             )
             with tempfile.TemporaryDirectory(prefix="forge_vlm_patch_") as tmp:
