@@ -414,6 +414,112 @@ def _cmd_abliterate(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     return 0
 
 
+def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Convert a HuggingFace model (or local safetensors dir) to MLX format."""
+    hf_path = args.hf_path
+    output = getattr(args, "output", None) or hf_path.replace("/", "--") + "-mlx"
+    quantize = getattr(args, "quantize", False)
+    q_bits = getattr(args, "q_bits", 4)
+    q_group_size = getattr(args, "q_group_size", 64)
+    dtype = getattr(args, "dtype", None)
+    trust_remote_code = getattr(args, "trust_remote_code", False)
+
+    try:
+        from mlx_lm import convert
+    except ImportError:
+        print("Error: mlx_lm not available. Run: uv add mlx-lm", file=sys.stderr)
+        return 1
+
+    print(f"Converting {hf_path} → {output}", file=sys.stderr)
+    if quantize:
+        print(f"  Quantise: {q_bits}-bit, group size {q_group_size}", file=sys.stderr)
+
+    try:
+        convert(
+            hf_path=hf_path,
+            mlx_path=output,
+            quantize=quantize,
+            q_bits=q_bits,
+            q_group_size=q_group_size,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
+    except Exception as exc:
+        msg = str(exc)
+        print(f"Error: {msg}", file=sys.stderr)
+        if "not supported" in msg:
+            print(
+                "\nArchitecture not in mlx_lm's registry. "
+                "Check https://github.com/ml-explore/mlx-lm for a newer release.",
+                file=sys.stderr,
+            )
+        return 1
+
+    print(f"\nMLX model saved to {output}")
+    print(f"Next:  forge wsp abliterate {output} --output {output}-abliterated")
+    return 0
+
+
+def _cmd_to_gguf(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Convert an MLX safetensors directory to GGUF (for Ollama / llama.cpp)."""
+    import json
+    import subprocess
+
+    mlx_path = Path(args.mlx_path).resolve()
+    output = getattr(args, "output", None) or str(mlx_path.parent / (mlx_path.name + ".gguf"))
+    ollama_name = getattr(args, "ollama_name", None)
+
+    config_path = mlx_path / "config.json"
+    if not config_path.exists():
+        print(f"Error: {config_path} not found — is {mlx_path} an MLX model directory?", file=sys.stderr)
+        return 1
+
+    # Prefer llama.cpp converter (supports all architectures, handles quantized weights)
+    llama_script = Path(__file__).parent.parent.parent.parent / "llama.cpp" / "convert_hf_to_gguf.py"
+    if llama_script.exists():
+        print(f"Using llama.cpp converter: {llama_script.name}", file=sys.stderr)
+        result = subprocess.run(
+            [sys.executable, str(llama_script), str(mlx_path), "--outfile", output],
+            check=False,
+        )
+        if result.returncode != 0:
+            return result.returncode
+    else:
+        # Fallback: mlx_lm.gguf (unquantized LLaMA-style only)
+        with open(config_path) as f:
+            config = json.load(f)
+        if config.get("quantization"):
+            print(
+                "Error: mlx_lm.gguf does not support quantized models. "
+                "Put llama.cpp/convert_hf_to_gguf.py on PATH or use --llama-cpp-dir.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            import mlx.core as mx
+            from mlx_lm.gguf import convert_to_gguf
+        except ImportError:
+            print("Error: mlx_lm not available. Run: uv add mlx-lm", file=sys.stderr)
+            return 1
+        weights: dict = {}
+        for sf in sorted(mlx_path.glob("*.safetensors")):
+            weights.update(mx.load(str(sf)))
+        convert_to_gguf(mlx_path, weights, config, output)
+
+    print(f"\nGGUF saved to {output}")
+    if ollama_name:
+        print(f"Loading into Ollama as '{ollama_name}'…", file=sys.stderr)
+        mf = f"FROM {output}\n"
+        mf_path = str(mlx_path.parent / (mlx_path.name + ".Modelfile"))
+        Path(mf_path).write_text(mf)
+        result = subprocess.run(["ollama", "create", ollama_name, "-f", mf_path], check=False)
+        if result.returncode == 0:
+            print(f"Ollama model '{ollama_name}' ready.")
+        return result.returncode
+    print(f"To load into Ollama:  forge convert --gguf {output} --name <model-name>")
+    return 0
+
+
 def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     p = subparsers.add_parser(
         "wsp",
@@ -750,6 +856,93 @@ def register(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "(overrides the built-in retain bank).",
     )
     p_abl.set_defaults(handler=_cmd_abliterate)
+
+    # ── to-mlx ────────────────────────────────────────────────────────────────
+    p_tml = sub.add_parser(
+        "to-mlx",
+        help="Convert a HuggingFace model to MLX safetensors (required before WSP editing)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Download and convert any mlx_lm-supported HuggingFace model to MLX format.\n"
+            "The resulting directory can then be passed to forge wsp abliterate.\n\n"
+            "Note: the model's architecture must be in mlx_lm's registry.  Run\n"
+            "  mlx_lm.convert --help  or visit https://github.com/ml-explore/mlx-lm\n"
+            "to see the full list.  Custom architectures (e.g. inkling2_loop) require a\n"
+            "newer mlx_lm release that adds support for them."
+        ),
+    )
+    p_tml.add_argument("hf_path", metavar="HF_REPO_OR_PATH", help="HuggingFace repo id or local safetensors directory")
+    p_tml.add_argument(
+        "--output",
+        metavar="DIR",
+        help="Output directory for the MLX model (default: <hf_path>-mlx)",
+    )
+    p_tml.add_argument(
+        "--quantize", "-q",
+        action="store_true",
+        help="Quantise the weights after conversion (uses --q-bits)",
+    )
+    p_tml.add_argument(
+        "--q-bits",
+        dest="q_bits",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Bits per weight when --quantize is set (default: 4)",
+    )
+    p_tml.add_argument(
+        "--q-group-size",
+        dest="q_group_size",
+        type=int,
+        default=64,
+        metavar="N",
+        help="Group size for quantisation (default: 64)",
+    )
+    p_tml.add_argument(
+        "--dtype",
+        choices=["float16", "bfloat16", "float32"],
+        default=None,
+        help="Cast non-quantised weights to this dtype (default: from config)",
+    )
+    p_tml.add_argument(
+        "--trust-remote-code",
+        dest="trust_remote_code",
+        action="store_true",
+        help="Allow custom model code from the HuggingFace repo",
+    )
+    p_tml.set_defaults(handler=_cmd_to_mlx)
+
+    # ── to-gguf ───────────────────────────────────────────────────────────────
+    p_tgf = sub.add_parser(
+        "to-gguf",
+        help="Convert an MLX model directory to GGUF (for Ollama / llama.cpp)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Convert an MLX safetensors directory (e.g. from forge wsp abliterate) to\n"
+            "a GGUF file ready for Ollama.\n\n"
+            "Uses llama.cpp/convert_hf_to_gguf.py when available (supports all architectures\n"
+            "and quantized weights), otherwise falls back to mlx_lm.gguf (unquantized\n"
+            "LLaMA-compatible models only).\n\n"
+            "Full WSP pipeline:\n"
+            "  forge wsp to-mlx  <hf-repo>  --output ./model-mlx\n"
+            "  forge wsp abliterate ./model-mlx --output ./model-mlx-abliterated\n"
+            "  forge wsp to-gguf  ./model-mlx-abliterated --output model.gguf --ollama-name my-model\n"
+            "  ollama run my-model"
+        ),
+    )
+    p_tgf.add_argument("mlx_path", metavar="MLX_DIR", help="MLX model directory (contains config.json + *.safetensors)")
+    p_tgf.add_argument(
+        "--output",
+        metavar="PATH",
+        help="Output GGUF file path (default: <MLX_DIR>.gguf)",
+    )
+    p_tgf.add_argument(
+        "--ollama-name",
+        dest="ollama_name",
+        metavar="NAME",
+        help="If set, automatically load the GGUF into Ollama under this name after conversion",
+    )
+    p_tgf.set_defaults(handler=_cmd_to_gguf)
 
     p.set_defaults(handler=lambda parser, args: (p.print_help(), 0)[1])
     return p
