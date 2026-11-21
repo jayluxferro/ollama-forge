@@ -416,6 +416,8 @@ def _cmd_abliterate(parser: argparse.ArgumentParser, args: argparse.Namespace) -
 
 def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     """Convert a HuggingFace model (or local safetensors dir) to MLX format."""
+    import json
+
     hf_path = args.hf_path
     output = getattr(args, "output", None) or hf_path.replace("/", "--") + "-mlx"
     quantize = getattr(args, "quantize", False)
@@ -476,14 +478,67 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             )
             return 1
 
-        cmd = [vlm_py, "-m", "mlx_vlm.convert", "--hf-path", hf_path, "--mlx-path", output]
-        if quantize:
-            cmd += ["--quantize", "--q-bits", str(q_bits), "--q-group-size", str(q_group_size)]
-        if trust_remote_code:
-            cmd += ["--trust-remote-code"]
-        result = subprocess.run(cmd, check=False)
-        if result.returncode != 0:
-            return result.returncode
+        def _vlm_convert(src: str) -> int:
+            cmd = [vlm_py, "-m", "mlx_vlm", "convert", "--hf-path", src, "--mlx-path", output]
+            if quantize:
+                cmd += ["--quantize", "--q-bits", str(q_bits), "--q-group-size", str(q_group_size)]
+            if trust_remote_code:
+                cmd += ["--trust-remote-code"]
+            return subprocess.run(cmd, check=False).returncode
+
+        rc = _vlm_convert(hf_path)
+        if rc != 0:
+            # mlx_vlm also rejected the model — try patching model_type to base variant.
+            # e.g. "inkling2_loop" → "inkling2": same weights, loop runs in Ollama runtime.
+            import os
+            import tempfile
+
+            # Resolve hf_path to a local snapshot if it's a HF repo id
+            local_src: str | None = None
+            if os.path.isdir(hf_path):
+                local_src = hf_path
+            else:
+                try:
+                    from huggingface_hub import snapshot_download
+                    local_src = snapshot_download(hf_path, local_files_only=True)
+                except Exception:
+                    pass
+
+            if local_src is None:
+                print(
+                    "Error: mlx_vlm could not convert this architecture. The model is not "
+                    "in the local HF cache; re-download it and try again.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            cfg_path = Path(local_src) / "config.json"
+            if not cfg_path.exists():
+                return rc  # no config to patch
+
+            cfg = json.loads(cfg_path.read_text())
+            orig_type = cfg.get("model_type", "")
+            # Strip loop/variant suffixes to get the base model family name
+            base_type = orig_type.replace("_loop", "").replace("_looped", "")
+            if base_type == orig_type:
+                return rc  # no variant suffix to strip
+
+            print(
+                f"  mlx_vlm: {orig_type!r} not supported — retrying as {base_type!r} "
+                f"(weights are identical; loop runs in Ollama runtime).",
+                file=sys.stderr,
+            )
+            with tempfile.TemporaryDirectory(prefix="forge_vlm_patch_") as tmp:
+                tmp_path = Path(tmp)
+                patched_cfg = dict(cfg)
+                patched_cfg["model_type"] = base_type
+                (tmp_path / "config.json").write_text(json.dumps(patched_cfg, indent=2))
+                for f in Path(local_src).iterdir():
+                    if f.name != "config.json":
+                        (tmp_path / f.name).symlink_to(f)
+                rc = _vlm_convert(str(tmp_path))
+        if rc != 0:
+            return rc
 
     print(f"\nMLX model saved to {output}")
     print(f"Next:  forge wsp abliterate {output} --output {output}-abliterated")

@@ -97,6 +97,42 @@ class _CapturingNorm:
 
 # ── probe ─────────────────────────────────────────────────────────────────────
 
+def _patch_model_type_if_needed(model_path: str) -> str:
+    """If config.json has an unsupported variant suffix (e.g. inkling2_loop), create a temp
+    overlay dir with model_type stripped to the base name and return that path instead."""
+    import tempfile
+
+    cfg_path = Path(model_path) / "config.json"
+    if not cfg_path.exists():
+        return model_path
+    cfg = json.loads(cfg_path.read_text())
+    orig = cfg.get("model_type", "")
+    base = orig.replace("_loop", "").replace("_looped", "")
+    if base == orig:
+        return model_path  # no suffix to strip
+
+    # Try the base type to see if mlx_vlm knows it
+    try:
+        import types
+
+        from mlx_vlm.utils import get_model_and_args  # type: ignore
+
+        fake_cfg = types.SimpleNamespace(model_type=base)
+        get_model_and_args(config=fake_cfg, model_path=model_path)
+    except (ImportError, ValueError):
+        return model_path  # no luck — let the caller handle the error
+
+    tmp = tempfile.mkdtemp(prefix="forge_vlm_patch_")
+    patched = dict(cfg)
+    patched["model_type"] = base
+    (Path(tmp) / "config.json").write_text(json.dumps(patched, indent=2))
+    for f in Path(model_path).iterdir():
+        if f.name != "config.json":
+            (Path(tmp) / f.name).symlink_to(f)
+    print(f"[vlm-probe] patching model_type {orig!r} → {base!r}", file=sys.stderr)
+    return tmp
+
+
 def run_probe(
     model_path: str,
     suppress_bank: list[str],
@@ -110,6 +146,7 @@ def run_probe(
 
     if progress:
         print(f"[vlm-probe] loading {model_path} …", file=sys.stderr)
+    model_path = _patch_model_type_if_needed(model_path)
     model, processor = load(model_path)
     cfg = model.config.__dict__ if hasattr(model, "config") else {}
     n_layers = cfg.get("num_hidden_layers", cfg.get("num_layers", 28))
