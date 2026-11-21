@@ -498,16 +498,33 @@ def _cmd_to_mlx(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
             if os.path.isdir(hf_path):
                 local_src = hf_path
             else:
+                # snapshot_download can throw IncompleteSnapshotError when minor files
+                # (README, .gitattributes) are missing.  Fall back to scanning the HF
+                # cache directory directly for a snapshot that has config.json.
                 try:
                     from huggingface_hub import snapshot_download
-                    local_src = snapshot_download(hf_path, local_files_only=True)
+                    local_src = snapshot_download(
+                        hf_path,
+                        local_files_only=True,
+                        ignore_patterns=["*.md", ".gitattributes"],
+                    )
                 except Exception:
                     pass
+                if local_src is None:
+                    # Scan ~/.cache/huggingface/hub manually
+                    cache_dir = Path(os.path.expanduser("~/.cache/huggingface/hub"))
+                    slug = "models--" + hf_path.replace("/", "--")
+                    snaps_dir = cache_dir / slug / "snapshots"
+                    if snaps_dir.is_dir():
+                        for snap in sorted(snaps_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                            if (snap / "config.json").exists():
+                                local_src = str(snap)
+                                break
 
             if local_src is None:
                 print(
-                    "Error: mlx_vlm could not convert this architecture. The model is not "
-                    "in the local HF cache; re-download it and try again.",
+                    "Error: mlx_vlm could not convert this architecture and the model is "
+                    "not in the local HF cache; re-download with network access and retry.",
                     file=sys.stderr,
                 )
                 return 1
